@@ -6878,6 +6878,10 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
     auto GV = G->getGlobal();
     unsigned OpFlags =
         Subtarget->classifyGlobalFunctionReference(GV, getTargetMachine());
+    // safepoint stub is local, and safepoint call will still be got load.
+    if (CalleeFunc->isCangjieSafepointStub() ||
+        CalleeFunc->isCangjieSafePoint())
+      OpFlags = AArch64II::MO_NO_FLAG;
     if (OpFlags & AArch64II::MO_GOT) {
       Callee = DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, OpFlags);
       Callee = DAG.getNode(AArch64ISD::LOADgot, DL, PtrVT, Callee);
