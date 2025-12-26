@@ -584,6 +584,8 @@ static bool isCangjieSpecificCall(const MachineInstr *MI) {
       return true;
 
     const auto *Callee = SO.getCalledFunction();
+    if (SO.getID() == Cangjie::CJStatepointID::Default && Callee && Callee->getName().startswith("CJ_MCC_NewArray"))
+      return true;
     return isCangjieSpecificCallee(MI, Callee);
   }
 
@@ -647,13 +649,8 @@ void MachineOutliner::findCandidates(
         MachineBasicBlock::iterator EndIt = Mapper.InstrList[EndIdx];
         MachineBasicBlock *MBB = StartIt->getParent();
 
-        if (hasStatePointBeforeEnd(StartIt, EndIt))
+        if (hasStatePointBeforeEnd(StartIt, EndIt) || isCangjieSpecificCall(&*EndIt))
            continue;
-
-        if (isCangjieSpecificCall(&*EndIt)) {
-          StringLen--;
-          EndIt = Mapper.InstrList[EndIdx - 1];
-        }
 
         CandidatesForRepeatedSeq.emplace_back(StartIdx, StringLen, StartIt,
                                               EndIt, MBB, FunctionList.size(),

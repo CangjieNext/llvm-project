@@ -7689,7 +7689,7 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
   // FIXME: If the proper fixups for the offset are implemented, this should be
   // possible.
   if (MI.isCFIInstruction())
-    return outliner::InstrType::Legal;
+    return outliner::InstrType::Illegal;
 
   // Don't allow debug values to impact outlining type.
   if (MI.isDebugInstr() || MI.isIndirectDebugValue())

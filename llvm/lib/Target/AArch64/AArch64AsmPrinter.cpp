@@ -1488,6 +1488,9 @@ void AArch64AsmPrinter::emitSafepoint(const MachineInstr &MI) {
 
 bool AArch64AsmPrinter::LowerCangjieSpecificTCRETUR(MCStreamer &OutStreamer, StackMaps &SM,
                                         const MachineInstr &MI) {
+  auto ParentMF = MI.getParent()->getParent();
+  if (ParentMF && !ParentMF->getName().startswith("OUTLINED_FUNCTION"))
+    return false;
   if (CJPipeline) {
     const MachineOperand &CalleeOp = MI.getOperand(0);
     if (CalleeOp.isGlobal()) {
