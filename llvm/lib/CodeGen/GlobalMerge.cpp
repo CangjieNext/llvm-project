@@ -101,6 +101,9 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "global-merge"
+namespace llvm {
+extern cl::opt<bool> CJPipeline;
+}
 
 // FIXME: This is only useful as a last-resort way to disable the pass.
 static cl::opt<bool>
@@ -605,7 +608,7 @@ void GlobalMerge::setMustKeepGlobalVariables(Module &M) {
 }
 
 bool GlobalMerge::doInitialization(Module &M) {
-  if (!EnableGlobalMerge)
+  if (!EnableGlobalMerge || CJPipeline)
     return false;
 
   IsMachO = Triple(M.getTargetTriple()).isOSBinFormatMachO();

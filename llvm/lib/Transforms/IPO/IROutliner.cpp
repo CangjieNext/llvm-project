@@ -33,6 +33,10 @@
 using namespace llvm;
 using namespace IRSimilarity;
 
+namespace llvm {
+extern cl::opt<bool> CJPipeline;
+}
+
 // A command flag to be used for debugging to exclude branches from similarity
 // matching and outlining.
 namespace llvm {
@@ -400,6 +404,11 @@ void OutlinableRegion::reattachCandidate() {
   // incoming blocks to the first block are contained in the region, and there
   // will be nothing to update.
   Instruction *StartInst = (*Candidate->begin()).Inst;
+
+  if (StartBB->hasNPredecessors(1) && StartBB->getSinglePredecessor() != PrevBB) {
+    PrevBB = StartBB->getSinglePredecessor();
+  }
+
   if (isa<PHINode>(StartInst) && !PrevBB->hasNPredecessors(0)) {
     assert(!PrevBB->hasNPredecessorsOrMore(2) &&
          "PrevBB has more than one predecessor. Should be 0 or 1.");
@@ -648,6 +657,8 @@ Function *IROutliner::createFunction(Module &M, OutlinableGroup &Group,
   Group.OutlinedFunction = Function::Create(
       Group.OutlinedFunctionType, GlobalValue::InternalLinkage,
       "outlined_ir_func_" + std::to_string(FunctionNameSuffix), M);
+  if (CJPipeline)
+    Group.OutlinedFunction->setGC("cangjie");
 
   // Transfer the swifterr attribute to the correct function parameter.
   if (Group.SwiftErrorArgument)
@@ -800,7 +811,8 @@ static void findConstants(IRSimilarityCandidate &C, DenseSet<unsigned> &NotSame,
 static void mapInputsToGVNs(IRSimilarityCandidate &C,
                             SetVector<Value *> &CurrentInputs,
                             const DenseMap<Value *, Value *> &OutputMappings,
-                            std::vector<unsigned> &EndInputNumbers) {
+                            std::vector<unsigned> &EndInputNumbers,
+                            MapVector<Value *, Value *> *InputBasePtr = nullptr) {
   // Get the Global Value Number for each input.  We check if the Value has been
   // replaced by a different value at output, and use the original value before
   // replacement.
@@ -809,6 +821,8 @@ static void mapInputsToGVNs(IRSimilarityCandidate &C,
     if (OutputMappings.find(Input) != OutputMappings.end())
       Input = OutputMappings.find(Input)->second;
     assert(C.getGVN(Input) && "Could not find a numbering for the given input");
+    if (InputBasePtr && InputBasePtr->count(Input))
+      EndInputNumbers.push_back(C.getGVN(InputBasePtr->lookup(Input)).value());
     EndInputNumbers.push_back(C.getGVN(Input).value());
   }
 }
@@ -824,12 +838,15 @@ static void mapInputsToGVNs(IRSimilarityCandidate &C,
 static void
 remapExtractedInputs(const ArrayRef<Value *> ArgInputs,
                      const DenseMap<Value *, Value *> &OutputMappings,
-                     SetVector<Value *> &RemappedArgInputs) {
+                     SetVector<Value *> &RemappedArgInputs,
+                     MapVector<Value *, Value *> *InputBasePtr = nullptr) {
   // Get the global value number for each input that will be extracted as an
   // argument by the code extractor, remapping if needed for reloaded values.
   for (Value *Input : ArgInputs) {
     if (OutputMappings.find(Input) != OutputMappings.end())
       Input = OutputMappings.find(Input)->second;
+    if (InputBasePtr && InputBasePtr->count(Input))
+      RemappedArgInputs.insert(InputBasePtr->lookup(Input));
     RemappedArgInputs.insert(Input);
   }
 }
@@ -870,10 +887,35 @@ static void getCodeExtractorArguments(
   SetVector<Value *> OverallInputs, PremappedInputs, SinkCands, HoistCands,
       DummyOutputs;
 
+  auto StartBB = Region.StartBB;
+  Function *OldFunction = StartBB->getParent();
+  MapVector<Value *, Value *> InputsBasePtrCands;
+  MapVector<Value *, Value *> OutputsBasePtrCands;
+
+  auto insertStructBaseInArguments = [&](SetVector<Value *> &Values, MapVector<Value *, Value *> &BasePtrCands) {
+      for (Value *V : Values) {
+        if (isa<PointerType>(V->getType()) &&
+            V->getType()->getNonOpaquePointerElementType()->isStructTy()) {
+          // if V is a struct ptr in arguments, it cannot be the first one cause its
+          // base ptr must be in front of itself. Therefor, I starts from 1.
+          size_t I = 1;
+          for (; I < OldFunction->arg_size(); ++I) {
+            if (OldFunction->getArg(I) == dyn_cast<Argument>(V)) {
+              break;
+            }
+          }
+
+          if (I < OldFunction->arg_size())
+            BasePtrCands[V] = OldFunction->getArg(I - 1);
+        }
+    }
+  };
+
   // Use the code extractor to get the inputs and outputs, without sunken
   // allocas or removing llvm.assumes.
   CodeExtractor *CE = Region.CE;
   CE->findInputsOutputs(OverallInputs, DummyOutputs, SinkCands);
+  insertStructBaseInArguments(OverallInputs, InputsBasePtrCands);
   assert(Region.StartBB && "Region must have a start BasicBlock!");
   Function *OrigF = Region.StartBB->getParent();
   CodeExtractorAnalysisCache CEAC(*OrigF);
@@ -890,6 +932,30 @@ static void getCodeExtractorArguments(
   CE->findAllocas(CEAC, SinkCands, HoistCands, Dummy);
   CE->findInputsOutputs(PremappedInputs, Outputs, SinkCands);
 
+  insertStructBaseInArguments(PremappedInputs, InputsBasePtrCands);
+  insertStructBaseInArguments(Outputs, OutputsBasePtrCands);
+
+  SetVector<Value *> NewOverallInputs, NewPremappedInputs, TmpOutputs;
+  for (Value *value: PremappedInputs) {
+    if (InputsBasePtrCands.count(value))
+      NewPremappedInputs.insert(InputsBasePtrCands.lookup(value));
+    NewPremappedInputs.insert(value);
+  }
+  for (Value *value: OverallInputs) {
+    if (InputsBasePtrCands.count(value))
+      NewOverallInputs.insert(InputsBasePtrCands.lookup(value));
+    NewOverallInputs.insert(value);
+  }
+  for (Value *value: Outputs) {
+    if (OutputsBasePtrCands.count(value))
+      TmpOutputs.insert(OutputsBasePtrCands.lookup(value));
+    TmpOutputs.insert(value);
+  }
+
+  OverallInputs = NewOverallInputs;
+  PremappedInputs = NewPremappedInputs;
+  Outputs = TmpOutputs;
+
   // TODO: Support regions with sunken allocas: values whose lifetimes are
   // contained completely within the outlined region.  These are not guaranteed
   // to be the same in every region, so we must elevate them all to arguments
@@ -902,14 +968,14 @@ static void getCodeExtractorArguments(
 
   findConstants(C, NotSame, InputGVNs);
 
-  mapInputsToGVNs(C, OverallInputs, OutputMappings, InputGVNs);
+  mapInputsToGVNs(C, OverallInputs, OutputMappings, InputGVNs, &InputsBasePtrCands);
 
   remapExtractedInputs(PremappedInputs.getArrayRef(), OutputMappings,
                        ArgInputs);
 
   // Sort the GVNs, since we now have constants included in the \ref InputGVNs
   // we need to make sure they are in a deterministic order.
-  stable_sort(InputGVNs);
+  // stable_sort(InputGVNs);
 }
 
 /// Look over the inputs and map each input argument to an argument in the
@@ -2690,14 +2756,14 @@ void IROutliner::updateOutputMapping(OutlinableRegion &Region,
   }
 }
 
-bool IROutliner::extractSection(OutlinableRegion &Region) {
+bool IROutliner::extractSection(OutlinableRegion &Region, OutlinableGroup *CurrentGroup) {
   SetVector<Value *> ArgInputs, Outputs, SinkCands;
   assert(Region.StartBB && "StartBB for the OutlinableRegion is nullptr!");
   BasicBlock *InitialStart = Region.StartBB;
   Function *OrigF = Region.StartBB->getParent();
   CodeExtractorAnalysisCache CEAC(*OrigF);
   Region.ExtractedFunction =
-      Region.CE->extractCodeRegion(CEAC, ArgInputs, Outputs);
+      Region.CE->extractCodeRegion(CEAC, ArgInputs, Outputs, &CurrentGroup->ArgumentTypes);
 
   // If the extraction was successful, find the BasicBlock, and reassign the
   // OutlinableRegion blocks
@@ -2946,7 +3012,7 @@ unsigned IROutliner::doOutline(Module &M) {
       OS->CE = new (ExtractorAllocator.Allocate())
           CodeExtractor(BE, nullptr, false, nullptr, nullptr, nullptr, false,
                         false, nullptr, "outlined");
-      bool FunctionOutlined = extractSection(*OS);
+      bool FunctionOutlined = extractSection(*OS, &CurrentGroup);
       if (FunctionOutlined) {
         unsigned StartIdx = OS->Candidate->getStartIdx();
         unsigned EndIdx = OS->Candidate->getEndIdx();

@@ -166,7 +166,7 @@ public:
     /// \returns zero when called on a CodeExtractor instance where isEligible
     /// returns false.
     Function *extractCodeRegion(const CodeExtractorAnalysisCache &CEAC,
-                                ValueSet &Inputs, ValueSet &Outputs);
+                                ValueSet &Inputs, ValueSet &Outputs, std::vector<Type *> *AggArgTypes = nullptr);
 
     /// Verify that assumption cache isn't stale after a region is extracted.
     /// Returns true when verifier finds errors. AssumptionCache is passed as
