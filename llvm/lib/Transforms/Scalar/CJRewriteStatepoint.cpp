@@ -452,7 +452,7 @@ static Value *findBaseDefiningValue(Value *I, DefiningValueMapTy &Cache,
     return findBaseDefiningValueOfVector(I, Cache, KnownBases);
 
   if (auto *Arg = dyn_cast<Argument>(I)) {
-    if (!Arg->getType()->isOpaquePointerTy()) {
+    if (!Arg->getType()->isOpaquePointerTy() && !Arg->getParent()->getName().startswith("outlined_ir_func")) {
       // The backend determines whether there is a baseptr based on the frontend
       // `mut` attribute. In this case, addrspace(1)* may be a derived pointer
       // and does not have the typeinfio* header, and base pointer is required

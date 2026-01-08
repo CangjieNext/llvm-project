@@ -471,6 +471,31 @@ IRSimilarityCandidate::IRSimilarityCandidate(unsigned StartIdx, unsigned Len,
     NumberToValue.try_emplace(LocalValNumber, BB);
     LocalValNumber++;
   }
+
+  auto OldFunction = FirstInst->Inst->getFunction();
+
+  for (auto &[Number, Value] : NumberToValue) {
+    if (isa<PointerType>(Value->getType()) &&
+        Value->getType()->getNonOpaquePointerElementType()->isStructTy()) {
+      // if V is a struct ptr in arguments, it cannot be the first one cause its
+      // base ptr must be in front of itself. Therefor, I starts from 1.
+      // errs() << "IS Struct Pointer.\n";
+      size_t I = 1;
+      for (; I < OldFunction->arg_size(); ++I) {
+        if (OldFunction->getArg(I) == dyn_cast<Argument>(Value)) {
+          break;
+        }
+      }
+      if (I < OldFunction->arg_size()) {
+        auto BasePtrCand = OldFunction->getArg(I - 1);
+        if (ValueToNumber.find(BasePtrCand) != ValueToNumber.end())
+          continue;
+        ValueToNumber.try_emplace(BasePtrCand, LocalValNumber);
+        NumberToValue.try_emplace(LocalValNumber, BasePtrCand);
+        LocalValNumber++;
+      }
+    }
+  }
 }
 
 bool IRSimilarityCandidate::isSimilar(const IRSimilarityCandidate &A,

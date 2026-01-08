@@ -1420,7 +1420,7 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   // be found where extracting the regions into their own function will decrease
   // the size of the program, we extract the regions, a deduplicate the
   // structurally similar regions.
-  if (EnableIROutliner)
+  if (EnableIROutliner || CJPipeline)
     MPM.addPass(IROutlinerPass());
 
   // Merge functions if requested.

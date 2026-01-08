@@ -697,12 +697,8 @@ void CodeExtractor::insertStructBaseInArguments(Function *F, ValueSet &Values,
         }
       }
 
-      if (I < F->arg_size()) {
+      if (I < F->arg_size())
         BasePtrCands[V] = F->getArg(I - 1);
-      } else {
-        Type *NullBasePtr = Type::getInt8PtrTy(F->getContext(), 1);
-        BasePtrCands[V] = Constant::getNullValue(NullBasePtr);
-      }
     }
   }
 }
@@ -1834,9 +1830,43 @@ CodeExtractor::extractCodeRegion(const CodeExtractorAnalysisCache &CEAC) {
   return extractCodeRegion(CEAC, Inputs, Outputs);
 }
 
+static bool IsParamTypesSameWithAggArgs(const SetVector<llvm::Value *> &Inputs,
+                          const SetVector<llvm::Value *> &Outputs,
+                          const MapVector<llvm::Value *, llvm::Value *> &InputsBasePtrCands,
+                          const MapVector<llvm::Value *, llvm::Value *> &OutputsBasePtrCands,
+                          std::vector<Type *> *AggArgs) {
+  if (!AggArgs)
+    return true;
+  std::vector<Type *> ParamTy;
+  for (Value *value : Inputs) {
+    if (InputsBasePtrCands.count(value))
+      ParamTy.push_back(InputsBasePtrCands.lookup(value)->getType());
+    ParamTy.push_back(value->getType());
+  }
+
+  // Add the types of the output values to the function's argument list. If the
+  // value is a struct, add its base value's type as well.
+  for (Value *output : Outputs) {
+    if (OutputsBasePtrCands.count(output))
+      ParamTy.push_back(OutputsBasePtrCands.lookup(output)->getType());
+    ParamTy.push_back(PointerType::getUnqual(output->getType()));
+  }
+
+  if (ParamTy.size() != AggArgs->size()) 
+    return false;
+  for (size_t i = 0; i < ParamTy.size(); ++i) {
+    // errs() << "Type: " << *ParamTy[i] << "," << *AggArgs->at(i) << "\n";
+    if (ParamTy[i] != AggArgs->at(i)) {
+      // errs() << "ParamTy != AggArgType.\n";
+      return false;
+    }
+  }
+  return true;
+}
+
 Function *
 CodeExtractor::extractCodeRegion(const CodeExtractorAnalysisCache &CEAC,
-                                 ValueSet &Inputs, ValueSet &Outputs) {
+                                 ValueSet &Inputs, ValueSet &Outputs, std::vector<Type *> *AggArgTypes) {
   if (!isEligible())
     return nullptr;
 
@@ -1906,6 +1936,35 @@ CodeExtractor::extractCodeRegion(const CodeExtractorAnalysisCache &CEAC,
   severSplitPHINodesOfEntry(header);
   severSplitPHINodesOfExits(ExitBlocks);
 
+  ValueSet SinkingCands, HoistingCands;
+  BasicBlock *CommonExit = nullptr;
+  findAllocas(CEAC, SinkingCands, HoistingCands, CommonExit);
+  assert(HoistingCands.empty() || CommonExit);
+
+  ValueSet BitcastInstrs;
+  ValueMap InputsBasePtrCands;
+  ValueMap OutputsBasePtrCands;
+  // Find Inputs to, Outputs from the code region.
+  if (CJPipeline) {
+    // BitcastInstrs is used to record bitcasts that are derived pointers but
+    // not structs.
+    if (!findInputsOutputs(Inputs, Outputs, SinkingCands, BitcastInstrs)) {
+      return nullptr;
+    }
+
+    insertStructBaseInArguments(oldFunction, Inputs, InputsBasePtrCands);
+    insertStructBaseInArguments(oldFunction, Outputs, OutputsBasePtrCands);
+
+    if (!BitcastInstrs.empty())
+      return nullptr;
+
+  } else {
+    findInputsOutputs(Inputs, Outputs, SinkingCands);
+  }
+
+  if (!IsParamTypesSameWithAggArgs(Inputs, Outputs, InputsBasePtrCands, OutputsBasePtrCands, AggArgTypes))
+    return nullptr;
+
   // This takes place of the original loop
   BasicBlock *codeReplacer = BasicBlock::Create(header->getContext(),
                                                 "codeRepl", oldFunction, header);
@@ -1930,29 +1989,6 @@ CodeExtractor::extractCodeRegion(const CodeExtractorAnalysisCache &CEAC,
     });
   }
   newFuncRoot->getInstList().push_back(BranchI);
-
-  ValueSet SinkingCands, HoistingCands;
-  BasicBlock *CommonExit = nullptr;
-  findAllocas(CEAC, SinkingCands, HoistingCands, CommonExit);
-  assert(HoistingCands.empty() || CommonExit);
-
-  ValueSet BitcastInstrs;
-  ValueMap InputsBasePtrCands;
-  ValueMap OutputsBasePtrCands;
-  // Find Inputs to, Outputs from the code region.
-  if (CJPipeline) {
-    // BitcastInstrs is used to record bitcasts that are derived pointers but
-    // not structs.
-    if (!findInputsOutputs(Inputs, Outputs, SinkingCands, BitcastInstrs)) {
-      return nullptr;
-    }
-    // Establish maps from derived struct ptr to its base ptr in Inputs and
-    // Outputs, respectively.
-    insertStructBaseInArguments(oldFunction, Inputs, InputsBasePtrCands);
-    insertStructBaseInArguments(oldFunction, Outputs, OutputsBasePtrCands);
-  } else {
-    findInputsOutputs(Inputs, Outputs, SinkingCands);
-  }
 
   // Now sink all instructions which only have non-phi uses inside the region.
   // Group the allocas at the start of the block, so that any bitcast uses of

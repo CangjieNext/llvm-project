@@ -297,7 +297,7 @@ private:
   ///
   /// \param [in] Region - The region to be extracted into its own function.
   /// \returns True if it was successfully outlined.
-  bool extractSection(OutlinableRegion &Region);
+  bool extractSection(OutlinableRegion &Region, OutlinableGroup *CurrentGroup = nullptr);
 
   /// For the similarities found, and the extracted sections, create a single
   /// outlined function with appropriate output blocks as necessary.
