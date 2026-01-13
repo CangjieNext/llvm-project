@@ -1210,8 +1210,23 @@ Function *CodeExtractor::constructFunction(const ValueSet &Inputs,
           SourceElementType, newFunction->getArg(ArgNo),
           ConstantInt::get(M->getContext(), APInt(32, Offset)), "pi_gep",
           InsertBefore);
-      RewriteVal = new BitCastInst(NewGEP, Bitcast->getType(), "pi_bitcastgep",
-                                   InsertBefore);
+      Value *CastSrc = NewGEP;
+      Type *DestTy = Bitcast->getType();
+      auto *SrcPtrTy =
+          cast<PointerType>(CastSrc->getType()->getScalarType());
+      auto *DstPtrTy = cast<PointerType>(DestTy->getScalarType());
+      if (SrcPtrTy->getAddressSpace() != DstPtrTy->getAddressSpace()) {
+        PointerType *ScalarPtrTy = PointerType::getWithSamePointeeType(
+            SrcPtrTy, DstPtrTy->getAddressSpace());
+        Type *ASCastTy = ScalarPtrTy;
+        if (auto *SrcVTy = dyn_cast<VectorType>(CastSrc->getType()))
+          ASCastTy =
+              VectorType::get(ScalarPtrTy, SrcVTy->getElementCount());
+        CastSrc = new AddrSpaceCastInst(CastSrc, ASCastTy, "pi_addrspacecast",
+                                        InsertBefore);
+      }
+      RewriteVal =
+          new BitCastInst(CastSrc, DestTy, "pi_bitcastgep", InsertBefore);
     }
 
     std::vector<User *> Users(Bitcast->user_begin(), Bitcast->user_end());

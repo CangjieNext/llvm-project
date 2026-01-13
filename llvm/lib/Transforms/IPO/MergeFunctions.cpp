@@ -106,6 +106,7 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Use.h"
@@ -410,6 +411,53 @@ static bool isEligibleForMerging(Function &F) {
   return !F.isDeclaration() && !F.hasAvailableExternallyLinkage();
 }
 
+static bool isRuntimeCallName(StringRef CalleeName)
+{
+  return CalleeName.startswith("CJ_MCC") || CalleeName.startswith("rt$") ||
+         CalleeName.startswith("llvm.cj.");
+}
+
+static bool isKnownRuntimeCallName(StringRef CalleeName)
+{
+  return CalleeName == "CJ_MCC_ThrowException" ||
+         CalleeName == "llvm.cj.throw.exception" ||
+         CalleeName == "llvm.cj.malloc.object" ||
+         CalleeName == "rt$CreateOverflowException_msg" ||
+         CalleeName == "llvm.cj.memset.p0i8";
+}
+
+static bool isStackMapOrStatepointIntrinsic(Function *Callee)
+{
+  if (!Callee || !Callee->isIntrinsic())
+    return false;
+  if (Callee->getIntrinsicID() == Intrinsic::experimental_stackmap)
+    return true;
+  else if (Callee->getIntrinsicID() == Intrinsic::experimental_gc_statepoint)
+    return true;
+  else if (Callee->getIntrinsicID() == Intrinsic::cj_gc_statepoint)
+    return true;
+  else
+    return false;
+}
+
+static bool isAllowedOutlineCallee(Function *Callee)
+{
+  // errs() << "Checking if " << (Callee ? Callee->getName() : "nullptr") << " is allowed for outlining.\n";
+  if (!Callee)
+    return false;
+  StringRef CalleeName = Callee->getName();
+  if (isKnownRuntimeCallName(CalleeName))
+    return true;
+  if (isRuntimeCallName(CalleeName))
+    return false;
+  if (Callee->isIntrinsic())
+    return false;
+  if (CalleeName.isSetDebugLocation() || CalleeName.isGetGCPhase() ||
+      CalleeName.startswith("__builtin_") || CalleeName.startswith("llvm."))
+    return false;
+  return true;
+}
+
 static bool isBBEligibleForOutline(llvm::BasicBlock *BB) {
   if (!BB)
     return false;
@@ -421,22 +469,20 @@ static bool isBBEligibleForOutline(llvm::BasicBlock *BB) {
   if (BB->getParent()->getName().equals("rt$ThrowImplicitException"))
     return false;
   for (auto &Inst : *BB) {
-    if (const GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&Inst)) {
+    if (Inst.isEHPad())
       return false;
-    }
-    if (CallInst *CI = dyn_cast<CallInst>(&Inst)) {
-      Function *Callee = CI->getCalledFunction();
-      if (!Callee)
+    if (isa<InvokeInst>(Inst))
+      return false;
+    if (auto *CB = dyn_cast<CallBase>(&Inst)) {
+      if (CB->isInlineAsm())
         return false;
-      if (Callee->isIntrinsic()) {
+      if (CB->isMustTailCall())
         return false;
-      }
-      if (Callee->getName().isSetDebugLocation() ||
-          Callee->getName().isGetGCPhase() ||
-          Callee->getName().startswith("__builtin_") ||
-          Callee->getName().startswith("llvm.")) {
+      Function *Callee = CB->getCalledFunction();
+      if (isStackMapOrStatepointIntrinsic(Callee))
         return false;
-      }
+      if (!isAllowedOutlineCallee(Callee))
+        return false;
     }
     for (auto &Use : Inst.operands()) {
       if (auto *User = Use.get()) {
@@ -444,7 +490,7 @@ static bool isBBEligibleForOutline(llvm::BasicBlock *BB) {
           // If it's not a Instruction, there's no need to use it in the current
           // context. For example GV.
           if (UserInst->getParent() != BB) {
-            return false;
+            continue;
           }
         }
       }
@@ -456,7 +502,8 @@ static bool isBBEligibleForOutline(llvm::BasicBlock *BB) {
 static bool isThrowExceptionInstruction(llvm::Instruction *Inst) {
   if (auto *CallInst = llvm::dyn_cast<llvm::CallInst>(Inst)) {
     if (auto *Callee = CallInst->getCalledFunction()) {
-      return Callee->getName() == "CJ_MCC_ThrowException";
+      return Callee->getName() == "CJ_MCC_ThrowException" ||
+             Callee->getName() == "llvm.cj.throw.exception";
     }
   }
   return false;
@@ -478,8 +525,6 @@ static void getInputArgs(llvm::BasicBlock *BB, SetVector<Value *> &ArgInputs) {
         } else if (auto *CE = dyn_cast<ConstantExpr>(User)) {
           if (CE->getOpcode() == Instruction::BitCast)
             ArgInputs.insert(CE);
-        } else if (ConstantInt *CI = dyn_cast<ConstantInt>(User)) {
-          ArgInputs.insert(CI);
         }
       }
     }
@@ -491,6 +536,8 @@ static Function* generateFunc(BasicBlock *BB, Function *OrigF) {
   BE.push_back(BB);
   CodeExtractor CE(BE, nullptr, false, nullptr, nullptr, nullptr, false, false,
                    nullptr, "exception_outlined_func");
+  if (!CE.isEligible())
+    return nullptr;
   SetVector<Value *> ArgInputs;
   SetVector<Value *> Outputs;
   getInputArgs(BB, ArgInputs);
@@ -515,7 +562,8 @@ void MergeFunctions::doExceptionOutline(Module &M) {
   }
 
   for (auto &pair : ExceptionBBs) {
-    generateFunc(pair.first, pair.second);
+    if (!generateFunc(pair.first, pair.second))
+      continue;
   }
 }
 
