@@ -107,6 +107,9 @@ const static StdMap<unsigned, StringRef> RuntimeMap {
     {Intrinsic::cj_create_export_handle, "CJ_MCC_CreateExportHandle"},
     {Intrinsic::cj_blackhole, "CJ_LLVM_BlackHole"},
     {Intrinsic::cj_get_lambda_addr, "CJ_MCC_GetJSLambdaAddr"}};
+    {Intrinsic::cj_malloc_local_object, "CJ_MCC_NewLocalObject"},
+    {Intrinsic::cj_alloca_local_generic, "CJ_MCC_NewLocalObject"},
+    {Intrinsic::cj_malloc_local_array_generic, "CJ_MCC_NewLocalArrayGeneric"}};
 
 struct LowerGetFieldOffset {
   CallBase *CI;
@@ -399,11 +402,28 @@ public:
     CI->setCalledFunction(Func);
   }
 
+  void replaceNewLocalWeakRefFunc(CallBase *CI) {
+    IRBuilder<> Bdr(CI);
+    Function *Func = M.getFunction("CJ_MCC_NewLocalWeakRefObject");
+    if (Func == nullptr) {
+      Func = M.declareCJRuntimeFunc("CJ_MCC_NewLocalWeakRefObject",
+                                    CI->getFunctionType(), false);
+    }
+    CI->setCalledFunction(Func);
+  }
+
   // llvm.cj.alloca.generic(TypeInfo* ti, i64 size)
   void replaceAllocaGeneric(CallBase *CI, EscapeScope &ES) {
     if (replaceWithAlloca(CI, ES)) {
       return;
     }
+    replaceWithRuntimeFunc(CI, false, true);
+    CI->addRetAttr(Attribute::NoAlias);
+    setMetadata(CI, "new_gen");
+  }
+
+  // llvm.cj.alloca.generic(TypeInfo* ti, i64 size)
+  void replaceAllocaLocalGeneric(CallBase *CI, EscapeScope &ES) {
     replaceWithRuntimeFunc(CI, false, true);
     CI->addRetAttr(Attribute::NoAlias);
     setMetadata(CI, "new_gen");
@@ -751,6 +771,30 @@ public:
     CI->addRetAttr(Attribute::NoAlias);
   }
 
+  void loweringMallocLocalObject(CallBase *&CI) {
+    const MDNode *MD = CI->getMetadata("MallocType");
+    if (MD == nullptr) {
+      setHeapMallocSizeAlign(CI);
+      replaceWithRuntimeFunc(CI, false, true);
+    } else {
+      StringRef Ty = dyn_cast<MDString>(MD->getOperand(0).get())->getString();
+      if (Ty.equals("HasFinalizer")) {
+        setHeapMallocSizeAlign(CI);
+        replaceNewFinalizerFunc(CI);
+      } else if (Ty.equals("Future") || Ty.equals("Mutex") ||
+                 Ty.equals("Monitor") || Ty.equals("WaitQueue")) {
+        replaceFixedNewObject(CI);
+      } else if (Ty.equals("WeakRef")) {
+        setHeapMallocSizeAlign(CI);
+        replaceNewLocalWeakRefFunc(CI);
+      } else {
+        setHeapMallocSizeAlign(CI);
+        replaceWithRuntimeFunc(CI, false, true);
+      }
+    }
+    CI->addRetAttr(Attribute::NoAlias);
+  }
+
 private:
   Module &M;
   LLVMContext &C;
@@ -763,6 +807,8 @@ private:
     Intrinsic::ID IID = CI->getIntrinsicID();
     if (IID == Intrinsic::cj_malloc_array) {
       return getMallocArrayFuncName(CI);
+    } else if (IID == Intrinsic::cj_malloc_local_array) {
+      return getMallocLocalArrayFuncName(CI);
     } else {
       auto Itr = RuntimeMap.find(IID);
       assert(Itr != RuntimeMap.end() && "Runtime function don`t exist.");
@@ -794,6 +840,38 @@ private:
         return "CJ_MCC_NewArray32";
       case 8:
         return "CJ_MCC_NewArray64";
+      default:
+        break;
+      }
+    }
+    report_fatal_error("Unsupported element klass type for gc.malloc.array!");
+    return "";
+  }
+
+  StringRef getMallocLocalArrayFuncName(CallBase *CI) const {
+    Value *Arg0 = CI->getOperand(0);
+    // gc.malloc.array(i64, bitcast arg1 to i8*)
+    auto *CastExpr = dyn_cast<ConstantExpr>(Arg0);
+    auto *KlassGV = dyn_cast<GlobalVariable>(CastExpr->getOperand(0));
+    TypeInfo ArrayKlass(KlassGV);
+
+    Type *ET = ArrayKlass.getArrayElementType();
+    if (ET->isPointerTy()) {
+      return "CJ_MCC_NewLocalObjArray";
+    } else if (ET->isStructTy() || ET->isArrayTy()) {
+      return "CJ_MCC_NewLocalArray";
+    } else {
+      unsigned Size =
+          static_cast<unsigned>(DL.getTypeAllocSize(ET).getFixedSize());
+      switch (Size) {
+      case 1:
+        return "CJ_MCC_NewLocalArray8";
+      case 2:
+        return "CJ_MCC_NewLocalArray16";
+      case 4:
+        return "CJ_MCC_NewLocalArray32";
+      case 8:
+        return "CJ_MCC_NewLocalArray64";
       default:
         break;
       }
@@ -1065,6 +1143,26 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
       Changed = true;
       break;
     case Intrinsic::cj_malloc_array_generic:
+      Lowering.replaceWithRuntimeFunc(CI, false, true);
+      CI->addRetAttr(Attribute::NoAlias);
+      Changed = true;
+      break;
+    case Intrinsic::cj_malloc_local_object: {
+      Lowering.loweringMallocLocalObject(CI);
+      Changed = true;
+      break;
+    }
+    case Intrinsic::cj_alloca_local_generic:
+      Lowering.setHeapMallocSizeAlign(CI);
+      Lowering.replaceAllocaLocalGeneric(CI, ES);
+      Changed = true;
+      break;
+    case Intrinsic::cj_malloc_local_array:
+      Lowering.replaceNewArray(CI);
+      CI->addRetAttr(Attribute::NoAlias);
+      Changed = true;
+      break;
+    case Intrinsic::cj_malloc_local_array_generic:
       Lowering.replaceWithRuntimeFunc(CI, false, true);
       CI->addRetAttr(Attribute::NoAlias);
       Changed = true;
