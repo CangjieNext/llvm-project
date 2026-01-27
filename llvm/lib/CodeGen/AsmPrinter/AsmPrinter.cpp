@@ -157,6 +157,7 @@ STATISTIC(EmittedInsts, "Number of machine instrs printed");
 namespace llvm {
 extern cl::opt<bool> CJPipeline;
 extern cl::opt<bool> EnableStackGrow;
+extern cl::opt<bool> EnableSafepointOutline;
 
 // Warning: The following values must be synchronized with
 // the data struct `ThreadLocalData` in runtime
@@ -1715,6 +1716,19 @@ void AsmPrinter::emitFunctionBody() {
       }
     }
     StackCheckMap.clear();
+    if (!EnableSafepointOutline) {
+      // emit safepoint
+      for (unsigned SafeIndex = 0; SafeIndex < SafepointStackMap.size();
+           ++SafeIndex) {
+        for (const HandlerInfo &HI : Handlers)
+          HI.Handler->beginInstruction(
+              std::get<0>(SafepointStackMap[SafeIndex]));
+        NumInstsInFunction += emitCJSafepointInlineCall(SafeIndex);
+        for (const HandlerInfo &HI : Handlers)
+          HI.Handler->endInstruction();
+      }
+      SafepointStackMap.clear();
+    }
   }
 
   EmittedInsts += NumInstsInFunction;
@@ -3510,6 +3524,7 @@ static bool isNonStackOverflowFunc(MachineFunction &MF, unsigned FrameSize) {
       StatepointOpers SO(&MI);
       uint64_t ID = SO.getID();
       if (ID == Cangjie::CJStatepointID::Safepoint ||
+          ID == Cangjie::CJStatepointID::SafepointStub ||
           ID == Cangjie::CJStatepointID::StackCheck)
         continue;
 
@@ -4126,6 +4141,7 @@ bool AsmPrinter::tryEmitCangjieSpecificCallByMOSym(const MachineInstr *MI,
     return false;
   }
   const auto *Callee = dyn_cast<const Function>(MOSym.getGlobal());
+  auto &Caller = MI->getMF()->getFunction();
   if (Callee == nullptr) {
     return false;
   }
@@ -4134,8 +4150,10 @@ bool AsmPrinter::tryEmitCangjieSpecificCallByMOSym(const MachineInstr *MI,
     emitGcStateCheck();
     return true;
   }
-  if (Callee->isCangjieSafePoint()) {
-    emitCJSafepointStub();
+  // `call CJ_MCC_HandleSafepoint` in safepoint stub function.
+  if (Caller.isCangjieSafepointStub() && Callee->isCangjieSafePoint()) {
+    assert(EnableSafepointOutline && "outline is not enabled");
+    emitCJSafepointOutlineStub();
     return true;
   }
   // Using for debug information only, no emit instructions.

@@ -196,6 +196,8 @@ protected:
   MCSymbol *CurrentFnBegin = nullptr;
 
   std::map<const MachineInstr *, std::pair<MCSymbol *, MCSymbol *>> StackCheckMap;
+  SmallVector<std::tuple<const MachineInstr *, MCSymbol *, MCSymbol *>>
+      SafepointStackMap;
   /// A vector of all debug/EH info emitters we should use. This vector
   /// maintains ownership of the emitters.
   std::vector<HandlerInfo> Handlers;
@@ -250,7 +252,7 @@ protected:
                                            const MachineOperand &MOSym,
                                            unsigned Opcode){};
   virtual void emitGetCJThreadId() {};
-  virtual void emitCJSafepointStub() {};
+  virtual void emitCJSafepointOutlineStub() {};
 
   int64_t getAllocBufferOffsetInCJTLS() const;
   int64_t getMutatorOffsetInCJTLS() const;
@@ -575,6 +577,8 @@ public:
   virtual int emitStackGrow(const MachineInstr &) { return 0; }
 
   virtual void emitGcStateCheck() {}
+
+  virtual int emitCJSafepointInlineCall(unsigned) { return 0; }
 
   virtual void emitMetadataAddress() {}
 

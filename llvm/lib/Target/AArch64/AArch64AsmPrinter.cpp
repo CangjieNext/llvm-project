@@ -71,6 +71,7 @@ using namespace llvm;
 namespace llvm {
 extern cl::opt<bool> CJPipeline;
 extern cl::opt<bool> EnableStackGrow;
+extern cl::opt<bool> EnableSafepointOutline;
 }
 namespace {
 
@@ -254,11 +255,14 @@ private:
   void emitCJThrowException(const MachineInstr *MI,
                             const MachineOperand &MOSym,
                             unsigned Opcode) override;
-  void emitCJSafepointStub() override;
+  void emitCJSafepointOutlineStub() override;
   void emitAddSP(unsigned AddSize);
   void emitSubSP(unsigned Size);
   void emitCJStackCheck(const MachineInstr &MI) override;
   int emitStackOverflowCall(const MachineInstr &MI);
+  void emitSafepoint(const MachineInstr &MI);
+  void emitCJSafepointInlineCheck(const MachineInstr &MI);
+  int emitCJSafepointInlineCall(unsigned Index) override;
   void emitGcStateCheck() override;
   void emitGetCJTLSData(int64_t Offset);
 };
@@ -1339,6 +1343,11 @@ void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
   const MachineOperand &CallTarget = SOpers.getCallTarget();
   if (CJPipeline) {
     uint64_t ID = SOpers.getID();
+    // `call CJ_MCC_HandleSafepoint` in cangjie function.
+    if (!EnableSafepointOutline && ID == Cangjie::CJStatepointID::Safepoint) {
+      emitCJSafepointInlineCheck(MI);
+      return;
+    }
     if (ID == Cangjie::CJStatepointID::StackCheck) {
       emitCangjieStackCheck(MI);
       return;
@@ -1385,7 +1394,9 @@ void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
                    MCInstBuilder(CallOpcode).addOperand(CallTargetMCOp));
   }
 
-  if (SOpers.getID() == Cangjie::CJStatepointID::Safepoint)
+  // `call CJ_Safepoint_Stub` in cangjie function.
+  if (EnableSafepointOutline &&
+      SOpers.getID() == Cangjie::CJStatepointID::SafepointStub)
     return SM.recordCJStackMap(MI, true);
 
   auto &Ctx = OutStreamer.getContext();
@@ -2278,7 +2289,109 @@ void AArch64AsmPrinter::emitMetadataAddress() {
   }
 }
 
-void AArch64AsmPrinter::emitCJSafepointStub() {
+// Note: emit specific inst should update inst size info in
+// AArch64InstrInfo::getInstSizeInBytes for AArch64 at the same time
+//  ldr x9, [x28, #SafepointCheckAddrOffset]
+//  cmp x9, #0
+// >>>>>>>>>>>>>>>>>>>
+// case 1:
+//  b.ne Label
+//  ...
+// Label:
+//  adrp  x9, CJ_MCC_HandleSafepoint.CJStubGV
+//  ldr x9, [x9, :lo12:CJ_MCC_HandleSafepoint.CJStubGV]
+//  blr x9
+// =================== Offset beyond 0x7FFFF
+// case 2:
+//  b.eq Label
+//  adrp  x9, CJ_MCC_HandleSafepoint.CJStubGV
+//  ldr x9, [x9, :lo12:CJ_MCC_HandleSafepoint.CJStubGV]
+//  blr x9
+// Label:
+//  ...
+// <<<<<<<<<<<<<<<<<<<
+void AArch64AsmPrinter::emitCJSafepointInlineCheck(const MachineInstr &MI) {
+  emitGetCJTLSData(getSafepointCheckAddrOffsetInCJTLS());
+
+  auto &Ctx = OutStreamer->getContext();
+  MCInst Cmp = MCInstBuilder(AArch64::SUBSXri)
+                   .addReg(AArch64::XZR)
+                   .addReg(AArch64::X9)
+                   .addImm(0)
+                   .addImm(0);
+  EmitToStreamer(*OutStreamer, Cmp);
+
+  // If Jmp size beyond the 19bit, emitting safepoint on following inst
+  // instead of emit it at the end of the function.
+  // Each Inst size is 4 bytes.
+  if (MI.getMF()->getInstructionCount() * 4 > 0x7FFFF) {
+    MCSymbol *EndLabel = Ctx.createTempSymbol();
+    MCInst Branch = MCInstBuilder(AArch64::Bcc)
+                        .addImm(AArch64CC::EQ)
+                        .addExpr(MCSymbolRefExpr::create(EndLabel, Ctx));
+    EmitToStreamer(*OutStreamer, Branch);
+    emitSafepoint(MI);
+    OutStreamer->emitLabel(EndLabel);
+  } else {
+    MCSymbol *JmpLabel = Ctx.createTempSymbol();
+    MCSymbol *EndLabel = Ctx.createTempSymbol();
+    MCInst Branch = MCInstBuilder(AArch64::Bcc)
+                        .addImm(AArch64CC::NE)
+                        .addExpr(MCSymbolRefExpr::create(JmpLabel, Ctx));
+    EmitToStreamer(*OutStreamer, Branch);
+    OutStreamer->emitLabel(EndLabel);
+    SafepointStackMap.push_back(std::make_tuple(&MI, JmpLabel, EndLabel));
+  }
+}
+
+//  adrp  x9, CJ_MCC_HandleSafepoint.CJStubGV
+//  ldr x9, [x9, :lo12:CJ_MCC_HandleSafepoint.CJStubGV]
+//  blr x9
+// jmp  Label1
+int AArch64AsmPrinter::emitCJSafepointInlineCall(unsigned Index) {
+  auto &Ctx = OutStreamer->getContext();
+  auto SS = SafepointStackMap[Index];
+  MCSymbol *CurLabel = std::get<1>(SS);
+  MCSymbol *BackLabel = std::get<2>(SS);
+  OutStreamer->emitLabel(CurLabel);
+  emitSafepoint(*std::get<0>(SS));
+
+  auto Expr = MCSymbolRefExpr::create(BackLabel, MCSymbolRefExpr::VK_None, Ctx);
+  MCInst BNoCond = MCInstBuilder(AArch64::B).addExpr(Expr);
+  EmitToStreamer(*OutStreamer, BNoCond);
+  // 4: instruction nums.
+  return 4;
+}
+
+//  adrp  x9, CJ_MCC_HandleSafepoint.CJStubGV
+//  ldr x9, [x9, :lo12:CJ_MCC_HandleSafepoint.CJStubGV]
+//  blr x9
+void AArch64AsmPrinter::emitSafepoint(const MachineInstr &MI) {
+  using namespace AArch64;
+
+  auto *AddrGV = MF->getFunction().getParent()->getGlobalVariable(
+      "CJ_MCC_HandleSafepoint.CJStubGV", true);
+  MachineOperand MOSym = MachineOperand::CreateGA(AddrGV, 0);
+  MCOperand SymOriAddr = setGAAndLower(MOSym, AddrGV, AArch64II::MO_PAGE);
+  MCOperand SymOriAddrLo12 =
+      setGAAndLower(MOSym, AddrGV, AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
+
+  MCInst Adrp = MCInstBuilder(ADRP).addReg(X9).addOperand(SymOriAddr);
+  EmitToStreamer(*OutStreamer, Adrp);
+
+  MCInst Ldr = MCInstBuilder(LDRXui)
+                   .addReg(X9)
+                   .addReg(X9)
+                   .addOperand(SymOriAddrLo12)
+                   .addImm(0);
+  EmitToStreamer(*OutStreamer, Ldr);
+
+  MCInst CallReg = MCInstBuilder(BLR).addReg(X9);
+  EmitToStreamer(*OutStreamer, CallReg);
+  SM.recordCJStackMap(MI, true);
+}
+
+void AArch64AsmPrinter::emitCJSafepointOutlineStub() {
   MCInst LDR0 = MCInstBuilder(AArch64::LDRXui)
                     .addReg(AArch64::X9)
                     .addReg(AArch64::X28)

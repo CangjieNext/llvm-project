@@ -40,8 +40,9 @@ enum CJStatepointID : uint64_t {
   Default = 0,
   // 1 and 2 are reserved for others
   Safepoint = 3,
-  StackCheck = 4,
-  NewArrayFast = 5,
+  SafepointStub = 4,
+  StackCheck = 5,
+  NewArrayFast = 6,
 };
 } // namespace Cangjie
 

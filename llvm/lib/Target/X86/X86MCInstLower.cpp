@@ -61,6 +61,7 @@ static cl::opt<bool> DisableFP16TempConversion("disable-fp16-tempconversion",
                                                cl::init(false), cl::Hidden);
 namespace llvm {
 extern cl::opt<bool> CJPipeline;
+extern cl::opt<bool> EnableSafepointOutline;
 }
 namespace {
 
@@ -1480,7 +1481,72 @@ void X86AsmPrinter::emitGcStateCheck() {
   OutStreamer->emitInstruction(LoadPollingPageInst, getSubtargetInfo());
 }
 
-void X86AsmPrinter::emitCJSafepointStub() {
+// load tls data
+//   cmpq   $0, %rax
+//   jne    Label
+void X86AsmPrinter::emitCJSafepointInlineCheck(const MachineInstr &MI) {
+  emitGetCJTLSData(getSafepointCheckAddrOffsetInCJTLS());
+  // create label
+  auto &Ctx = OutStreamer->getContext();
+  MCSymbol *MILabel = Ctx.createTempSymbol();
+  MCSymbol *MILabel1 = Ctx.createTempSymbol();
+  const MCSymbolRefExpr *MILabelExpr =
+      MCSymbolRefExpr::create(MILabel, OutContext);
+  MCInst CmpInst;
+  CmpInst.setOpcode(X86::CMP64ri32);
+  CmpInst.addOperand(MCOperand::createReg(X86::RAX));
+  CmpInst.addOperand(MCOperand::createImm(0));
+  OutStreamer->emitInstruction(CmpInst, getSubtargetInfo());
+  MCInst JccInst;
+  JccInst.setOpcode(X86::JCC_1);
+  JccInst.addOperand(MCOperand::createExpr(MILabelExpr));
+  JccInst.addOperand(MCOperand::createImm(X86::COND_NE));
+  OutStreamer->emitInstruction(JccInst, getSubtargetInfo());
+
+  OutStreamer->emitLabel(MILabel1);
+  SafepointStackMap.push_back(std::make_tuple(&MI, MILabel, MILabel1));
+}
+
+// mov  CJ_MCC_HandleSafepoint.CJStubGV(%rip), %r9
+// call %r9
+// jmp  Label1
+int X86AsmPrinter::emitCJSafepointInlineCall(unsigned Index) {
+  auto *AddrGV = MF->getFunction().getParent()->getGlobalVariable(
+      "CJ_MCC_HandleSafepoint.CJStubGV", true);
+  MachineOperand MOAddr = MachineOperand::CreateGA(AddrGV, 0);
+  X86MCInstLower MCInstLowering(*MF, *this);
+  const MCSymbolRefExpr *Sym = MCSymbolRefExpr::create(
+      MCInstLowering.GetSymbolFromOperand(MOAddr), OutStreamer->getContext());
+  auto SS = SafepointStackMap[Index];
+  MCSymbol *MILabel = std::get<1>(SS);
+  MCSymbol *MILabel1 = std::get<2>(SS);
+  OutStreamer->emitLabel(MILabel);
+
+  MCInst MovGVToRAX = MCInstBuilder(X86::MOV64rm)
+                          .addReg(X86::RAX)
+                          .addReg(X86::RIP)
+                          .addImm(1)
+                          .addReg(0)
+                          .addExpr(Sym)
+                          .addReg(0);
+  OutStreamer->emitInstruction(MovGVToRAX, getSubtargetInfo());
+  MCInst CallSafepointInst;
+  CallSafepointInst.setOpcode(X86::CALL64r);
+  CallSafepointInst.addOperand(MCOperand::createReg(X86::RAX));
+  OutStreamer->emitInstruction(CallSafepointInst, getSubtargetInfo());
+  SM.recordCJStackMap(*std::get<0>(SS), true);
+
+  const MCSymbolRefExpr *MILabelExpr =
+      MCSymbolRefExpr::create(MILabel1, OutContext);
+  MCInst JccInst;
+  JccInst.setOpcode(X86::JMP_1);
+  JccInst.addOperand(MCOperand::createExpr(MILabelExpr));
+  OutStreamer->emitInstruction(JccInst, getSubtargetInfo());
+  // 3: instruction nums.
+  return 3;
+}
+
+void X86AsmPrinter::emitCJSafepointOutlineStub() {
   MCSymbol *Label = OutContext.createTempSymbol();
   StringRef Name = getSubtargetInfo().getTargetTriple().isOSBinFormatMachO()
                        ? "_CJ_MCC_HandleSafepoint.CJStubGV"
@@ -1526,6 +1592,11 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
   const MachineOperand &CallTarget = SOpers.getCallTarget();
   if (CJPipeline) {
     uint64_t ID = SOpers.getID();
+    // `call CJ_MCC_HandleSafepoint` in cangjie function.
+    if (!EnableSafepointOutline && ID == Cangjie::CJStatepointID::Safepoint) {
+      emitCJSafepointInlineCheck(MI);
+      return;
+    }
     if (ID == Cangjie::CJStatepointID::StackCheck) {
       emitCangjieStackCheck(MI);
       return;
@@ -1584,7 +1655,8 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
     OutStreamer->emitInstruction(CallInst, getSubtargetInfo());
   }
 
-  if (SOpers.getID() == Cangjie::CJStatepointID::Safepoint)
+  if (EnableSafepointOutline &&
+      SOpers.getID() == Cangjie::CJStatepointID::SafepointStub)
     return SM.recordCJStackMap(MI, true);
 
   // Record our statepoint node in the same section used by STACKMAP
