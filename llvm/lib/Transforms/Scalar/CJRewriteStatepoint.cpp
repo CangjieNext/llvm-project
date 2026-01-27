@@ -1564,7 +1564,6 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
 
   ArrayRef<Value *> GCArgs(LiveVariables);
   uint64_t StatepointID = getCJStatepointID(Call);
-  ;
   uint32_t NumPatchBytes = 0;
   uint32_t Flags = uint32_t(StatepointFlags::None);
 

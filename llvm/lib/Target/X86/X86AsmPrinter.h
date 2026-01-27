@@ -12,6 +12,7 @@
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/CJMetadata.h"
 #include "llvm/CodeGen/FaultMaps.h"
+#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/StackMaps.h"
 
 // Implemented in X86MCInstLower.cpp
@@ -139,6 +140,10 @@ public:
 
   int emitStackGrow(const MachineInstr &MI) override;
 
+  void emitCJSafepointInlineCheck(const MachineInstr &MI);
+
+  int emitCJSafepointInlineCall(unsigned Index) override;
+
   void emitMetadataAddress() override;
 
   void emitGcStateCheck() override;
@@ -172,7 +177,7 @@ public:
     return ShouldEmitWeakSwiftAsyncExtendedFramePointerFlags;
   }
   void emitGetCJTLSData(int64_t Offset);
-  void emitCJSafepointStub() override;
+  void emitCJSafepointOutlineStub() override;
 
 private:
   void emitCangjieCallStubInstImpl(const MachineInstr *MI, const Function *F,

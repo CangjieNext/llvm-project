@@ -17,6 +17,7 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/CJIntrinsics.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -52,6 +53,7 @@ namespace llvm {
 extern cl::opt<bool> CangjieJIT;
 extern cl::opt<bool> DisableGCSupport;
 extern cl::opt<bool> EnableSafepointOnly;
+extern cl::opt<bool> EnableSafepointOutline;
 } // namespace llvm
 
 namespace {
@@ -1137,9 +1139,13 @@ static bool combineSafepointStub(Module *M,
     return false;
   Function *F = getOrInsertSafepointStub(
       M, Safepoints.front()->getActualCalledFunction());
-  for (auto *SI : Safepoints)
+  for (auto *SI : Safepoints) {
     // Although the callee is replaced, the call is still a safepoint.
     SI->setArgOperand(GCStatepointInst::CalledFunctionPos, F);
+    SI->setArgOperand(GCStatepointInst::IDPos,
+                      ConstantInt::get(Type::getInt64Ty(M->getContext()),
+                                       Cangjie::CJStatepointID::SafepointStub));
+  }
   return true;
 }
 
@@ -1166,7 +1172,7 @@ bool CJBarrierLowering::runOnFunction(Function &F) {
         Barriers.insert(cast<CallInst>(&I));
       else if (EnableGCFastPath && isNewObj(&I))
         News.insert(cast<GCStatepointInst>(&I));
-      else if (isSafepointCall(&I))
+      else if (EnableSafepointOutline && isSafepointCall(&I))
         Safepoints.insert(cast<GCStatepointInst>(&I));
     }
   }

@@ -176,6 +176,9 @@ cl::opt<bool>
                cl::desc("use the customized pass pipeline for cangjie"));
 cl::opt<bool> CangjieJIT("cangjie-JIT", cl::init(false), cl::Hidden,
                          cl::desc("use the customized JIT for cangjie"));
+cl::opt<bool> EnableSafepointOutline("cj-safepoint-outline", cl::init(true),
+                                     cl::Hidden,
+                                     cl::desc("outline cangjie safepoint"));
 cl::opt<bool>
     EnableStackGrow("cj-stack-grow", cl::Hidden, cl::init(true),
                     cl::desc("support stack capacity expansion on callsite"));
