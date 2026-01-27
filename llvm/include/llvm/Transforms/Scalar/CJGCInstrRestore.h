@@ -36,6 +36,7 @@ private:
   SmallVector<Instruction *, 4> StoreForGCWriteRefs;
   SmallDenseMap<Intrinsic::ID, SmallVector<Instruction *, 4> *>
       LSInstrDispatchMap;
+  SmallDenseMap<Value *, Value *, 4> ValueToBasePointer;
 };
 
 } // end namespace llvm
