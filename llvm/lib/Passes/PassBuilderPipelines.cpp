@@ -81,8 +81,6 @@
 #include "llvm/Transforms/Scalar/CJBarrierSplit.h"
 #include "llvm/Transforms/Scalar/CJDevirtualOpt.h"
 #include "llvm/Transforms/Scalar/CJSimpleOpt.h"
-#include "llvm/Transforms/Scalar/CJGCInstrReplace.h"
-#include "llvm/Transforms/Scalar/CJGCInstrRestore.h"
 #include "llvm/Transforms/Scalar/CJObjectReuseOpt.h"
 #include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/Scalar/CJGenericIntrinsicOpt.h"
