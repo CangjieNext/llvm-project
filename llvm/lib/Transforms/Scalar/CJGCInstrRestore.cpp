@@ -39,21 +39,24 @@ PreservedAnalyses CJGCInstrRestore::run(Function &F,
 }
 
 bool CJGCInstrRestore::runImpl(Function &F) {
-#ifndef NDEBUG
+
   LLVM_DEBUG(dbgs() << "CJGCInstrRestore: " << F.getName().str() << " start."
                     << "\n");
-#endif
+
   initContainer();
   collectLSInstr(F);
   bool changed = restoreLSInstrToGCInstr();
-#ifndef NDEBUG
-  if (changed) {
-    LLVM_DEBUG(dbgs() << "CJGCInstrRestore: " << F.getName().str()
-                      << " changed." << "\n");
-  }
+
+  LLVM_DEBUG({
+    if (changed) {
+      dbgs() << "CJGCInstrRestore: " << F.getName().str() << " changed."
+             << "\n";
+    }
+  });
+
   LLVM_DEBUG(dbgs() << "CJGCInstrRestore: " << F.getName().str() << " end."
                     << "\n");
-#endif
+
   return changed;
 }
 
@@ -65,14 +68,16 @@ void CJGCInstrRestore::initContainer() {
   LSInstrDispatchMap[Intrinsic::cj_gcwrite_ref] = &StoreForGCWriteRefs;
 }
 
-inline void CJGCInstrRestore::dispatchLSInstr(Instruction *Instr) {
-  LSInstrDispatchMap[Intrinsic::cj_gcwrite_ref]->push_back(Instr);
-}
+// should use metadata to restore LSInstr more precisely
+inline void CJGCInstrRestore::dispatchLSInstr(Instruction *Instr) { return; }
 
 void CJGCInstrRestore::collectLSInstr(Function &F) {
   for (auto &I : instructions(F)) {
+    // shoud use dispatchLSInstr later
     if (isa<StoreInst>(I)) {
-      dispatchLSInstr(&I);
+      LSInstrDispatchMap[Intrinsic::cj_gcwrite_ref]->push_back(&I);
+    } else if (isa<LoadInst>(I)) {
+      LSInstrDispatchMap[Intrinsic::cj_gcread_ref]->push_back(&I);
     }
   }
 }
@@ -95,6 +100,11 @@ bool shouldRestore(Instruction *Instr) {
     return operandTypeCheck(Instr->getOperand(0)->getType()) &&
            operandTypeCheck(Instr->getOperand(1)->getType()) &&
            !isa<AllocaInst>(getUnderlyingObject(Instr->getOperand(1)));
+  }
+  if (isa<LoadInst>(Instr)) {
+    return operandTypeCheck(Instr->getOperand(0)->getType()) &&
+           operandTypeCheck(Instr->getType()) &&
+           !isa<AllocaInst>(getUnderlyingObject(Instr->getOperand(0)));
   }
   return false;
 }
@@ -123,19 +133,52 @@ Value *castToTargetType(Value *V, IRBuilder<> &IRB, Type *TargetType) {
 }
 
 // i8 addrspace(1)*
-Value *castToI8AddrNum1PtrType(Value *V, IRBuilder<> &IRB) {
+Value *castToI8AddrSpace1PtrType(Value *V, IRBuilder<> &IRB) {
   LLVMContext &Ctx = IRB.getContext();
   return castToTargetType(V, IRB, PointerType::get(Type::getInt8Ty(Ctx), 1));
 }
 
 // i8 addrspace(1)* addrspace(1)*
-Value *castToI8AddrNum1PtrTypeAddrNum1PtrType(Value *V, IRBuilder<> &IRB) {
+Value *castToI8AddrSpace1PtrTypeAddrSpace1PtrType(Value *V, IRBuilder<> &IRB) {
   LLVMContext &Ctx = IRB.getContext();
   return castToTargetType(
       V, IRB, PointerType::get(PointerType::get(Type::getInt8Ty(Ctx), 1), 1));
 }
 
-bool restoreGCReadRef(SmallVector<Instruction *, 4> *Instrs) { return false; }
+void addMetadataToGCInstr(CallBase *RestoreGCInstr, Instruction *Inst) {
+  SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
+  Inst->getAllMetadata(MDs);
+  for (const auto &MD : MDs) {
+    RestoreGCInstr->setMetadata(MD.first, MD.second);
+  }
+}
+
+bool restoreGCReadRef(SmallVector<Instruction *, 4> *Instrs) {
+  bool Changed = false;
+  SmallVector<Instruction *, 4> ToBeErased;
+  for (auto *LI : *Instrs) {
+    if (shouldRestore(LI)) {
+      Changed = true;
+      IRBuilder<> IRB(LI);
+      Module *M = IRB.GetInsertBlock()->getModule();
+      Function *IntrinsicFunc =
+          Intrinsic::getDeclaration(M, Intrinsic::cj_gcread_ref);
+      auto *BasePtr = castToI8AddrSpace1PtrType(
+          getUnderlyingObject(LI->getOperand(0)), IRB);
+      auto *DerivedPtr =
+          castToI8AddrSpace1PtrTypeAddrSpace1PtrType(LI->getOperand(0), IRB);
+      auto *GCInstr = IRB.CreateCall(IntrinsicFunc, {BasePtr, DerivedPtr});
+      addMetadataToGCInstr(GCInstr, LI);
+      auto * ReplacerValue = castToTargetType(GCInstr, IRB, LI->getType());
+      LI->replaceAllUsesWith(ReplacerValue);
+      ToBeErased.push_back(LI);
+    }
+  }
+  for (auto *I : ToBeErased) {
+    I->eraseFromParent();
+  }
+  return Changed;
+}
 
 bool restoreGCWriteRef(SmallVector<Instruction *, 4> *Instrs) {
   bool Changed = false;
@@ -147,17 +190,13 @@ bool restoreGCWriteRef(SmallVector<Instruction *, 4> *Instrs) {
       Module *M = IRB.GetInsertBlock()->getModule();
       Function *IntrinsicFunc =
           Intrinsic::getDeclaration(M, Intrinsic::cj_gcwrite_ref);
-      auto *BasePtr =
-          castToI8AddrNum1PtrType(getUnderlyingObject(SI->getOperand(1)), IRB);
-      auto *ValuePtr = castToI8AddrNum1PtrType(SI->getOperand(0), IRB);
+      auto *BasePtr = castToI8AddrSpace1PtrType(
+          getUnderlyingObject(SI->getOperand(1)), IRB);
+      auto *ValuePtr = castToI8AddrSpace1PtrType(SI->getOperand(0), IRB);
       auto *DerivedPtr =
-          castToI8AddrNum1PtrTypeAddrNum1PtrType(SI->getOperand(1), IRB);
+          castToI8AddrSpace1PtrTypeAddrSpace1PtrType(SI->getOperand(1), IRB);
       auto *GCInstr = IRB.CreateCall(IntrinsicFunc, {ValuePtr, BasePtr, DerivedPtr});
-      SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
-      SI->getAllMetadata(MDs);
-      for (const auto &MD : MDs) {
-        GCInstr->setMetadata(MD.first, MD.second);
-      }
+      addMetadataToGCInstr(GCInstr, SI);
       ToBeErased.push_back(SI);
     }
   }
