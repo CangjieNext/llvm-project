@@ -25,7 +25,9 @@ class CJGCInstrReplace : public PassInfoMixin<CJGCInstrReplace> {
 public:
   CJGCInstrReplace() = default;
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+  static constexpr StringRef GC_READ_REF_IID = "GC_Read_Ref_IID";
   static constexpr StringRef GC_WRITE_REF_IID = "GC_Write_Ref_IID";
+  static SmallDenseMap<Intrinsic::ID, StringRef> GCIntrinsicIDToLabel;
 
 private:
   bool runImpl(Function &F);
