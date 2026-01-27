@@ -31,6 +31,10 @@ using namespace llvm;
 
 #define DEBUG_TYPE "CJGCInstrReplace"
 
+SmallDenseMap<Intrinsic::ID, StringRef> CJGCInstrReplace::GCIntrinsicIDToLabel =
+    {{Intrinsic::cj_gcread_ref, CJGCInstrReplace::GC_READ_REF_IID},
+     {Intrinsic::cj_gcwrite_ref, CJGCInstrReplace::GC_WRITE_REF_IID}};
+
 PreservedAnalyses CJGCInstrReplace::run(Function &F,
                                         FunctionAnalysisManager &FAM) {
   if (runImpl(F)) {
@@ -40,21 +44,22 @@ PreservedAnalyses CJGCInstrReplace::run(Function &F,
 }
 
 bool CJGCInstrReplace::runImpl(Function &F) {
-#ifndef NDEBUG
   LLVM_DEBUG(dbgs() << "CJGCInstrReplace: " << F.getName().str() << "start."
                     << "\n");
-#endif
   initContainer();
   collectGCInstr(F);
   bool changed = changeGCInstrToLSInstr();
-#ifndef NDEBUG
-  if (changed) {
-    LLVM_DEBUG(dbgs() << "CJGCInstrReplace: " << F.getName().str()
-                      << " changed." << "\n");
-  }
+
+  LLVM_DEBUG({
+    if (changed) {
+      dbgs() << "CJGCInstrReplace: " << F.getName().str() << " changed."
+             << "\n";
+    }
+  });
+
   LLVM_DEBUG(dbgs() << "CJGCInstrReplace: " << F.getName().str() << "end."
                     << "\n");
-#endif
+
   return changed;
 }
 
@@ -70,9 +75,7 @@ inline void CJGCInstrReplace::dispatchGCInstr(CallBase *CB) {
   auto IID = CB->getIntrinsicID();
   if (GCInstrDispatchMap.count(IID)) {
     GCInstrDispatchMap[IID]->push_back(CB);
-#ifndef NDEBUG
     LLVM_DEBUG(dbgs() << "dispatchGCInstr: " << *CB << "\n");
-#endif
   }
 }
 
@@ -92,23 +95,37 @@ void addGCInstrMetadata(Instruction *Inst, CallBase *SourceGCInstr) {
   Constant *ConstVal = ConstantInt::get(Type::getInt64Ty(Ctx), uint64_t(IID));
   ConstantAsMetadata *CAM = ConstantAsMetadata::get(ConstVal);
   MDNode *Node = MDNode::get(Ctx, CAM);
-  Inst->setMetadata(CJGCInstrReplace::GC_WRITE_REF_IID, Node);
+  Inst->setMetadata(CJGCInstrReplace::GCIntrinsicIDToLabel[IID], Node);
+  SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
+  SourceGCInstr->getAllMetadata(MDs);
+  for (const auto &MD : MDs) {
+    Inst->setMetadata(MD.first, MD.second);
+  }
 }
 
-bool changeGCReadRef(SmallVector<CallBase *, 4> *GCInstrs) { return false; }
+bool changeGCReadRef(SmallVector<CallBase *, 4> *GCInstrs) {
+  bool Changed = false;
+  for (auto *GCReadRef : *GCInstrs) {
+    Changed = true;
+    IRBuilder<> IRB(GCReadRef);
+    auto *AddedLoadInstr = IRB.CreateLoad(
+        GCReadRef->getArgOperand(0)->getType(), GCReadRef->getArgOperand(1));
+    addGCInstrMetadata(AddedLoadInstr, GCReadRef);
+    GCReadRef->replaceAllUsesWith(AddedLoadInstr);
+  }
+  for (auto *GCReadRef : *GCInstrs) {
+    GCReadRef->eraseFromParent();
+  }
+  return Changed;
+}
 
 bool changeGCWriteRef(SmallVector<CallBase *, 4> *GCInstrs) {
   bool Changed = false;
   for (auto *GCWriteRef : *GCInstrs) {
     Changed = true;
     IRBuilder<> IRB(GCWriteRef);
-    auto AddedStoreInstr = IRB.CreateStore(GCWriteRef->getArgOperand(0),
-                                           GCWriteRef->getArgOperand(2));
-    SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
-    GCWriteRef->getAllMetadata(MDs);
-    for (const auto &MD : MDs) {
-        AddedStoreInstr->setMetadata(MD.first, MD.second);
-    }
+    auto *AddedStoreInstr = IRB.CreateStore(GCWriteRef->getArgOperand(0),
+                                            GCWriteRef->getArgOperand(2));
     addGCInstrMetadata(AddedStoreInstr, GCWriteRef);
   }
   for (auto *GCWriteRef : *GCInstrs) {
