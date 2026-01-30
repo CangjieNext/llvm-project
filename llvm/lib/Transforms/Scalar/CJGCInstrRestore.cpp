@@ -24,6 +24,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Transforms/Scalar.h"
 
 using namespace llvm;
@@ -90,11 +91,49 @@ bool operandTypeCheck(Type *Ty) {
   return true;
 }
 
+Value * getBasePointer(Value *V) {
+  assert(V->getType()->isPointerTy() && "Unexpected operand type in getBasePointer!");
+  auto *Res = getUnderlyingObject(V);
+  if (!isa<PHINode>(Res)) {
+    return Res;
+  }
+  PHINode *PhiInstr = const_cast<PHINode*>(dyn_cast<PHINode>(Res));
+  unsigned IncomingNum = PhiInstr->getNumIncomingValues();
+  SmallVector<Value *, 4> IncomingValues;
+  for (Value *IncValue : PhiInstr->incoming_values()) {
+    IncomingValues.push_back(getBasePointer(IncValue));
+  }
+  IRBuilder<> Builder(PhiInstr->getContext());
+  BasicBlock *BB = PhiInstr->getParent();
+  BasicBlock::iterator IP = ++(PhiInstr->getIterator());
+  Builder.SetInsertPoint(BB, IP);
+  auto *AddPhiNode = Builder.CreatePHI(V->getType(), IncomingNum);
+  unsigned Index = 0;
+  for (auto *IncValue : IncomingValues) {
+    AddPhiNode->addIncoming(IncValue, PhiInstr->getIncomingBlock(Index++));
+  }
+  return AddPhiNode;
+}
+
+bool isFromAlloc(Value *V) {
+  auto *SourceInstr = getUnderlyingObject(V);
+  if (!isa<PHINode>(SourceInstr)) {
+    return isa<AllocaInst>(SourceInstr);
+  }
+  PHINode *PhiInstr = const_cast<PHINode*>(dyn_cast<PHINode>(SourceInstr));
+  for (Value *IncValue : PhiInstr->incoming_values()) {
+    if (isFromAlloc(IncValue)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool shouldRestore(Instruction *Instr) {
   if (isa<StoreInst>(Instr)) {
     return operandTypeCheck(Instr->getOperand(0)->getType()) &&
            operandTypeCheck(Instr->getOperand(1)->getType()) &&
-           !isa<AllocaInst>(getUnderlyingObject(Instr->getOperand(1)));
+           !isFromAlloc(Instr->getOperand(1));
   }
   return false;
 }
@@ -148,7 +187,7 @@ bool restoreGCWriteRef(SmallVector<Instruction *, 4> *Instrs) {
       Function *IntrinsicFunc =
           Intrinsic::getDeclaration(M, Intrinsic::cj_gcwrite_ref);
       auto *BasePtr =
-          castToI8AddrNum1PtrType(getUnderlyingObject(SI->getOperand(1)), IRB);
+          castToI8AddrNum1PtrType(getBasePointer(SI->getOperand(1)), IRB);
       auto *ValuePtr = castToI8AddrNum1PtrType(SI->getOperand(0), IRB);
       auto *DerivedPtr =
           castToI8AddrNum1PtrTypeAddrNum1PtrType(SI->getOperand(1), IRB);
