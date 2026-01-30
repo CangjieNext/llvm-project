@@ -90,11 +90,32 @@ bool operandTypeCheck(Type *Ty) {
   return true;
 }
 
+bool isFromAlloc(Value *V, std::set<Value *> &Visited) {
+  // indicate the cyclic tracking chain gains nothing info,
+  // return true to continue other incoming values anlysis.
+  if (Visited.count(V)) {
+    return true;
+  }
+  Visited.insert(V);
+  auto *SourceInstr = getUnderlyingObject(V);
+  if (!isa<PHINode>(SourceInstr)) {
+    return isa<AllocaInst>(SourceInstr);
+  }
+  PHINode *PhiInstr = const_cast<PHINode *>(dyn_cast<PHINode>(SourceInstr));
+  for (Value *IncValue : PhiInstr->incoming_values()) {
+    if (!isFromAlloc(IncValue, Visited)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool shouldRestore(Instruction *Instr) {
   if (isa<StoreInst>(Instr)) {
+    std::set<Value *> Visited;
     return operandTypeCheck(Instr->getOperand(0)->getType()) &&
            operandTypeCheck(Instr->getOperand(1)->getType()) &&
-           !isa<AllocaInst>(getUnderlyingObject(Instr->getOperand(1)));
+           !isFromAlloc(Instr->getOperand(1), Visited);
   }
   return false;
 }
@@ -123,16 +144,65 @@ Value *castToTargetType(Value *V, IRBuilder<> &IRB, Type *TargetType) {
 }
 
 // i8 addrspace(1)*
-Value *castToI8AddrNum1PtrType(Value *V, IRBuilder<> &IRB) {
+inline Value *castToI8AddrNum1PtrType(Value *V, IRBuilder<> &IRB) {
   LLVMContext &Ctx = IRB.getContext();
   return castToTargetType(V, IRB, PointerType::get(Type::getInt8Ty(Ctx), 1));
 }
 
 // i8 addrspace(1)* addrspace(1)*
-Value *castToI8AddrNum1PtrTypeAddrNum1PtrType(Value *V, IRBuilder<> &IRB) {
+inline Value *castToI8AddrNum1PtrTypeAddrNum1PtrType(Value *V, IRBuilder<> &IRB) {
   LLVMContext &Ctx = IRB.getContext();
   return castToTargetType(
       V, IRB, PointerType::get(PointerType::get(Type::getInt8Ty(Ctx), 1), 1));
+}
+
+Value *getBasePointer(Value *V, Function *F, std::set<Value *> &Visited) {
+  assert(V->getType()->isPointerTy() &&
+         "Unexpected operand type in getBasePointer!");
+  // deal with the cyclic tracking chain, return itself.
+  if (Visited.count(V)) {
+    return V;
+  }
+  Visited.insert(V);
+  auto *Res = getUnderlyingObject(V);
+  if (!isa<PHINode>(Res)) {
+    return Res;
+  }
+  PHINode *PhiInstr = const_cast<PHINode *>(dyn_cast<PHINode>(Res));
+  LLVMContext &Ctx = PhiInstr->getContext();
+  auto *TargetType = PointerType::get(Type::getInt8Ty(Ctx), 1);
+  unsigned IncomingNum = PhiInstr->getNumIncomingValues();
+  SmallVector<Value *, 4> IncomingValues;
+  for (Value *IncValue : PhiInstr->incoming_values()) {
+    auto *BasePoint = getBasePointer(IncValue, F, Visited);
+    IRBuilder<> IncValueCastBuilder(Ctx);
+    if (auto *DefInstr = dyn_cast<Instruction>(BasePoint)) {
+      BasicBlock *BB = DefInstr->getParent();
+      BasicBlock::iterator It = ++(DefInstr->getIterator());
+      while (It != BB->end() && isa<PHINode>(It))
+        ++It;
+      IncValueCastBuilder.SetInsertPoint(BB, It);
+    } else {
+      BasicBlock *BB = &(F->getEntryBlock());
+      BasicBlock::iterator It = BB->begin();
+      while (It != BB->end() && isa<PHINode>(It))
+        ++It;
+      IncValueCastBuilder.SetInsertPoint(BB, It);
+    }
+    IncomingValues.push_back(
+        castToTargetType(BasePoint, IncValueCastBuilder, TargetType));
+  }
+  IRBuilder<> Builder(Ctx);
+  BasicBlock *BB = PhiInstr->getParent();
+  BasicBlock::iterator It = ++(PhiInstr->getIterator());
+  Builder.SetInsertPoint(BB, It);
+  auto *AddPhiNode = Builder.CreatePHI(TargetType, IncomingNum);
+  unsigned Index = 0;
+  IRBuilder<> IRB(AddPhiNode);
+  for (auto *IncValue : IncomingValues) {
+    AddPhiNode->addIncoming(IncValue, PhiInstr->getIncomingBlock(Index++));
+  }
+  return AddPhiNode;
 }
 
 bool restoreGCReadRef(SmallVector<Instruction *, 4> *Instrs) { return false; }
@@ -147,8 +217,9 @@ bool restoreGCWriteRef(SmallVector<Instruction *, 4> *Instrs) {
       Module *M = IRB.GetInsertBlock()->getModule();
       Function *IntrinsicFunc =
           Intrinsic::getDeclaration(M, Intrinsic::cj_gcwrite_ref);
-      auto *BasePtr =
-          castToI8AddrNum1PtrType(getUnderlyingObject(SI->getOperand(1)), IRB);
+      std::set<Value *> Visited;
+      auto *BasePtr = castToI8AddrNum1PtrType(
+          getBasePointer(SI->getOperand(1), SI->getFunction(), Visited), IRB);
       auto *ValuePtr = castToI8AddrNum1PtrType(SI->getOperand(0), IRB);
       auto *DerivedPtr =
           castToI8AddrNum1PtrTypeAddrNum1PtrType(SI->getOperand(1), IRB);
