@@ -626,6 +626,7 @@ unsigned llvm::getTypeModifier(StringRef Name) {
       .Case("hasSRet2", RMT_HAS_SRET2)
       .Case("hasSRet3", RMT_HAS_SRET3)
       .Case("enumCtor", RMT_ENUM_CTOR)
+      .Case("unknownSize", RMT_UNKNOWN_SIZE)
       .Default(RMT_MAX);
 }
 
