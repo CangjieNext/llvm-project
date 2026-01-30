@@ -33,7 +33,6 @@ enum class EHPersonality {
   Rust,
   Wasm_CXX,
   XL_CXX,
-  Cangjie,
 };
 
 /// See if the given exception handling personality function is one

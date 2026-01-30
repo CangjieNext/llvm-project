@@ -3431,10 +3431,6 @@ static bool isCatchAll(EHPersonality Personality, Constant *TypeInfo) {
   case EHPersonality::GNU_C:
   case EHPersonality::GNU_C_SjLj:
   case EHPersonality::Rust:
-  case EHPersonality::Cangjie:
-    // The GCC C EH and Rust personality only exists to support cleanups, so
-    // it's not clear what the semantics of catch clauses are.
-    return false;
   case EHPersonality::Unknown:
     return false;
   case EHPersonality::GNU_Ada:
