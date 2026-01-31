@@ -1931,6 +1931,8 @@ public:
   virtual void spreadEscape(BasicBlock *BB, unsigned ES,
                             DenseMap<GCPtr *, unsigned> &SuccBBInfo,
                             bool Direct) {
+    if (!IsSpread.insert(std::make_tuple(BB, ES, Direct)).second)
+      return;
     if (isDerivedPtr() && Direct && DirectSpread < ES) {
       DirectSpread = ES;
     }
@@ -1987,6 +1989,7 @@ public:
   // Value is the offset of %1's base and %3
   DenseMap<GCPtr *, SmallSet<int, 2>> Alias;
   SmallSetVector<GCPtr *, 8> InfoEscapedVec;
+  DenseSet<std::tuple<BasicBlock *, unsigned, bool>> IsSpread;
 };
 
 class MemPtr final : public GCPtr {
@@ -2042,7 +2045,7 @@ public:
     if (SuccBBInfo[this] < InfoEscaped) {
       SuccBBInfo[this] = InfoEscaped;
     }
-    for (auto DefineMap : DefineValues) {
+    for (auto &DefineMap : DefineValues) {
       for (GCPtr *Define : DefineMap.second) {
         if (!SuccBBInfo.count(Define) || SuccBBInfo[Define] < InfoEscaped) {
           Define->spreadInfoEscape(BB, Escaped, SuccBBInfo, Direct);
@@ -2092,7 +2095,7 @@ public:
     }
     IsVisiting = true;
     int CurOffset = Offsets.back();
-    for (auto DefineMap : DefineValues) {
+    for (auto &DefineMap : DefineValues) {
       for (GCPtr *Define : DefineMap.second) {
         if ((Offsets.size() == 1) && Define->isPtr()) {
           MemPtr *MPtr = MemPtr::create(Define->P, CurOffset, EA);
@@ -2144,10 +2147,12 @@ public:
   void spreadEscape(BasicBlock *BB, unsigned ES,
                     DenseMap<GCPtr *, unsigned> &SuccBBInfo,
                     bool Direct) override {
+    if (!IsSpread.insert(std::make_tuple(BB, ES, Direct)).second)
+      return;
     if (isDerivedPtr() && Direct && DirectSpread < ES) {
       DirectSpread = ES;
     }
-    for (auto DefineMap : DefineValues) {
+    for (auto &DefineMap : DefineValues) {
       for (GCPtr *Define : DefineMap.second) {
         if (!SuccBBInfo.count(Define) || SuccBBInfo[Define] < ES ||
             canSpread(Define, ES)) {
@@ -2471,7 +2476,7 @@ public:
         if (!EscapeBBInfo.count(Pred)) {
           continue;
         }
-        for (auto BBInfo : EscapeBBInfo[Pred]) {
+        for (auto &BBInfo : EscapeBBInfo[Pred]) {
           if (BBInfo.second >= TransEscaped &&
               (!SuccBBInfo.count(BBInfo.first) ||
                SuccBBInfo[BBInfo.first] < TransEscaped)) {
@@ -2496,7 +2501,7 @@ public:
       auto &BBInfo = EscapeBBInfo[&BB];
       SmallVector<GCPtr *, 8> EscapedValues;
       SmallVector<GCPtr *, 8> InfoEscapedValues;
-      for (auto EscapeInfo : BBInfo) {
+      for (auto &EscapeInfo : BBInfo) {
         if (EscapeInfo.second == Escaped) {
           EscapedValues.push_back(EscapeInfo.first);
         } else if (EscapeInfo.first->isInfoEscaped()) {
@@ -2605,11 +2610,11 @@ public:
       }
     }
 
-    for (auto PInfo : AllPtrLocInfo) {
+    for (auto &PInfo : AllPtrLocInfo) {
       delete PInfo.second;
     }
     AllPtrLocInfo.clear();
-    for (auto MemInfo : AllMemLocInfo) {
+    for (auto &MemInfo : AllMemLocInfo) {
       delete MemInfo.second;
     }
     AllMemLocInfo.clear();
@@ -2617,7 +2622,7 @@ public:
   }
 
   void walkBBs(BasicBlock *CurBB) {
-    for (auto BBInfo : EscapeBBInfo[CurBB]) {
+    for (auto &BBInfo : EscapeBBInfo[CurBB]) {
       if (BBInfo.second == Escaped && BBInfo.first->isPtr()) {
         OnceEscapedValue.insert(BBInfo.first->P);
       }
