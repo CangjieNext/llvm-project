@@ -1560,8 +1560,17 @@ bool FastISel::selectInstruction(const Instruction *I) {
 /// (fall-through) successor, and update the CFG.
 void FastISel::fastEmitBranch(MachineBasicBlock *MSucc,
                               const DebugLoc &DbgLoc) {
+  /// Force branch emission to preserve the source location in debug mode. 
+  /// Optimizing this away would cause debug info loss.
+  MachineInstr *PrevInstr = nullptr;
+  if (!FuncInfo.MBB->empty()) {
+      PrevInstr = &FuncInfo.MBB->back();
+  }
+  bool shouldPreserve = (FuncInfo.MF->getMMI().hasDebugInfo()) && 
+                        (!PrevInstr || PrevInstr->getDebugLoc() != DbgLoc);
   if (FuncInfo.MBB->getBasicBlock()->sizeWithoutDebug() > 1 &&
-      FuncInfo.MBB->isLayoutSuccessor(MSucc)) {
+      FuncInfo.MBB->isLayoutSuccessor(MSucc) &&
+      !shouldPreserve) {
     // For more accurate line information if this is the only non-debug
     // instruction in the block then emit it, otherwise we have the
     // unconditional fall-through case, which needs no instructions.
