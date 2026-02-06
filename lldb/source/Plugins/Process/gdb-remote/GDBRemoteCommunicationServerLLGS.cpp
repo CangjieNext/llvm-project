@@ -16,7 +16,7 @@
 #include <limits>
 #include <thread>
 
-#include "GDBRemoteCommunicationServerLLGS.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteCommunicationServerLLGS.h"
 #include "lldb/Host/ConnectionFileDescriptor.h"
 #include "lldb/Host/Debug.h"
 #include "lldb/Host/File.h"
@@ -46,8 +46,8 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/ScopedPrinter.h"
 
-#include "ProcessGDBRemote.h"
-#include "ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemote.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
 #include "lldb/Utility/StringExtractorGDBRemote.h"
 
 using namespace lldb;

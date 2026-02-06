@@ -13,7 +13,7 @@
 #include <string>
 
 #include "Plugins/Process/Utility/GDBRemoteSignals.h"
-#include "Plugins/Process/gdb-remote/GDBRemoteCommunicationClient.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteCommunicationClient.h"
 #include "lldb/Target/Platform.h"
 
 namespace lldb_private {

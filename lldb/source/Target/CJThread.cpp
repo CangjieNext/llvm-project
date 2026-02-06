@@ -1,0 +1,570 @@
+#include "lldb/API/LLDB.h"
+#include "lldb/Core/ValueObject.h"
+#include "lldb/Expression/UserExpression.h"
+#include "lldb/Symbol/CompileUnit.h"
+#include "lldb/Symbol/SymbolContext.h"
+#include "lldb/Symbol/Variable.h"
+#include "lldb/Symbol/VariableList.h"
+#include "lldb/Target/CJRegisterContext.h"
+#include "lldb/Target/CJThread.h"
+#include "lldb/Target/Process.h"
+#include "lldb/Target/RegisterContextUnwind.h"
+#include "lldb/Target/StopInfo.h"
+#include "lldb/Target/Thread.h"
+#include "lldb/Utility/DataExtractor.h"
+#include "lldb/lldb-private-types.h"
+#include "llvm/ADT/StringRef.h"
+#include "lldb/API/LLDB.h"
+#include "lldb/Core/Module.h"
+#include "lldb/Symbol/Variable.h"
+#include "lldb/Core/ValueObjectVariable.h"
+
+using namespace lldb_private;
+
+llvm::StringRef CJThread::type_decl_of_cjcontext_x86_linux = " \
+struct CJThreadContext { \
+    unsigned long long rsp; \
+    unsigned long long rbp; \
+    unsigned long long rbx; \
+    unsigned long long rip; \
+    unsigned long long r12; \
+    unsigned long long r13; \
+    unsigned long long r14; \
+    unsigned long long r15; \
+    unsigned int mxcsr; \
+    unsigned short fpuCw; \
+}; \
+";
+
+llvm::StringRef CJThread::type_decl_of_cjcontext_x86_windows = " \
+struct CJThreadContext { \
+    unsigned long long rsp; \
+    unsigned long long rbp; \
+    unsigned long long rbx; \
+    unsigned long long rip; \
+    unsigned long long r12; \
+    unsigned long long r13; \
+    unsigned long long r14; \
+    unsigned long long r15; \
+    unsigned int mxcsr; \
+    unsigned short fpuCw; \
+    unsigned long long rdi; \
+    unsigned long long rsi; \
+    unsigned long long xmm6[2]; \
+    unsigned long long xmm7[2]; \
+    unsigned long long xmm8[2]; \
+    unsigned long long xmm9[2]; \
+    unsigned long long xmm10[2]; \
+    unsigned long long xmm11[2]; \
+    unsigned long long xmm12[2]; \
+    unsigned long long xmm13[2]; \
+    unsigned long long xmm14[2]; \
+    unsigned long long xmm15[2]; \
+    unsigned long long gsStackLow; \
+    unsigned long long gsStackHigh; \
+    unsigned long long gsStackDeallocation; \
+}";
+
+llvm::StringRef CJThread::type_decl_of_cjcontext_arm64 = "\
+struct CJThreadContext { \
+    unsigned long long x18; \
+    unsigned long long x19; \
+    unsigned long long x20; \
+    unsigned long long x21; \
+    unsigned long long x22; \
+    unsigned long long x23; \
+    unsigned long long x24; \
+    unsigned long long x25; \
+    unsigned long long x26; \
+    unsigned long long x27; \
+    unsigned long long x28; \
+    unsigned long long x29Fp; \
+    unsigned long long x30Lr; \
+ \
+    unsigned long long pc; \
+    unsigned long long sp; \
+ \
+    unsigned long long d8; \
+    unsigned long long d9; \
+    unsigned long long d10; \
+    unsigned long long d11; \
+    unsigned long long d12; \
+    unsigned long long d13; \
+    unsigned long long d14; \
+    unsigned long long d15; \
+ \
+    unsigned int fpcr; \
+}; \
+";
+
+llvm::StringRef CJThread::type_decl_of_cjthreadinfo = " \
+struct CJThreadInfo { \
+    char name[32]; \
+    int state; \
+    unsigned int argSize; \
+    unsigned int processorId; \
+    unsigned int tid; \
+    uintptr_t argStart; \
+    unsigned long sp; \
+    unsigned long pc; \
+    unsigned long long id; \
+    unsigned long long pthreadId; \
+    struct CJThreadContext context; \
+}; \
+";
+
+
+lldb::ValueObjectSP eval(Process *process, llvm::StringRef expr, Status &error) {
+  Target &target = process->GetTarget();
+  ThreadList &thlist = process->GetThreadList();
+  lldb::ThreadSP thread = thlist.GetSelectedThread();
+
+  if (!thread)
+    error.SetErrorString("(SafeUserExpr) failed to get a nonsynthetic thread");
+  ExecutionContext exe_ctx(process, thread.get(), nullptr);
+
+  lldb::ValueObjectSP result;
+  lldb_private::EvaluateExpressionOptions options;
+  options.SetUseDynamic(target.GetPreferDynamicValue());
+  options.SetUnwindOnError(true);
+  options.SetIgnoreBreakpoints(true);
+  options.SetLanguage(target.GetLanguage());
+  options.SetCangjieUserExpr(false);
+
+  UserExpression::Evaluate(exe_ctx, options, expr, "", result, error);
+  return error.Fail() ? nullptr : result;
+}
+
+template <class T>
+void ValueObjectCopyData(lldb::ValueObjectSP valobj, T *to, Status &error) {
+  if (!valobj || !to) {
+    error.SetErrorString("invalid arguments: null pointer");
+    return;
+  }
+
+  DataExtractor data;
+  valobj->GetData(data, error);
+  if (error.Fail())
+    return;
+
+  llvm::Optional<size_t> vo_size = valobj->GetByteSize();
+  if (!vo_size || *vo_size != sizeof(T)) {
+    error.SetErrorStringWithFormat(
+        "size mismatch: ValueObject size = %zu, destination size = %zu",
+        *vo_size, sizeof(T));
+    return;
+  }
+
+  if (data.GetByteSize() < sizeof(T)) {
+    error.SetErrorString("data extractor size too small");
+    return;
+  }
+
+  const void *src = data.GetDataStart();
+  if (!src) {
+    error.SetErrorString("failed to extract ValueObject data");
+    return;
+  }
+
+  memcpy(to, src, sizeof(T));
+  error.Clear(); // success
+}
+
+static size_t GetVariableCallback(void *baton, const char *name,
+                                  VariableList &variable_list) {
+  size_t old_size = variable_list.GetSize();
+  Target *target = static_cast<Target *>(baton);
+  if (target)
+    target->GetImages().FindGlobalVariables(ConstString(name), UINT32_MAX,
+                                            variable_list);
+  return variable_list.GetSize() - old_size;
+}
+
+lldb::VariableSP FindVariableInProcess(Process &process, const char *var_name) {
+    ConstString name(var_name);
+    VariableList variable_list;
+    ValueObjectList valobj_list;
+    ExecutionContextScope *scope = &process;
+    Variable::GetValuesForVariableExpressionPath(
+              var_name, scope,
+              GetVariableCallback, &process.GetTarget(), variable_list, valobj_list);
+    return variable_list.GetSize() > 0 ? variable_list.GetVariableAtIndex(0) : nullptr;
+}
+
+// Recursively dump ValueObject hierarchy
+void DumpValueObjectRecursive(ValueObject *valobj, int indent = 0) {
+    if (!valobj)
+        return;
+
+    std::string indent_str(indent, ' ');
+
+    // Print name
+    llvm::StringRef name = valobj->GetName().AsCString("");
+    lldb::addr_t addr = valobj->GetAddressOf(true);
+
+    // Try to get scalar (for basic types)
+    if (valobj->GetCompilerType().IsScalarType()) {
+        lldb_private::Scalar scalar;
+        if (valobj->ResolveValue(scalar)) {
+            __builtin_printf("%s%s = 0x%llx (addr=0x%llx)\n",
+                   indent_str.c_str(),
+                   name.str().c_str(),
+                   valobj->GetValueAsUnsigned(-1ull, nullptr),
+                   (unsigned long long)addr);
+        } else {
+            __builtin_printf("%s%s = <unavailable> (addr=0x%llx)\n",
+                   indent_str.c_str(),
+                   name.str().c_str(),
+                   (unsigned long long)addr);
+        }
+    } else {
+        __builtin_printf("%s%s (addr=0x%llx)\n",
+               indent_str.c_str(),
+               name.str().c_str(),
+               (unsigned long long)addr);
+    }
+
+    // Recurse into children
+    const size_t num_children = valobj->GetNumChildren();
+    for (size_t i = 0; i < num_children; ++i) {
+        lldb::ValueObjectSP child = valobj->GetChildAtIndex(i, true);
+        if (child && child->GetName() != "name")
+            DumpValueObjectRecursive(child.get(), indent + 2);
+    }
+}
+
+/*
+ * Data structure layout (simplified):
+ *
+ * struct ScheduleManager {
+ *     ...
+ *     Dulink allCJThreadList;   // points to CJThread::allCJThreadDulink
+ * };
+ *
+ * struct CJThread {
+ *     ...
+ *     Thread* th;               // pointer to associated Thread
+ *     ...
+ *     CJThreadContext context;            // execution context
+ *     ...
+ *     unsigned long long id;    // unique CJThread id
+ *     ...
+ *     Dulink allCJThreadDulink; // intrusive list node linking all CJThreads
+ * };
+ *
+ * struct Thread {
+ *     ...
+ *     tid_t tid;                // native thread id
+ * };
+ *
+ * Note:
+ * - On macOS, tid_t is 8 bytes
+ * - On other platforms, tid_t is 4 bytes
+ */
+constexpr int offset_of_ScheduleManager_dot_allCJThreadList = 128;
+constexpr int offset_of_CJThread_dot_allCJThreadDulink = 120;
+constexpr int offset_of_CJThread_dot_context = 24;
+constexpr int offset_of_CJThread_dot_thread = 16;
+constexpr int offset_of_CJThread_dot_state = 96;
+constexpr int offset_of_CJThread_dot_id = 336;
+constexpr int offset_of_Thread_dot_tid = 104;
+
+static bool ReadMemoryChecked(Process &process, lldb::addr_t addr, void *dst,
+                              size_t size, Status &status) {
+  Status error;
+  size_t bytes_read = process.ReadMemory(addr, dst, size, error);
+  if (error.Fail() || bytes_read != size) {
+    status.SetErrorStringWithFormat("Failed to read memory at 0x%llx: %s",
+                                    (unsigned long long)addr,
+                                    error.AsCString());
+    return false;
+  }
+  return true;
+}
+
+std::vector<CJThreadInfoOverview> CollectAllCJThreads(Process &process,
+                                                      Status &status) {
+  std::vector<CJThreadInfoOverview> results;
+
+  // Locate global variable CJ_GScheduleManager
+  lldb::VariableSP g_schemgr =
+      FindVariableInProcess(process, "CJ_GScheduleManager");
+  if (!g_schemgr) {
+    status.SetErrorString("CJ_GScheduleManager not found");
+    return results;
+  }
+
+  ExecutionContextScope *scope = &process;
+  lldb::ValueObjectSP valobj_sp = ValueObjectVariable::Create(scope, g_schemgr);
+  if (!valobj_sp) {
+    status.SetErrorString(
+        "Failed to create ValueObject for CJ_GScheduleManager");
+    return results;
+  }
+
+  lldb::addr_t base_addr = valobj_sp->GetAddressOf();
+  if (base_addr == LLDB_INVALID_ADDRESS) {
+    status.SetErrorString("Could not resolve CJ_GScheduleManager load address");
+    return results;
+  }
+
+  // allCJThreadList is a dulink list head inside ScheduleManager
+  lldb::addr_t list_head =
+      base_addr + offset_of_ScheduleManager_dot_allCJThreadList;
+
+  // First dulink entry (head->next)
+  lldb::addr_t dulink_entry = 0;
+  if (!ReadMemoryChecked(process, list_head + 8, &dulink_entry,
+                         sizeof(dulink_entry), status))
+    return results;
+
+  // Traverse the circular doubly linked list
+  while (dulink_entry != list_head && dulink_entry != 0) {
+    lldb::addr_t cjthread_addr =
+        dulink_entry - offset_of_CJThread_dot_allCJThreadDulink;
+
+    CJThreadInfoOverview overview{};
+
+    // CJThread::state
+    if (!ReadMemoryChecked(
+            process, cjthread_addr + offset_of_CJThread_dot_state,
+            &overview.state, sizeof(overview.state), status))
+      break;
+
+    // CJThread::thread
+    if (!ReadMemoryChecked(
+            process, cjthread_addr + offset_of_CJThread_dot_thread,
+            &overview.thread_ptr, sizeof(overview.thread_ptr), status))
+      break;
+
+    // CJThread::context
+    overview.context_ptr = cjthread_addr + offset_of_CJThread_dot_context;
+
+    // CJThread::id
+    if (!ReadMemoryChecked(process, cjthread_addr + offset_of_CJThread_dot_id,
+                           &overview.id, sizeof(overview.id), status))
+      break;
+
+    // Thread::tid (if thread_ptr is valid)
+    overview.tid = 0;
+    if (overview.thread_ptr != 0) {
+      uint64_t tid_val = 0;
+      if (!ReadMemoryChecked(process,
+                             overview.thread_ptr + offset_of_Thread_dot_tid,
+                             &tid_val, sizeof(tid_val), status))
+        break;
+      overview.tid = tid_val;
+    }
+
+    results.push_back(overview);
+
+    // Move to next dulink (entry->next)
+    lldb::addr_t next_entry = 0;
+    if (!ReadMemoryChecked(process, dulink_entry + 8, &next_entry,
+                           sizeof(next_entry), status))
+      break;
+
+    dulink_entry = next_entry;
+  }
+
+  return results;
+}
+
+void DumpAllCJThreads(Process &process) {
+  Status status;
+  auto threads = CollectAllCJThreads(process, status);
+
+  if (status.Fail()) {
+    llvm::errs() << "CollectAllCJThreads failed: " << status.AsCString()
+                 << "\n";
+    return;
+  }
+
+  llvm::outs() << "Found " << threads.size() << " CJThreads:\n";
+
+  for (size_t i = 0; i < threads.size(); ++i) {
+    const auto &t = threads[i];
+    llvm::outs() << llvm::formatv("[{0}] CJThread(id={1}, tid={2}, "
+                                  "thread_ptr=0x{3:X}, context_ptr=0x{4:X})\n",
+                                  i, t.id, t.tid, t.thread_ptr, t.context_ptr);
+  }
+}
+
+void DumpRegisterMapWithXMM(
+    const std::map<ConstString, lldb_private::RegisterValue> &regValMap) {
+  using namespace lldb_private;
+
+  for (const auto &kv : regValMap) {
+    const char *name = kv.first.GetCString();
+    const RegisterValue &val = kv.second;
+
+    // Scalar registers
+    if (val.GetType() == RegisterValue::eTypeUInt64 ||
+        val.GetType() == RegisterValue::eTypeUInt32 ||
+        val.GetType() == RegisterValue::eTypeUInt16 ||
+        val.GetType() == RegisterValue::eTypeUInt8) {
+      Scalar scalar = val.GetAsUInt64();
+      __builtin_printf("%s = 0x%016" PRIx64 "\n", name, scalar.ULongLong(0));
+    }
+    // Vector / XMM registers
+    else if (val.GetType() == RegisterValue::eTypeBytes) {
+      const uint8_t *data = (const uint8_t *)val.GetBytes();
+      uint32_t byte_size = val.GetByteSize();
+      __builtin_printf("%s = 0x", name);
+      for (uint32_t i = 0; i < byte_size; ++i) {
+        __builtin_printf("%02x", data[i]);
+      }
+      __builtin_printf("\n");
+    } else {
+      __builtin_printf("%s = <unknown type>\n", name);
+    }
+  }
+}
+
+bool Process::RefreshCJThreadList(Status &error, bool forceRefresh) {
+  if (!forceRefresh && m_cjthreadlist_state == CJThreadListState::HasBeenRefreshed)
+    return true;
+
+  std::vector<CJThreadInfoOverview> info_snap = CollectAllCJThreads(*this, error);
+  if (error.Fail()) return false;
+
+  ThreadList &cjtlist = GetCJThreadList();
+  cjtlist.Clear();
+  for (unsigned i = 0; i < info_snap.size(); i ++) {
+    auto cjth = std::make_shared<CJThread>(*this, info_snap[i]);
+    cjtlist.AddThread(cjth);
+  }
+
+  m_cjthreadlist_state = CJThreadListState::HasBeenRefreshed;
+  return true;
+}
+
+bool CJThread::RetrieveRegisterInfo(Process &process, CJDynamicRegisterInfoSP cjreginfo) {
+    // assume that all threads share the same register info
+    std::vector<DynamicRegisterInfo::Register> registers;
+    ThreadList &tlist = process.GetThreadList();
+    if (!tlist.GetSize()) return false;
+    lldb::ThreadSP firstThread = tlist.GetThreadAtIndex(0);
+    lldb::RegisterContextSP reg_ctx = firstThread->GetRegisterContext();
+
+    for (int i = 0, n = reg_ctx->GetRegisterCount(); i < n; i ++) {
+        const RegisterInfo *reg_info = reg_ctx->GetRegisterInfoAtIndex(i);
+
+        std::vector<uint32_t> value_regs, invalidate_regs;
+        for (uint32_t *reg = reg_info->value_regs; reg && *reg != LLDB_INVALID_REGNUM; ++reg)
+            value_regs.push_back(*reg);
+        for (uint32_t *reg = reg_info->invalidate_regs; reg && *reg != LLDB_INVALID_REGNUM; ++reg)
+            invalidate_regs.push_back(*reg);
+
+        registers.emplace_back(DynamicRegisterInfo::Register{
+            .name = ConstString(reg_info->name),
+            .alt_name = ConstString(reg_info->alt_name),
+            // .set_name = ConstString(reg_info->set_name),
+            .byte_size = reg_info->byte_size,
+            .byte_offset = reg_info->byte_offset,
+            .encoding = reg_info->encoding,
+            .format = reg_info->format,
+            .regnum_dwarf = reg_info->kinds[lldb::eRegisterKindDWARF],
+            .regnum_ehframe = reg_info->kinds[lldb::eRegisterKindEHFrame],
+            .regnum_generic = reg_info->kinds[lldb::eRegisterKindGeneric],
+            .regnum_remote = reg_info->kinds[lldb::eRegisterKindProcessPlugin],
+            .value_regs = std::move(value_regs),
+            .invalidate_regs = std::move(invalidate_regs),
+        });
+    }
+
+    for (int i = 0, n = reg_ctx->GetRegisterSetCount(); i < n; i ++) {
+        const RegisterSet *rset = reg_ctx->GetRegisterSet(i);
+        for (int j = 0; j < (int)rset->num_registers; j ++) {
+            int regno = rset->registers[j];
+            registers[regno].set_name = ConstString(rset->name);
+        }
+    }
+
+    cjreginfo->SetRegisterInfo(std::move(registers), process.GetSystemArchitecture());
+    return true;
+}
+
+CJThread::CJThread(Process &process, CJThreadInfoOverview cjtinfo, bool use_invalid_index_id)
+: Thread(process, cjtinfo.id, use_invalid_index_id), m_unwinder(*this), m_cjtinfo(cjtinfo)
+{
+  m_cjreginfo = std::make_shared<CJDynamicRegisterInfo>();
+  RetrieveRegisterInfo(process, m_cjreginfo);
+
+  /* retrieve register value */
+  Status error;
+  llvm::Triple triple = process.GetSystemArchitecture().GetTriple();
+  m_regvals = std::make_shared<std::map<ConstString, RegisterValue>>();
+  if (triple.getArch() == llvm::Triple::ArchType::x86_64 &&
+      triple.getOS() == llvm::Triple::OSType::Win32) {
+    CJThreadContext_Windows_X64 ctx{};
+    size_t n = process.ReadMemory(m_cjtinfo.context_ptr, &ctx, sizeof(ctx), error);
+    if (!error.Fail() && n == sizeof(ctx))
+      ctx.CopyTo(*m_regvals, process.GetByteOrder());
+  } else if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
+    CJThreadContext_Linux_X64 ctx{};
+    size_t n = process.ReadMemory(m_cjtinfo.context_ptr, &ctx, sizeof(ctx), error);
+    if (!error.Fail() && n == sizeof(ctx))
+      ctx.CopyTo(*m_regvals, process.GetByteOrder());
+  } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
+    CJThreadContext_Arm64 ctx{};
+    size_t n = process.ReadMemory(m_cjtinfo.context_ptr, &ctx, sizeof(ctx), error);
+    if (!error.Fail() && n == sizeof(ctx))
+      ctx.CopyTo(*m_regvals, process.GetByteOrder());
+  }
+  m_reg_context_sp =
+      std::make_shared<CJRegisterContext>(*this, m_cjreginfo, m_regvals);
+}
+
+CJThread::~CJThread() {
+  DestroyThread();
+}
+
+lldb::user_id_t CJThread::GetProtocolID() const {
+  return static_cast<lldb::user_id_t>(GetHostThreadID());
+}
+
+void CJThread::RefreshStateAfterStop() {
+}
+
+const char *CJThread::GetName() {
+    return "<cjthread>";
+}
+
+const char *CJThread::GetQueueName() {
+    return "";
+}
+
+lldb::RegisterContextSP CJThread::GetRegisterContext() {
+    if (m_cjtinfo.state == CJThreadState::eRunning) {
+      lldb::ThreadSP holding_osthread_sp = GetProcess()->GetThreadList().FindThreadByID(GetHostThreadID());
+      if (holding_osthread_sp) {
+        return holding_osthread_sp->GetRegisterContext();
+      }
+    }
+    return m_reg_context_sp;
+}
+
+lldb::RegisterContextSP CJThread::CreateRegisterContextForFrame(StackFrame *frame) {
+  lldb::RegisterContextSP reg_ctx_sp;
+  uint32_t concrete_frame_idx = 0;
+
+  if (frame)
+    concrete_frame_idx = frame->GetConcreteFrameIndex();
+
+  if (concrete_frame_idx == 0) {
+    return GetRegisterContext();
+  } else {
+    reg_ctx_sp = m_unwinder.CreateRegisterContextForFrame(frame);
+  }
+  return reg_ctx_sp;
+}
+
+bool CJThread::CalculateStopInfo() {
+  if (m_stop_info_sp && m_stop_info_sp->IsValid())
+    return true;
+
+  // Example decision logic:
+  m_stop_info_sp = StopInfo::CreateStopReasonToTrace(*reinterpret_cast<Thread*>(this));
+  return (m_stop_info_sp && m_stop_info_sp->IsValid());
+}

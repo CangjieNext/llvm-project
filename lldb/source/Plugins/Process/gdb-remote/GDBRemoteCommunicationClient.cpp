@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "GDBRemoteCommunicationClient.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteCommunicationClient.h"
 
 #include <cmath>
 #include <sys/stat.h>
@@ -29,8 +29,8 @@
 #include "lldb/Utility/State.h"
 #include "lldb/Utility/StreamString.h"
 
-#include "ProcessGDBRemote.h"
-#include "ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemote.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
 #include "lldb/Host/Config.h"
 #include "lldb/Utility/StringExtractorGDBRemote.h"
 

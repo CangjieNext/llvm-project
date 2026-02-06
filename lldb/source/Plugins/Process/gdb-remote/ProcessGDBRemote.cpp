@@ -72,14 +72,14 @@
 #include <sstream>
 #include <thread>
 
-#include "GDBRemoteRegisterContext.h"
-#include "GDBRemoteRegisterFallback.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteRegisterContext.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteRegisterFallback.h"
 #include "Plugins/Process/Utility/GDBRemoteSignals.h"
 #include "Plugins/Process/Utility/InferiorCallPOSIX.h"
 #include "Plugins/Process/Utility/StopInfoMachException.h"
-#include "ProcessGDBRemote.h"
-#include "ProcessGDBRemoteLog.h"
-#include "ThreadGDBRemote.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemote.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/ThreadGDBRemote.h"
 #include "lldb/Host/Host.h"
 #include "lldb/Utility/StringExtractorGDBRemote.h"
 

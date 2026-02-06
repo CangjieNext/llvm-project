@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "GDBRemoteSignals.h"
+#include "Plugins/Process/Utility/GDBRemoteSignals.h"
 
 using namespace lldb_private;
 
