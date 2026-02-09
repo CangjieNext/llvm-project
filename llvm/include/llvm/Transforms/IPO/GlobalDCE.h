@@ -79,10 +79,10 @@ private:
 
 struct CangjieDCE {
   struct GenericFuncInfo {
-    bool IsValid= false;
+    bool IsValid = false;
     GenericFuncInfo *Prev = nullptr;
     // Save all func tables with current type.
-    SmallPtrSet<GlobalVariable *, 4> FuncTables;
+    SmallPtrSet<std::pair<GlobalVariable *, bool>, 4> FuncTables;
     DenseMap<GlobalVariable *, GenericFuncInfo *> Next;
   };
 

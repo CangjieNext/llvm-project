@@ -152,6 +152,14 @@ void GlobalDCEPass::UpdateGVDependencies(GlobalValue &GV) {
                         << GV.getName() << "\n");
       continue;
     }
+    if (CJPipeline) {
+      auto *Usee = dyn_cast<GlobalVariable>(&GV);
+      auto *User = dyn_cast<GlobalVariable>(GVU);
+      if (VFESafeVTables.count(User) && Usee && Usee->isCJTypeInfo())
+        continue;
+      if (CangjieDCE::maybeFakeLiveOfTypeMeta(User, Usee))
+        continue;
+    }
     if (CJPipeline &&
         CangjieDCE::maybeFakeLiveOfTypeMeta(dyn_cast<GlobalVariable>(GVU),
                                             dyn_cast<GlobalVariable>(&GV)))
@@ -587,9 +595,10 @@ CangjieDCE::scanVTable(GlobalVariable &GV) {
 void CangjieDCE::updateDependencies(
     Function *Caller,
     DenseMap<GenericFuncInfo *, SmallSet<uint64_t, 4>> &Relation) {
-  auto Mark = [Caller, this](SmallPtrSetImpl<GlobalVariable *> &FTs,
-                             uint64_t Offset) {
-    for (auto *FT : FTs) {
+  auto Mark = [Caller,
+               this](SmallPtrSetImpl<std::pair<GlobalVariable *, bool>> &FTs,
+                     uint64_t Offset) {
+    for (auto [FT, HasCompilerInfo] : FTs) {
       auto *C = FT->getInitializer();
       if (C->getNumOperands() <= Offset)
         continue;
@@ -599,6 +608,14 @@ void CangjieDCE::updateDependencies(
         continue;
       assert(Callee != nullptr);
       this->DCE.GVDependencies[Caller].insert(Callee);
+      if (!HasCompilerInfo)
+        continue;
+      unsigned N = C->getNumOperands();
+      assert(N % 2 == 0 && Offset < N / 2 &&
+             "front end generate error functable");
+      if (auto *Pair = dyn_cast_or_null<GlobalVariable>(
+              C->getOperand(Offset + N / 2)->stripPointerCasts()))
+        this->DCE.GVDependencies[Caller].insert(Pair);
     }
   };
   for (auto &[GFI, Offsets] : Relation) {
@@ -644,7 +661,11 @@ void CangjieDCE::addCangjieVirtualFunctionDependencies(Module &M) {
     if (GlobalValue::isLocalLinkage(TII->getLinkage())) {
       auto *GFI = resolveVFEMeta(GV.getMetadata("inheritedType"), M);
       assert(GFI);
-      GFI->FuncTables.insert(FT);
+      bool HasCompilerInfo =
+          cast<ConstantInt>(
+              GV.getInitializer()->getOperand(ExtensionDefFieldType::ET_FLAG))
+              ->getZExtValue() > 0;
+      GFI->FuncTables.insert({FT, HasCompilerInfo});
       DCE.VFESafeVTables.insert(FT);
     }
   }
