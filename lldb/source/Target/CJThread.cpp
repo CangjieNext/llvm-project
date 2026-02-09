@@ -282,27 +282,82 @@ static bool ReadMemoryChecked(Process &process, lldb::addr_t addr, void *dst,
   return true;
 }
 
+lldb::addr_t FindSymbolLoadAddressInProcess(Process &process,
+                                      const char *name_cstr) {
+  if (!name_cstr || !name_cstr[0])
+    return LLDB_INVALID_ADDRESS;
+
+  Target &target = process.GetTarget();
+  ConstString name(name_cstr);
+
+  // ------------------------------------------------------------
+  // 1) Try DWARF variable path (original behavior)
+  // ------------------------------------------------------------
+  {
+    VariableList variable_list;
+    ValueObjectList valobj_list;
+    ExecutionContextScope *scope = &process;
+
+    Variable::GetValuesForVariableExpressionPath(
+        name_cstr,
+        scope,
+        GetVariableCallback,
+        &target,
+        variable_list,
+        valobj_list);
+
+    if (valobj_list.GetSize() > 0) {
+      lldb::ValueObjectSP vo = valobj_list.GetValueObjectAtIndex(0);
+      if (vo) {
+        lldb::addr_t addr = vo->GetAddressOf();
+        if (addr != LLDB_INVALID_ADDRESS && addr != 0)
+          return addr;
+
+        addr = vo->GetValueAsUnsigned(LLDB_INVALID_ADDRESS);
+        if (addr != LLDB_INVALID_ADDRESS && addr != 0)
+          return addr;
+      }
+    }
+  }
+
+  // ------------------------------------------------------------
+  // 2) Fallback: symbol table (.dyn / dlsym-visible exports)
+  // ------------------------------------------------------------
+  SymbolContextList sc_list;
+
+  // Prefer data symbols (global variables)
+  target.GetImages().FindSymbolsWithNameAndType(
+      name, lldb::eSymbolTypeData, sc_list);
+
+  // Relax the filter if needed
+  if (sc_list.GetSize() == 0) {
+    target.GetImages().FindSymbolsWithNameAndType(
+        name, lldb::eSymbolTypeAny, sc_list);
+  }
+
+  if (sc_list.GetSize() == 0)
+    return LLDB_INVALID_ADDRESS;
+
+  SymbolContext sc;
+  sc_list.GetContextAtIndex(0, sc);
+
+  if (!sc.symbol)
+    return LLDB_INVALID_ADDRESS;
+
+  Address addr = sc.symbol->GetAddress();
+  lldb::addr_t load_addr = addr.GetLoadAddress(&target);
+
+  if (load_addr == LLDB_INVALID_ADDRESS || load_addr == 0)
+    return LLDB_INVALID_ADDRESS;
+
+  return load_addr;
+}
+
 std::vector<CJThreadInfoOverview> CollectAllCJThreads(Process &process,
                                                       Status &status) {
   std::vector<CJThreadInfoOverview> results;
+  lldb::addr_t base_addr = FindSymbolLoadAddressInProcess(process, "CJ_GScheduleManager");
 
-  // Locate global variable CJ_GScheduleManager
-  lldb::VariableSP g_schemgr =
-      FindVariableInProcess(process, "CJ_GScheduleManager");
-  if (!g_schemgr) {
-    status.SetErrorString("CJ_GScheduleManager not found");
-    return results;
-  }
-
-  ExecutionContextScope *scope = &process;
-  lldb::ValueObjectSP valobj_sp = ValueObjectVariable::Create(scope, g_schemgr);
-  if (!valobj_sp) {
-    status.SetErrorString(
-        "Failed to create ValueObject for CJ_GScheduleManager");
-    return results;
-  }
-
-  lldb::addr_t base_addr = valobj_sp->GetAddressOf();
   if (base_addr == LLDB_INVALID_ADDRESS) {
     status.SetErrorString("Could not resolve CJ_GScheduleManager load address");
     return results;
