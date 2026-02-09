@@ -152,10 +152,14 @@ void GlobalDCEPass::UpdateGVDependencies(GlobalValue &GV) {
                         << GV.getName() << "\n");
       continue;
     }
-    if (CJPipeline &&
-        CangjieDCE::maybeFakeLiveOfTypeMeta(dyn_cast<GlobalVariable>(GVU),
-                                            dyn_cast<GlobalVariable>(&GV)))
-      continue;
+    if (CJPipeline) {
+      auto *Usee = dyn_cast<GlobalVariable>(&GV);
+      auto *User = dyn_cast<GlobalVariable>(GVU);
+      if (VFESafeVTables.count(User) && Usee && Usee->isCJTypeInfo())
+        continue;
+      if (CangjieDCE::maybeFakeLiveOfTypeMeta(User, Usee))
+        continue;
+    }
     GVDependencies[GVU].insert(&GV);
   }
 }
@@ -588,6 +592,7 @@ void CangjieDCE::updateDependencies(
     Function *Caller,
     DenseMap<GenericFuncInfo *, SmallSet<uint64_t, 4>> &Relation) {
   auto Mark = [Caller, this](SmallPtrSetImpl<GlobalVariable *> &FTs,
+                             DenseMap<GlobalVariable *, bool> &HasCompilerInfo,
                              uint64_t Offset) {
     for (auto *FT : FTs) {
       auto *C = FT->getInitializer();
@@ -599,6 +604,14 @@ void CangjieDCE::updateDependencies(
         continue;
       assert(Callee != nullptr);
       this->DCE.GVDependencies[Caller].insert(Callee);
+      if (!HasCompilerInfo[FT])
+        continue;
+      unsigned N = C->getNumOperands();
+      assert(N % 2 == 0 && Offset < N / 2 &&
+             "front end generate error functable");
+      if (auto *Pair = dyn_cast_or_null<GlobalVariable>(
+              C->getOperand(Offset + N / 2)->stripPointerCasts()))
+        this->DCE.GVDependencies[Caller].insert(Pair);
     }
   };
   for (auto &[GFI, Offsets] : Relation) {
@@ -608,7 +621,7 @@ void CangjieDCE::updateDependencies(
       while (!Worklist.empty()) {
         auto *Child = Worklist.pop_back_val();
         for (auto [_, N] : Child->Next) {
-          Mark(N->FuncTables, I);
+          Mark(N->FuncTables, N->HasCompilerInfo, I);
           Worklist.push_back(N);
         }
       }
@@ -616,7 +629,7 @@ void CangjieDCE::updateDependencies(
       while (GFI != Root) {
         auto &FTs = GFI->FuncTables;
         GFI = GFI->Prev;
-        Mark(FTs, I);
+        Mark(FTs, GFI->HasCompilerInfo, I);
       }
     }
   }
@@ -645,6 +658,10 @@ void CangjieDCE::addCangjieVirtualFunctionDependencies(Module &M) {
       auto *GFI = resolveVFEMeta(GV.getMetadata("inheritedType"), M);
       assert(GFI);
       GFI->FuncTables.insert(FT);
+      GFI->HasCompilerInfo[FT] =
+          cast<ConstantInt>(
+              GV.getInitializer()->getOperand(ExtensionDefFieldType::ET_FLAG))
+              ->getZExtValue() != 0;
       DCE.VFESafeVTables.insert(FT);
     }
   }
