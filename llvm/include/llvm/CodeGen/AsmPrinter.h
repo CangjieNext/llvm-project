@@ -463,7 +463,7 @@ public:
   virtual void emitJumpTableInfo();
 
   /// Emit the specified global variable to the .s file.
-  virtual void emitGlobalVariable(const GlobalVariable *GV);
+  virtual void emitGlobalVariable(const GlobalVariable *GV, bool IsTypeInfo = false/* temp hacking modify for Technological puncture*/);
 
   /// Check to see if the specified global is a special global used by LLVM. If
   /// so, emit it and return true, otherwise do nothing and return false.
@@ -510,7 +510,7 @@ public:
   /// label of that alias needs to be emitted before the corresponding element.
   using AliasMapTy = DenseMap<uint64_t, SmallVector<const GlobalAlias *, 1>>;
   void emitGlobalConstant(const DataLayout &DL, const Constant *CV,
-                          AliasMapTy *AliasList = nullptr, bool IsReflectGV = false);
+                          AliasMapTy *AliasList = nullptr, bool IsReflectGV = false, bool IsTypeInfo = false/* temp hacking modify for Technological puncture*/);
 
   /// Unnamed constant global variables solely contaning a pointer to
   /// another globals variable act like a global variable "proxy", or GOT
