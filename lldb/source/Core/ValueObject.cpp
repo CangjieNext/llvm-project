@@ -3238,7 +3238,7 @@ bool ValueObject::GetCangjieDynamicType(
       return false;
     }
   }
-  if (type_class != lldb::eTypeClassClass) {
+  if (type_class != lldb::eTypeClassClass || GetCompilerType().GetNumDirectBaseClasses() != 1) {
     return false;
   }
   Status error;
