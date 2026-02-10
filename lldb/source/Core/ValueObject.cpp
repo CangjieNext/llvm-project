@@ -3209,6 +3209,45 @@ ValueObjectSP ValueObject::Persist() {
   return persistent_var_sp->GetValueObject();
 }
 
+static std::string GetTypeInfoName(lldb::TargetSP target, lldb::addr_t addr, CompilerType type) {
+  Status error;
+  uint64_t type_addr = 0;
+  target->ReadMemory(Address(addr), &type_addr, sizeof(uint64_t), error);
+  if (error.Fail()) {
+    return "";
+  }
+  target->ReadMemory(Address(type_addr), &type_addr, sizeof(uint64_t), error);
+  if (error.Fail()) {
+    return "";
+  }
+  // max type_name length is 128.
+  char type_name[128];
+  target->ReadMemory(Address(type_addr), &type_name, 128, error);
+  if (error.Fail()) {
+    return "";
+  }
+
+  std::string dynamic_name(type_name);
+  auto pos = dynamic_name.find(":");
+  while (pos != std::string::npos) {
+    dynamic_name.replace(pos, 1, "::");
+    // "::" size is 2.
+    pos = dynamic_name.find(":", pos + 2);
+  }
+  if (dynamic_name.size() >= 3 && dynamic_name.compare(dynamic_name.size() - 3, 3, ".ti") == 0) {
+    dynamic_name.resize(dynamic_name.size() - 3);
+  }
+
+  for (uint32_t i = 0; i < type.GetNumDirectBaseClasses(); i++) {
+    auto base = type.GetDirectBaseClassAtIndex(i, nullptr);
+    if (dynamic_name == base.GetTypeName().AsCString()) {
+      return dynamic_name;
+    }
+  }
+
+  return "";
+}
+
 bool ValueObject::GetCangjieDynamicType(
   TypeAndOrName &class_type_or_name, bool should_update, bool should_check_parent) {
   if (IsCangjieGenericType()) {
@@ -3238,43 +3277,18 @@ bool ValueObject::GetCangjieDynamicType(
       return false;
     }
   }
-  if (type_class != lldb::eTypeClassClass) {
-    return false;
-  }
-  Status error;
-  uint64_t type_addr = 0;
-  class_type_or_name.Clear();
-  auto target = GetTargetSP();
-  target->ReadMemory(Address(this->GetAddressOf()), &type_addr, sizeof(uint64_t), error);
-  if (error.Fail()) {
-    return false;
-  }
-  target->ReadMemory(Address(type_addr), &type_addr, sizeof(uint64_t), error);
-  if (error.Fail()) {
-    return false;
-  }
-  // max type_name length is 128.
-  char type_name[128];
-  target->ReadMemory(Address(type_addr), &type_name, 128, error);
-  if (error.Fail()) {
+  if (type_class != lldb::eTypeClassClass || GetTypeName().GetStringRef().contains("E1$")) {
     return false;
   }
 
-  std::string dynamic_name(type_name);
-  auto pos = dynamic_name.find(":");
-  while (pos != std::string::npos) {
-    dynamic_name.replace(pos, 1, "::");
-    // "::" size is 2.
-    pos = dynamic_name.find(":", pos + 2);
+  auto target = GetTargetSP();
+  auto dynamic_name = GetTypeInfoName(target, this->GetAddressOf(), GetCompilerType());
+  if (dynamic_name.empty()) {
+    return false;
   }
+
   lldb_private::TypeList types;
   llvm::DenseSet<SymbolFile *> searched_symbol_files;
-  bool is_ti_type = false;
-  if (!GetTypeName().GetStringRef().contains("E1$")) {
-    if (dynamic_name != GetTypeName().AsCString()) {
-      is_ti_type = true;
-    }
-  }
   target->GetImages().FindTypes(nullptr, ConstString(dynamic_name), true, UINT32_MAX,
                                 searched_symbol_files, types);
   TypeSP type_sp = types.GetSize() == 0 ? TypeSP() : types.GetTypeAtIndex(0);
@@ -3287,10 +3301,7 @@ bool ValueObject::GetCangjieDynamicType(
     }
     return true;
   }
-  if (is_ti_type) {
-    has_typeinfo = true;
-    return true;
-  }
+
   LLDB_LOGF(log, "Can not found dynamic type with variable name %s", this->GetName().AsCString());
   return false;
 }
