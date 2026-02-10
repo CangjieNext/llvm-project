@@ -3229,7 +3229,7 @@ bool ValueObject::GetCangjieDynamicType(
   auto type_class = GetCompilerType().GetTypeClass() == lldb::eTypeClassTypedef ?
                     GetCompilerType().GetTypedefedType().GetTypeClass() :
                     GetCompilerType().GetTypeClass();
-  if (type_class == lldb::eTypeClassBuiltin) {
+  if (type_class == lldb::eTypeClassBuiltin || GetCompilerType().GetNumDirectBaseClasses() != 1) {
     return false;
   }
 
