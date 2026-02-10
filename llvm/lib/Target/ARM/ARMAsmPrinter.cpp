@@ -108,11 +108,11 @@ void ARMAsmPrinter::emitXXStructor(const DataLayout &DL, const Constant *CV) {
   OutStreamer->emitValue(E, Size);
 }
 
-void ARMAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
+void ARMAsmPrinter::emitGlobalVariable(const GlobalVariable *GV, bool IsTypeInfo) {
   if (PromotedGlobals.count(GV))
     // The global was promoted into a constant pool. It should not be emitted.
     return;
-  AsmPrinter::emitGlobalVariable(GV);
+  AsmPrinter::emitGlobalVariable(GV, IsTypeInfo);
 }
 
 /// runOnMachineFunction - This uses the emitInstruction()

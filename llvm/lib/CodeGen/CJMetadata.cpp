@@ -13,19 +13,27 @@
 //===----------------------------------------------------------------------===//
 #include "llvm/CodeGen/CJMetadata.h"
 
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/BinaryFormat/COFF.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/StackMaps.h"
+#include "llvm/IR/Constant.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Type.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCSectionCOFF.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCStreamer.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Target/TargetMachine.h"
 
 namespace llvm {
@@ -594,9 +602,60 @@ void CJMetadataInfo::emitGCRoots() {
   }
 }
 
+/*
+ case one: GV value(RefAddr) is local
+ 
+ RefAddr - GVAddr = FIXED_VALUE;
+
+  ┌─────────────────┐ ← BaseAddr
+  │     Parent      │
+  ├─────────────────┤
+  │                 │
+  │    ......       │
+  │      GV         │ ← GVAddr
+  │    ......       │  (GV point to the RefAddr)
+  │                 │
+  │                 │
+  │                 │
+  └─────────────────┘
+
+  FIXED_VALUE = RefAddr - GVAddr,
+  which is calculated by createRelativeOffsetConstantExpr.
+
+*/
+
+static Constant *createRelativeOffsetConstantExpr(Constant *GV, const GlobalVariable *Parent, unsigned GVIndex) {
+  auto *Initializer = Parent->getInitializer();
+  auto &Ctx = GV->getContext();
+  auto *RefAddr = ConstantExpr::getPtrToInt(GV, Type::getInt64Ty(Ctx));
+  SmallVector<Constant*, 2> Indices = {
+    ConstantInt::get(Type::getInt32Ty(Ctx), 0),
+    ConstantInt::get(Type::getInt32Ty(Ctx), GVIndex)
+  };
+  auto *GEP = ConstantExpr::getGetElementPtr(Initializer->getType(), cast<Constant>(const_cast<GlobalVariable*>(Parent)), Indices);
+  auto *GVAddr = ConstantExpr::getPtrToInt(GEP, Type::getInt64Ty(Ctx));
+  auto *RelativeOffset = ConstantExpr::getSub(RefAddr, GVAddr);
+  return ConstantExpr::getIntToPtr(RelativeOffset, Initializer->getOperand(GVIndex)->getType());
+}
+
 void CJMetadataInfo::emitTypeInfo() {
-  for (const auto *TI : InternalTITable)
-    AP.emitGlobalVariable(TI);
+  for (const auto *TI : InternalTITable) {
+    auto *Initializer = TI->getInitializer();
+    SmallVector<Constant *, 16> Operands;
+    for (unsigned I = 0; I < Initializer->getNumOperands(); ++I) {
+      Operands.push_back(cast<Constant>(Initializer->getOperand(I)));
+      // should change more ref to offset
+      if (I ==ClassInfoFieldType::CIT_OFFSETS) {
+        if (isa_and_nonnull<GlobalVariable>(getUnderlyingObject(Initializer->getOperand(I)))) {
+          auto *CE = createRelativeOffsetConstantExpr(cast<GlobalVariable>(Initializer->getOperand(I)->stripPointerCasts()), TI, I);
+          Operands[I] = CE;
+        }
+      }
+    }
+    const_cast<GlobalVariable *>(TI)->setInitializer(ConstantStruct::get(cast<StructType>(TI->getValueType()), Operands));
+    AP.emitGlobalVariable(TI, true);
+  }
+
   for (const auto *TIFields : TIFieldsTable)
     AP.emitGlobalVariable(TIFields);
 }
