@@ -196,7 +196,7 @@ struct LowerGetFieldOffset {
 
   // i64 @llvm.cj.get.field.offset (i8* TI, i64 i, i32 j)
   // %TI = bitcast i8* TI to Typeinfo*
-  // %Offsets.ptr = getelementptr inbounds Typeinfo, Typeinfo* %TI, i32 0, i32 9
+  // %Offsets.ptr = getelementptr inbounds Typeinfo, Typeinfo* %TI, i32 0, i32 10
   // %Offsets = load i32*, i32** %Offsets.ptr, align 8
   // %Offset.ptr = getelementptr inbounds i32, i32* %Offsets, i64 i
   // %Offset = load i32, i32* %Offset.ptr, align 4
@@ -213,9 +213,16 @@ struct LowerGetFieldOffset {
     Value *OffsetsPtr = IRB.CreateGEP(KlassType, TICast, {Idxs}, "", true);
     Type *Int32PtrTy = I32Ty->getPointerTo();
     Value *Offsets = IRB.CreateLoad(Int32PtrTy, OffsetsPtr);
+
+    // OffsetRefAddr = OffsetPtrValue + OffsetValue;
+    auto *OffsetsValue = IRB.CreatePtrToInt(Offsets, IRB.getInt64Ty());
+    auto *OffsetsPtrValue = IRB.CreatePtrToInt(OffsetsPtr, IRB.getInt64Ty());
+    auto *RefAddrValue = IRB.CreateAdd(OffsetsValue, OffsetsPtrValue);
+    auto *RefAddr = IRB.CreateIntToPtr(RefAddrValue, Int32PtrTy);
+
     Idxs.clear();
     Idxs.push_back(FieldIndex);
-    Value *OffsetPtr = IRB.CreateGEP(I32Ty, Offsets, {Idxs}, "", true);
+    Value *OffsetPtr = IRB.CreateGEP(I32Ty, RefAddr, {Idxs}, "", true);
     Offset = IRB.CreateLoad(I32Ty, OffsetPtr);
     Offset = IRB.CreateZExt(Offset, IRB.getInt64Ty());
     return IRB.CreateAdd(Offset, IRB.getInt64(AttachedInt));
@@ -538,6 +545,9 @@ public:
     auto *ST = StructType::getTypeByName(CB->getContext(), "TypeInfo");
     auto *SL = CB->getModule()->getDataLayout().getStructLayout(ST);
     auto VOffset = SL->getElementOffset(CIT_VTABLE);
+#ifndef __arm__
+    VOffset -= 4;
+#endif
     auto *GEP0 =
         IRB.CreateGEP(TI->getType()->getNonOpaquePointerElementType(), TI,
                       {ConstantInt::get(IRB.getInt32Ty(), VOffset)});

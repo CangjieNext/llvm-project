@@ -115,6 +115,7 @@
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include <algorithm>
 #include <cassert>
 #include <cinttypes>
@@ -699,7 +700,7 @@ MCSymbol *AsmPrinter::getSymbolPreferLocal(const GlobalValue &GV) const {
 }
 
 /// EmitGlobalVariable - Emit the specified global variable to the .s file.
-void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
+void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV,  bool IsTypeInfo) {
   bool IsEmuTLSVar = TM.useEmulatedTLS() && GV->isThreadLocal();
   assert(!(IsEmuTLSVar && GV->hasCommonLinkage()) &&
          "No emulated TLS variables in the common section");
@@ -897,7 +898,7 @@ void AsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   }
 
   emitGlobalConstant(GV->getParent()->getDataLayout(), GV->getInitializer(),
-                     nullptr, IsReflectionGV);
+                     nullptr, IsReflectionGV, IsTypeInfo);
 
   if (MAI->hasDotTypeDotSizeDirective())
     // .size foo, 42
@@ -2980,7 +2981,8 @@ static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *C,
                                    uint64_t Offset = 0,
                                    AsmPrinter::AliasMapTy *AliasList =
                                        nullptr,
-                                   bool IsReflectGV = false);
+                                   bool IsReflectGV = false,
+                                  bool IsTypeInfo = false);
 
 static void emitGlobalConstantFP(const ConstantFP *CFP, AsmPrinter &AP);
 static void emitGlobalConstantFP(APFloat APF, Type *ET, AsmPrinter &AP);
@@ -3153,32 +3155,54 @@ static void emitGlobalConstantStruct(const DataLayout &DL,
                                      const ConstantStruct *CS, AsmPrinter &AP,
                                      const Constant *BaseCV, uint64_t Offset,
                                      AsmPrinter::AliasMapTy *AliasList,
-                                     bool IsReflectGV = false) {
+                                     bool IsReflectGV = false,
+                                    bool IsTypeInfo = false/* temp hacking modify for Technological puncture*/) {
   // Print the fields in successive locations. Pad to align if needed!
   unsigned Size = DL.getTypeAllocSize(CS->getType());
+
+#ifndef __arm__
+  if (IsTypeInfo) {
+    Size -= 4;
+  }
+#endif
   const StructLayout *Layout = DL.getStructLayout(CS->getType());
   uint64_t SizeSoFar = 0;
   for (unsigned I = 0, E = CS->getNumOperands(); I != E; ++I) {
-    const Constant *Field = CS->getOperand(I);
-
+    bool ChangeTo32Bits = IsTypeInfo && I == ClassInfoFieldType::CIT_OFFSETS;
+    const Constant *Field =
+        ChangeTo32Bits
+            ? ConstantExpr::getPtrToInt(CS->getOperand(I), Type::getInt32Ty(CS->getContext()))
+            : CS->getOperand(I);
     // Print the actual field value.
     emitGlobalConstantImpl(DL, Field, AP, BaseCV, Offset + SizeSoFar,
-                           AliasList, IsReflectGV);
+                           AliasList, IsReflectGV, IsTypeInfo);
 
     // Check if padding is needed and insert one or more 0s.
     uint64_t FieldSize = DL.getTypeAllocSize(Field->getType());
-    uint64_t PadSize = ((I == E - 1 ? Size : Layout->getElementOffset(I + 1)) -
-                        Layout->getElementOffset(I)) -
-                       FieldSize;
+    uint64_t PadSize = 0;
+    if (IsTypeInfo) {
+#ifdef __arm__
+      PadSize =
+          ((I == E - 1 ? Size : Layout->getElementOffset(I + 1)) -
+           Layout->getElementOffset(I)) -
+          FieldSize;
+#endif
+    } else {
+      PadSize =
+          ((I == E - 1 ? Size : Layout->getElementOffset(I + 1)) -
+           Layout->getElementOffset(I)) -
+          FieldSize;
+    }
     SizeSoFar += FieldSize + PadSize;
-
     // Insert padding - this may include padding to increase the size of the
     // current field up to the ABI size (if the struct is not packed) as well
     // as padding to ensure that the next field starts at the right offset.
     AP.OutStreamer->emitZeros(PadSize);
   }
-  assert(SizeSoFar == Layout->getSizeInBytes() &&
-         "Layout of constant struct may be incorrect!");
+  if (!IsTypeInfo) {
+    assert(SizeSoFar == Layout->getSizeInBytes() &&
+           "Layout of constant struct may be incorrect!");
+  }
 }
 
 static void emitGlobalConstantFP(APFloat APF, Type *ET, AsmPrinter &AP) {
@@ -3423,7 +3447,7 @@ static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *CV,
                                    AsmPrinter &AP, const Constant *BaseCV,
                                    uint64_t Offset,
                                    AsmPrinter::AliasMapTy *AliasList,
-                                   bool IsReflectGV) {
+                                   bool IsReflectGV,  bool IsTypeInfo) {
   emitGlobalAliasInline(AP, Offset, AliasList);
   uint64_t Size = DL.getTypeAllocSize(CV->getType());
 
@@ -3470,14 +3494,14 @@ static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *CV,
     return emitGlobalConstantArray(DL, CVA, AP, BaseCV, Offset, AliasList);
 
   if (const ConstantStruct *CVS = dyn_cast<ConstantStruct>(CV))
-    return emitGlobalConstantStruct(DL, CVS, AP, BaseCV, Offset, AliasList, IsReflectGV);
+    return emitGlobalConstantStruct(DL, CVS, AP, BaseCV, Offset, AliasList, IsReflectGV, IsTypeInfo);
 
   if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(CV)) {
     // Look through bitcasts, which might not be able to be MCExpr'ized (e.g. of
     // vectors).
     if (CE->getOpcode() == Instruction::BitCast)
       return emitGlobalConstantImpl(DL, CE->getOperand(0), AP, nullptr, 0,
-                                    nullptr, IsReflectGV);
+                                    nullptr, IsReflectGV, IsTypeInfo);
 
     if (Size > 8) {
       // If the constant expression's size is greater than 64-bits, then we have
@@ -3545,10 +3569,10 @@ static bool isNonStackOverflowFunc(MachineFunction &MF, unsigned FrameSize) {
 
 /// EmitGlobalConstant - Print a general LLVM constant to the .s file.
 void AsmPrinter::emitGlobalConstant(const DataLayout &DL, const Constant *CV,
-                                    AliasMapTy *AliasList, bool IsReflectGV) {
+                                    AliasMapTy *AliasList, bool IsReflectGV, bool IsTypeInfo) {
   uint64_t Size = DL.getTypeAllocSize(CV->getType());
   if (Size)
-    emitGlobalConstantImpl(DL, CV, *this, nullptr, 0, AliasList, IsReflectGV);
+    emitGlobalConstantImpl(DL, CV, *this, nullptr, 0, AliasList, IsReflectGV, IsTypeInfo);
   else if (MAI->hasSubsectionsViaSymbols()) {
     // If the global has zero size, emit a single byte so that two labels don't
     // look like they are at the same location.

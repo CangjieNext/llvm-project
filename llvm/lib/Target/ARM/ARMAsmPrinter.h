@@ -104,7 +104,7 @@ public:
   void emitStartOfAsmFile(Module &M) override;
   void emitEndOfAsmFile(Module &M) override;
   void emitXXStructor(const DataLayout &DL, const Constant *CV) override;
-  void emitGlobalVariable(const GlobalVariable *GV) override;
+  void emitGlobalVariable(const GlobalVariable *GV, bool IsTypeInfo = false) override;
 
   MCSymbol *GetCPISymbol(unsigned CPID) const override;
 

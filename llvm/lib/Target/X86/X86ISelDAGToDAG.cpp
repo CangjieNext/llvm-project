@@ -177,6 +177,9 @@ namespace {
     }
 
     bool runOnMachineFunction(MachineFunction &MF) override {
+      if (MF.getName() == "_CNat11ThreadLocalIG_E3setHNNat6OptionIG_E") {
+        int a = 1;
+      }
       // Reset the subtarget each time through.
       Subtarget = &MF.getSubtarget<X86Subtarget>();
       IndirectTlsSegRefs = MF.getFunction().hasFnAttribute(

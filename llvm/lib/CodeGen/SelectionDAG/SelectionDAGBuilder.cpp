@@ -3895,13 +3895,24 @@ void SelectionDAGBuilder::visitGetElementPtr(const User &I) {
   for (gep_type_iterator GTI = gep_type_begin(&I), E = gep_type_end(&I);
        GTI != E; ++GTI) {
     const Value *Idx = GTI.getOperand();
+#ifndef __arm__
+    Type *KlassType = nullptr;
+    if (auto *Instr = dyn_cast<GetElementPtrInst>(&I)) {
+      auto *M = Instr->getModule();
+      KlassType = StructType::getTypeByName(M->getContext(), "TypeInfo");
+    }
+#endif
     if (StructType *StTy = GTI.getStructTypeOrNull()) {
       unsigned Field = cast<Constant>(Idx)->getUniqueInteger().getZExtValue();
       if (Field) {
         // N = N + Offset
         uint64_t Offset =
             DAG.getDataLayout().getStructLayout(StTy)->getElementOffset(Field);
-
+#ifndef __arm__
+        if (KlassType && StTy == KlassType && Field > 10) {
+          Offset -= 4;
+        }
+#endif
         // In an inbounds GEP with an offset that is nonnegative even when
         // interpreted as signed, assume there is no unsigned overflow.
         SDNodeFlags Flags;

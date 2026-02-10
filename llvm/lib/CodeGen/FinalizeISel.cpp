@@ -44,6 +44,9 @@ INITIALIZE_PASS(FinalizeISel, DEBUG_TYPE,
                 "Finalize ISel and expand pseudo-instructions", false, false)
 
 bool FinalizeISel::runOnMachineFunction(MachineFunction &MF) {
+  if (MF.getName() == "_CNat11ThreadLocalIG_E3setHNNat6OptionIG_E") {
+    int a = 1;
+  }
   bool Changed = false;
   const TargetLowering *TLI = MF.getSubtarget().getTargetLowering();
 
