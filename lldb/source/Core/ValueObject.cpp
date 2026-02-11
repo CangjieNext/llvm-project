@@ -3286,10 +3286,6 @@ bool ValueObject::GetCangjieDynamicType(
   if (type_sp != nullptr) {
     class_type_or_name.SetTypeSP(type_sp);
     class_type_or_name.SetName(type_sp->GetFullCompilerType().GetTypeName().AsCString());
-    if (should_update) {
-      m_override_type = type_sp->GetFullCompilerType();
-      LLDB_LOGF(log, "Found dynamic type with name %s", type_sp->GetFullCompilerType().GetTypeName().AsCString());
-    }
     return true;
   }
   if (is_ti_type) {
