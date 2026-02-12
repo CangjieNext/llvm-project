@@ -36,6 +36,8 @@
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Scalar.h"
 
+#include <algorithm>
+
 #define DEBUG_TYPE "escape-analysis"
 using namespace llvm;
 constexpr int alignEight = 8;
@@ -2325,8 +2327,8 @@ public:
     }
     if (BeforeRun) {
       LLVM_DEBUG(dbgs() << "    defs:\n");
-      for (auto DefInfo : Def[&BB]) {
-        for (auto ValueVec : DefInfo.second) {
+      for (const auto &DefInfo : Def[&BB]) {
+        for (const auto &ValueVec : DefInfo.second) {
           LLVM_DEBUG(dbgs() << "      " << *DefInfo.first
                             << " offset :" << ValueVec.first << "\n");
           for (auto Value : ValueVec.second) {
@@ -2336,8 +2338,8 @@ public:
       }
     } else {
       LLVM_DEBUG(dbgs() << "    ins:\n");
-      for (auto InInfo : In[&BB]) {
-        for (auto ValueVec : InInfo.second) {
+      for (const auto &InInfo : In[&BB]) {
+        for (const auto &ValueVec : InInfo.second) {
           LLVM_DEBUG(dbgs() << "      " << *InInfo.first
                             << " offset :" << ValueVec.first << "\n");
           for (auto Value : ValueVec.second) {
@@ -2524,16 +2526,16 @@ public:
         auto &SuccOut = Out[&BB];
         auto &InInfo = In[&BB];
         if (NotInitialize) { // first time to initialize.
-          for (auto SuccDefs : Def[&BB]) {
-            for (auto SuccDef : SuccDefs.second) {
+          for (const auto &SuccDefs : Def[&BB]) {
+            for (const auto &SuccDef : SuccDefs.second) {
               SuccOut[SuccDefs.first][SuccDef.first].insert(
                   SuccDef.second.begin(), SuccDef.second.end());
             }
           }
         }
         for (auto *Pred : predecessors(&BB)) {
-          for (auto LivVal : Out[Pred]) {
-            for (auto ValVec : LivVal.second) {
+          for (const auto &LivVal : Out[Pred]) {
+            for (const auto &ValVec : LivVal.second) {
               for (auto Val : ValVec.second) {
                 if (!InInfo[LivVal.first][ValVec.first].count(Val)) {
                   InInfo[LivVal.first][ValVec.first].insert(Val);
@@ -2545,8 +2547,8 @@ public:
           if (Pred == &BB) {
             continue;
           }
-          for (auto LivVal : Out[Pred]) {
-            for (auto ValVec : LivVal.second) {
+          for (const auto &LivVal : Out[Pred]) {
+            for (const auto &ValVec : LivVal.second) {
               for (auto Val : ValVec.second) {
                 if (SuccBBInfo[LivVal.first].count(ValVec.first) &&
                     SuccBBInfo[LivVal.first][ValVec.first].size() != 0) {
@@ -2760,12 +2762,17 @@ public:
       CopyType =
           cast<PointerType>(BaseV->getType())->getNonOpaquePointerElementType();
     }
-    if (isa<StructType>(CopyType)) {
-      if (!containsGCPtrType(CopyType)) {
+    if (auto *CopyST = dyn_cast<StructType>(CopyType)) {
+      if (!containsGCPtrType(CopyST)) {
         return;
       }
-      countRefOffsets(cast<StructType>(CopyType), RefOffsets, 0, DL, BeginOff,
-                      BeginOff + Size);
+      uint64_t Left = static_cast<uint64_t>(BeginOff);
+      uint64_t Right = Left + Size;
+      const auto &Offsets = getStructRefOffsets(CopyST, Right, DL);
+      auto It = std::lower_bound(Offsets.begin(), Offsets.end(), Left);
+      for (; It != Offsets.end() && *It < Right; ++It) {
+        RefOffsets.push_back(*It);
+      }
     } else {
       // 64: large size threshold
       if (Size > 64) {
@@ -2795,10 +2802,19 @@ public:
       }
       return;
     }
+    SmallDenseMap<std::pair<Value *, uint64_t>, GCPtr *, 8> SrcMPCache;
     for (auto Offset : RefOffsets) {
       uint64_t PVOffset = POffset + Offset - BeginOff;
       uint64_t VPOffset = Off + Offset - BeginOff;
-      GCPtr *SrcMP = findSrcMP(BaseV, VPOffset, I->getParent());
+      auto CacheKey = std::make_pair(BaseV, VPOffset);
+      GCPtr *SrcMP = nullptr;
+      auto CacheIt = SrcMPCache.find(CacheKey);
+      if (CacheIt != SrcMPCache.end()) {
+        SrcMP = CacheIt->second;
+      } else {
+        SrcMP = findSrcMP(BaseV, VPOffset, I->getParent());
+        SrcMPCache.insert({CacheKey, SrcMP});
+      }
       MemPtr *MP = MemPtr::create(Base, PVOffset, *this, LI);
       MP->insertDefine(I->getParent(), SrcMP);
       if (!Def[I->getParent()][Base][PVOffset].empty()) {
@@ -2808,19 +2824,52 @@ public:
     }
   }
 
-  GCPtr *findSrcMP(Value *BaseV, uint64_t VPOffset, BasicBlock *CurBB) {
-    if (Def[CurBB][BaseV][VPOffset].empty()) {
-      return MemPtr::create(BaseV, VPOffset, *this, LI);
+  const SmallVector<uint64_t, 8> &
+  getStructRefOffsets(StructType *ST, uint64_t RangeEnd,
+                      const DataLayout &DL) {
+    auto &BySize = StructRefOffsetsCache[ST];
+    auto It = BySize.find(RangeEnd);
+    if (It != BySize.end()) {
+      return It->second;
     }
+    SmallVector<uint64_t, 8> Offsets;
+    if (RangeEnd != 0) {
+      countRefOffsets(ST, Offsets, 0, DL, 0, RangeEnd);
+      std::sort(Offsets.begin(), Offsets.end());
+      Offsets.erase(std::unique(Offsets.begin(), Offsets.end()),
+                    Offsets.end());
+    }
+    auto Inserted = BySize.insert({RangeEnd, std::move(Offsets)});
+    return Inserted.first->second;
+  }
+
+  GCPtr *findSrcMP(Value *BaseV, uint64_t VPOffset, BasicBlock *CurBB) {
+    auto BBIt = Def.find(CurBB);
+    if (BBIt == Def.end())
+      return MemPtr::create(BaseV, VPOffset, *this, LI);
+    auto &BBDefs = BBIt->second;
+    auto FindInMap = [&BBDefs, this](Value *BaseV,
+                                     uint64_t VPOffset) -> GCPtr * {
+      auto BaseIt = BBDefs.find(BaseV);
+      if (BaseIt == BBDefs.end())
+        return nullptr;
+      auto OffIt = BaseIt->second.find(VPOffset);
+      if (OffIt == BaseIt->second.end() || OffIt->second.empty())
+        return nullptr;
+      return *OffIt->second.begin();
+    };
+    GCPtr *Temp = FindInMap(BaseV, VPOffset);
+    if (!Temp)
+      return MemPtr::create(BaseV, VPOffset, *this, LI);
     GCPtr *CurP = nullptr;
-    while (!Def[CurBB][BaseV][VPOffset].empty()) {
-      CurP = *Def[CurBB][BaseV][VPOffset].begin();
+    do {
+      CurP = Temp;
       if (CurP->isPtr())
         return CurP;
       MemPtr *MP = reinterpret_cast<MemPtr *>(CurP);
       VPOffset = MP->Offset;
       BaseV = MP->P;
-    }
+    } while ((Temp = FindInMap(BaseV, VPOffset)));
     return CurP;
   }
 
@@ -3239,16 +3288,16 @@ private:
   DenseMap<Value *, SmallSetVector<GCPtr *, 8>> LoadBaseValue;
   DenseMap<Value *, unsigned> LoadState;
   SmallSetVector<GCPtr *, 8> LoadValues;
+  using StructRefOffsetsBySize =
+      DenseMap<uint64_t, SmallVector<uint64_t, 8>>;
+  DenseMap<StructType *, StructRefOffsetsBySize> StructRefOffsetsCache;
 
-  std::map<BasicBlock *,
-           std::map<Value *, std::map<int, SmallSetVector<GCPtr *, 8>>>>
-      Def;
-  std::map<BasicBlock *,
-           std::map<Value *, std::map<int, SmallSetVector<GCPtr *, 8>>>>
-      Out;
-  std::map<BasicBlock *,
-           std::map<Value *, std::map<int, SmallSetVector<GCPtr *, 8>>>>
-      In;
+  using DefOffsetMap = DenseMap<int, SmallSetVector<GCPtr *, 8>>;
+  using DefBaseMap = DenseMap<Value *, DefOffsetMap>;
+  using DefBBMap = std::map<BasicBlock *, DefBaseMap>;
+  DefBBMap Def;
+  DefBBMap Out;
+  DefBBMap In;
 };
 
 static bool skipLargeFunction(Function *F) {
