@@ -2815,6 +2815,9 @@ public:
         SrcMP = findSrcMP(BaseV, VPOffset, I->getParent());
         SrcMPCache.insert({CacheKey, SrcMP});
       }
+      // The definition of Base is itself, skip it.
+      if (SrcMP->P == Base && VPOffset == PVOffset)
+        continue;
       MemPtr *MP = MemPtr::create(Base, PVOffset, *this, LI);
       MP->insertDefine(I->getParent(), SrcMP);
       if (!Def[I->getParent()][Base][PVOffset].empty()) {
@@ -2845,27 +2848,34 @@ public:
 
   GCPtr *findSrcMP(Value *BaseV, uint64_t VPOffset, BasicBlock *CurBB) {
     auto BBIt = Def.find(CurBB);
-    if (BBIt == Def.end()) {
+    if (BBIt == Def.end())
       return MemPtr::create(BaseV, VPOffset, *this, LI);
-    }
     auto &BBDefs = BBIt->second;
-    while (true) {
+
+    auto FindInMap = [&BBDefs, this](Value *BaseV,
+                                     uint64_t VPOffset) -> GCPtr * {
       auto BaseIt = BBDefs.find(BaseV);
-      if (BaseIt == BBDefs.end()) {
-        return MemPtr::create(BaseV, VPOffset, *this, LI);
-      }
-      auto OffIt = BaseIt->second.find(static_cast<int>(VPOffset));
-      if (OffIt == BaseIt->second.end() || OffIt->second.empty()) {
-        return MemPtr::create(BaseV, VPOffset, *this, LI);
-      }
-      GCPtr *CurP = *OffIt->second.begin();
-      if (CurP->isPtr()) {
+      if (BaseIt == BBDefs.end())
+        return nullptr;
+      auto OffIt = BaseIt->second.find(VPOffset);
+      if (OffIt == BaseIt->second.end() || OffIt->second.empty())
+        return nullptr;
+      return *OffIt->second.begin();
+    };
+
+    GCPtr *Temp = FindInMap(BaseV, VPOffset);
+    if (!Temp)
+      return MemPtr::create(BaseV, VPOffset, *this, LI);
+    GCPtr *CurP = nullptr;
+    do {
+      CurP = Temp;
+      if (CurP->isPtr())
         return CurP;
-      }
       MemPtr *MP = reinterpret_cast<MemPtr *>(CurP);
       VPOffset = MP->Offset;
       BaseV = MP->P;
-    }
+    } while ((Temp = FindInMap(BaseV, VPOffset)));
+    return CurP;
   }
 
   bool handleCangjieSL(Instruction *I) {
