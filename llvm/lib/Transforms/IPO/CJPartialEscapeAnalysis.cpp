@@ -2814,6 +2814,10 @@ public:
         SrcMP = findSrcMP(BaseV, VPOffset, I->getParent());
         SrcMPCache.insert({CacheKey, SrcMP});
       }
+<<<<<<< HEAD
+=======
+      // The definition of Base is itself, skip it.
+>>>>>>> 552b93a4006f (fix: circle define may lead to infinite loop in pea)
       if (SrcMP->P == Base && VPOffset == PVOffset)
         continue;
       MemPtr *MP = MemPtr::create(Base, PVOffset, *this, LI);
