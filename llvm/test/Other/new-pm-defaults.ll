@@ -268,6 +268,8 @@
 ; CHECK-HOT-COLD-SPLIT-NEXT: Running pass: HotColdSplittingPass
 ; CHECK-IR-OUTLINER-NEXT: Running pass: IROutlinerPass
 ; CHECK-IR-OUTLINER-NEXT: Running analysis: IRSimilarityAnalysis
+; CHECK-MERGE-FUNCS: Running pass: MergeFunctionsPass
+; CHECK-MERGE-FUNCS-NEXT: Running pass: GlobalMergeFuncPass
 ; CHECK-MERGE-FUNCS-NEXT: Running pass: MergeFunctionsPass
 ; CHECK-O-NEXT: Running pass: GlobalDCEPass
 ; CHECK-O-NEXT: Running pass: ConstantMergePass
