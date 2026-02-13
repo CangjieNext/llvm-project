@@ -183,6 +183,7 @@ void initializeGVNHoistLegacyPassPass(PassRegistry&);
 void initializeGVNLegacyPassPass(PassRegistry&);
 void initializeGVNSinkLegacyPassPass(PassRegistry&);
 void initializeGlobalDCELegacyPassPass(PassRegistry&);
+void initializeGlobalMergeFuncPassWrapperPass(PassRegistry &);
 void initializeGlobalMergePass(PassRegistry&);
 void initializeGlobalOptLegacyPassPass(PassRegistry&);
 void initializeGlobalSplitPass(PassRegistry&);
