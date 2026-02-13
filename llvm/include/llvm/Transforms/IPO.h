@@ -203,6 +203,12 @@ Pass *createReversePostOrderFunctionAttrsPass();
 ModulePass *createMergeFunctionsPass();
 
 //===----------------------------------------------------------------------===//
+/// createGlobalMergeFuncPass - This pass discovers structurally equivalent
+/// functions and merges those that differ only in selected constant operands.
+///
+ModulePass *createGlobalMergeFuncPass();
+
+//===----------------------------------------------------------------------===//
 /// createHotColdSplittingPass - This pass outlines cold blocks into a separate
 /// function(s).
 ModulePass *createHotColdSplittingPass();

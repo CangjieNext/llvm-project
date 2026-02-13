@@ -51,6 +51,7 @@
 #include "llvm/Transforms/IPO/ForceFunctionAttrs.h"
 #include "llvm/Transforms/IPO/FunctionAttrs.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
+#include "llvm/Transforms/IPO/GlobalMergeFunctions.h"
 #include "llvm/Transforms/IPO/GlobalOpt.h"
 #include "llvm/Transforms/IPO/GlobalSplit.h"
 #include "llvm/Transforms/IPO/HotColdSplitting.h"
@@ -263,6 +264,15 @@ void PassBuilder::invokePeepholeEPCallbacks(FunctionPassManager &FPM,
 // Helper to add AnnotationRemarksPass.
 static void addAnnotationRemarksPass(ModulePassManager &MPM) {
   MPM.addPass(createModuleToFunctionPassAdaptor(AnnotationRemarksPass()));
+}
+
+static void addMergeFunctionsWithGMFLite(ModulePassManager &MPM,
+                                         bool EnableGMFLite) {
+  MPM.addPass(MergeFunctionsPass());
+  if (!EnableGMFLite)
+    return;
+  MPM.addPass(GlobalMergeFuncPass());
+  MPM.addPass(MergeFunctionsPass());
 }
 
 // Helper to check if the current compilation phase is preparing for LTO
@@ -1444,7 +1454,8 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
 
   // Merge functions if requested.
   if (PTO.MergeFunctions || CJPipeline)
-    MPM.addPass(MergeFunctionsPass());
+    addMergeFunctionsWithGMFLite(
+        MPM, LTOPhase == ThinOrFullLTOPhase::None);
 
   if (!LTOPreLink && CJPipeline) {
     MPM.addPass(EliminateAvailableExternallyPass());
@@ -2016,7 +2027,7 @@ ModulePassManager PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
       /*InsertLifetimeIntrinsics=*/false));
 
   if (PTO.MergeFunctions)
-    MPM.addPass(MergeFunctionsPass());
+    addMergeFunctionsWithGMFLite(MPM, !LTOPreLink);
 
   if (EnableMatrix)
     MPM.addPass(

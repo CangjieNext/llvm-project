@@ -44,6 +44,12 @@
 
 using namespace llvm;
 
+static void addMergeFunctionsWithGMFLite(legacy::PassManagerBase &MPM) {
+  MPM.add(createMergeFunctionsPass());
+  MPM.add(createGlobalMergeFuncPass());
+  MPM.add(createMergeFunctionsPass());
+}
+
 namespace llvm {
 extern cl::opt<bool> CJPipeline;
 cl::opt<bool> CJDisableEscapeAnalysis("cj-disable-ea", cl::Hidden,
@@ -647,7 +653,7 @@ void PassManagerBuilder::populateModulePassManager(
     // the pass manager to get the same behavior as EP_OptimizerLast in non-O0
     // builds. The function merging pass is
     if (MergeFunctions)
-      MPM.add(createMergeFunctionsPass());
+      addMergeFunctionsWithGMFLite(MPM);
     else if (GlobalExtensionsNotEmpty() || !Extensions.empty())
       MPM.add(createBarrierNoopPass());
 
@@ -834,7 +840,7 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createIROutlinerPass());
 
   if (MergeFunctions)
-    MPM.add(createMergeFunctionsPass());
+    addMergeFunctionsWithGMFLite(MPM);
 
   // LoopSink pass sinks instructions hoisted by LICM, which serves as a
   // canonicalization pass that enables other optimizations. As a result,

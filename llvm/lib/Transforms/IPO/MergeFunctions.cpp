@@ -462,6 +462,10 @@ static bool isThrowExceptionInstruction(llvm::Instruction *Inst) {
   return false;
 }
 
+static bool isExceptionOutlinedFunction(const Function *F) {
+  return F && F->getName().startswith("exception_outlined_func");
+}
+
 static void getInputArgs(llvm::BasicBlock *BB, SetVector<Value *> &ArgInputs) {
   for (auto &Inst : *BB) {
     if (CallInst *CI = dyn_cast<CallInst>(&Inst)) {
@@ -503,6 +507,10 @@ void MergeFunctions::doExceptionOutline(Module &M) {
   SmallVector<std::pair<llvm::BasicBlock *, llvm::Function *>> ExceptionBBs;
 
   for (Function &F : M) {
+    // Prevent repeatedly outlining functions produced by previous exception
+    // outlining runs.
+    if (isExceptionOutlinedFunction(&F))
+      continue;
     for (BasicBlock &BB : F) {
       for (Instruction &Inst : BB) {
         if (isThrowExceptionInstruction(&Inst)) {
