@@ -12,11 +12,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/IPO/ElimAvailExtern.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Constant.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
@@ -30,12 +33,35 @@ using namespace llvm;
 STATISTIC(NumFunctions, "Number of functions removed");
 STATISTIC(NumVariables, "Number of global variables removed");
 
+static DenseSet<const GlobalValue *>
+collectCJStaticGenericTIReferencedGVs(const Module &M) {
+  DenseSet<const GlobalValue *> ReferencedGVs;
+  for (const GlobalVariable &GV : M.globals()) {
+    if (!GV.isCJStaticGenericTI() || !GV.hasInitializer())
+      continue;
+
+    const Constant *Init = GV.getInitializer();
+    for (unsigned I = 0, E = Init->getNumOperands(); I != E; ++I) {
+      const Value *Op = Init->getOperand(I)->stripPointerCasts();
+      if (const auto *RefGV = dyn_cast<GlobalValue>(Op))
+        ReferencedGVs.insert(RefGV);
+    }
+  }
+  return ReferencedGVs;
+}
+
 static bool eliminateAvailableExternally(Module &M) {
   bool Changed = false;
+  DenseSet<const GlobalValue *> ProtectedGVs;
+
+  ProtectedGVs = collectCJStaticGenericTIReferencedGVs(M);
 
   // Drop initializers of available externally global variables.
   for (GlobalVariable &GV : M.globals()) {
     if (!GV.hasAvailableExternallyLinkage())
+      continue;
+    // Keep globals referenced by CJStaticGenericTI unchanged in LTO post-link.
+    if (ProtectedGVs.count(&GV))
       continue;
     if (GV.hasInitializer()) {
       Constant *Init = GV.getInitializer();
