@@ -400,19 +400,19 @@ static bool generateAliasForStaticGI(Module &M) {
       for (unsigned Idx = 0; Idx < C->getNumOperands(); Idx++) {
         GlobalVariable *TI = cast<GlobalVariable>(C->getOperand(Idx));
 
-        // Skip two cases where the original symbol should be preserved:
-        // 1. ExternalLinkage: In ThinLTO, linkonce_odr symbols not set as
-        // Prevailing
-        //    are downgraded to ExternalLinkage by the 'ElimAvailExtern' pass,
-        //    and will eventually become external declarations.
-        // 2. AvailableExternallyLinkage: In FullLTO, when a symbol from a
-        // static library
-        //    (.a file) is set as Prevailing, the corresponding symbol in the
-        //    bitcode will be marked as AvailableExternallyLinkage and later
-        //    eliminated by the optimizer, so no alias creation is needed.
-        if (TI->hasExternalLinkage() || TI->hasAvailableExternallyLinkage()) {
+        // Skip ExternalLinkage symbols to preserve the original declaration in
+        // ThinLTO where non-prevailing linkonce_odr symbols are downgraded by
+        // the 'ElimAvailExtern' pass.
+        if (TI->hasExternalLinkage()) {
           NewOperands.push_back(TI);
           continue;
+        }
+
+        // For FullLTO static-library symbols, convert
+        // AvailableExternallyLinkage to InternalLinkage so alias generation
+        // can proceed.
+        if (TI->hasAvailableExternallyLinkage()) {
+          TI->setLinkage(GlobalValue::InternalLinkage);
         }
 
         std::string AliasName = "alias_" + TI->getName().str();
