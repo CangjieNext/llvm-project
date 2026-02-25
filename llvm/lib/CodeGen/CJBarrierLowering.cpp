@@ -140,11 +140,12 @@ public:
     Function *Callee = getOrInsertRuntimeFunc(II);
     switch (II->getIntrinsicID()) {
     case Intrinsic::cj_gcwrite_struct: {
-      Value *Param[5] = {II->getArgOperand(GCWriteStruct::BaseObj),
+      Value *GCTib = getOrInsertGCTib(II);
+      Value *Param[6] = {II->getArgOperand(GCWriteStruct::BaseObj),
                          II->getArgOperand(GCWriteStruct::Dst),
                          II->getArgOperand(GCWriteStruct::Size),
                          II->getArgOperand(GCWriteStruct::Src),
-                         II->getArgOperand(GCWriteStruct::Size)};
+                         II->getArgOperand(GCWriteStruct::Size), GCTib};
       // gcwrite.agg src has two case:
       // i8* on the stack and i8 addrspace(1)* on the heap.
       // The runtime function has only one signature. Here, the src of i8*
@@ -153,6 +154,16 @@ public:
         Param[3] = new AddrSpaceCastInst(II->getArgOperand(GCWriteStruct::Src),
                                          Type::getInt8PtrTy(C, 1), "", II);
       }
+      // Replace the original intrinsic with the runtime function.
+      replaceCallInst(Callee, Param, II);
+      break;
+    }
+    case Intrinsic::cj_gcread_struct: {
+      Value *GCTib = getOrInsertGCTib(II);
+      Value *Param[5] = {II->getArgOperand(GCReadStruct::Dst),
+                         II->getArgOperand(GCReadStruct::BaseObj),
+                         II->getArgOperand(GCReadStruct::Src),
+                         II->getArgOperand(GCReadStruct::Size), GCTib};
       // Replace the original intrinsic with the runtime function.
       replaceCallInst(Callee, Param, II);
       break;
@@ -224,9 +235,14 @@ private:
     auto isARM = TT.isARM();
     switch (II->getIntrinsicID()) {
     case Intrinsic::cj_gcwrite_struct: {
-      Type *ParamType[5] = {GCPtr, GCPtr, I64, GCPtr, I64};
+      Type *ParamType[6] = {GCPtr, GCPtr, I64, GCPtr, I64, I8Ptr};
       if (isARM)
         ParamType[2] = ParamType[4] = I32;
+      FuncType = FunctionType::get(Type::getVoidTy(C), ParamType, false);
+      break;
+    }
+    case Intrinsic::cj_gcread_struct: {
+      Type *ParamType[5] = {I8Ptr, GCPtr, GCPtr, I64, I8Ptr};
       FuncType = FunctionType::get(Type::getVoidTy(C), ParamType, false);
       break;
     }

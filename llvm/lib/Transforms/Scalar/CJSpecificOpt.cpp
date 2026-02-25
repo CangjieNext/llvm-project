@@ -470,13 +470,13 @@ static bool processCangjieIR(Module &M, unsigned OptLevel) {
     Changed = true;
   }
   // "0_for_keeping_some_types" is not needed after opt, clear it.
-  Function *KeepingTypeFunc = M.getFunction("0_for_keeping_some_types");
-  if (KeepingTypeFunc) {
-    auto *FunPtrTy = cast<PointerType>(KeepingTypeFunc->getType());
-    KeepingTypeFunc->replaceAllUsesWith(ConstantPointerNull::get(FunPtrTy));
-    KeepingTypeFunc->eraseFromParent();
-    Changed = true;
-  }
+  // Function *KeepingTypeFunc = M.getFunction("0_for_keeping_some_types");
+  // if (KeepingTypeFunc) {
+  //   auto *FunPtrTy = cast<PointerType>(KeepingTypeFunc->getType());
+  //   KeepingTypeFunc->replaceAllUsesWith(ConstantPointerNull::get(FunPtrTy));
+  //   KeepingTypeFunc->eraseFromParent();
+  //   Changed = true;
+  // }
   return Changed;
 }
 
