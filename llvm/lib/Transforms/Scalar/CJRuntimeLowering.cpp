@@ -109,7 +109,7 @@ const static StdMap<unsigned, StringRef> RuntimeMap {
     {Intrinsic::cj_get_lambda_addr, "CJ_MCC_GetJSLambdaAddr"}};
     {Intrinsic::cj_malloc_local_object, "CJ_MCC_NewLocalObject"},
     {Intrinsic::cj_alloca_local_generic, "CJ_MCC_NewLocalObject"},
-    {Intrinsic::cj_malloc_local_array_generic, "CJ_MCC_NewLocalArrayGeneric"}};
+    {Intrinsic::cj_malloc_local_array_generic, "CJ_MCC_NewLocalGenericArray"}};
 
 struct LowerGetFieldOffset {
   CallBase *CI;
