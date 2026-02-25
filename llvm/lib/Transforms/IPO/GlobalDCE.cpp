@@ -709,23 +709,24 @@ bool CangjieDCE::maybeFakeLiveOfTypeMeta(GlobalVariable *GVU,
   // mtable needs to remain alive even though neither target type nor interface
   // is in use.
   if (GVU->isCJOuterTypeExtensions()) {
-    auto IsInternalType = [](GlobalVariable *TI) {
-      auto *TT = TI->getInitializer()
+    auto IsInternalType = [](GlobalVariable *Ty) {
+      if (Ty->isCJTypeTemplate())
+        return GlobalVariable::isInternalLinkage(Ty->getLinkage());
+      auto *TT = Ty->getInitializer()
                      ->getOperand(ClassInfoFieldType::CIT_GENERIC_FROM)
                      ->stripPointerCasts();
       if (isa<ConstantPointerNull>(TT))
-        return GlobalVariable::isInternalLinkage(TI->getLinkage());
-
+        return GlobalVariable::isInternalLinkage(Ty->getLinkage());
       return GlobalVariable::isInternalLinkage(
           cast<GlobalVariable>(TT)->getLinkage());
     };
     bool IsTypeInternal = false, IsIFInternal = false;
-    auto *TI = cast<GlobalVariable>(
+    auto *Ty = cast<GlobalVariable>(
         GV->getInitializer()
             ->getOperand(ExtensionDefFieldType::ET_TARGET_TYPE)
             ->stripPointerCasts());
-    if (TI->hasInitializer())
-      IsTypeInternal = IsInternalType(TI);
+    if (Ty->hasInitializer())
+      IsTypeInternal = IsInternalType(Ty);
     auto *IFN = GV->getInitializer()
                     ->getOperand(ExtensionDefFieldType::ET_INTERFACE_FN)
                     ->stripPointerCasts();
