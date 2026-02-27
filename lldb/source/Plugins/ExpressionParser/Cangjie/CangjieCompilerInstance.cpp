@@ -895,7 +895,6 @@ void CangjieCompilerInstance::AddImportSpecToLLDBExprPackage() {
     auto pkgPath = Utils::SplitQualifiedName(pkgName);
     for (auto &file : tempPkg->files) {
       auto collectImport = [&file, &pkgPath, &hasDoubleColon](Ptr<const Node> curNode) -> VisitAction {
-        // locals: vardecl or funcdecl
         if (pkgPath.back() == LOCAL_PACKAGE_NAME &&
           (curNode->astKind == ASTKind::VAR_DECL || curNode->astKind == ASTKind::FUNC_DECL)) {
           auto localdecl = RawStaticCast<const Decl *>(curNode.get());
