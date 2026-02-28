@@ -469,8 +469,9 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
 
   FunctionPassManager FPM;
 
-  if (CJPipeline && Level == OptimizationLevel::O2)
+  if (CJPipeline && Level == OptimizationLevel::O2) {
     FPM.addPass(CJSimpleOpt());
+  }
 
   // Form SSA out of local memory accesses after breaking apart aggregates into
   // scalars.

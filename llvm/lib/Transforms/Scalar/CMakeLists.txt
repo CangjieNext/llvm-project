@@ -17,6 +17,8 @@ add_llvm_component_library(LLVMScalarOpts
   DivRemPairs.cpp
   EarlyCSE.cpp
   CJBarrierOpt.cpp
+  CJGCInstrReplace.cpp
+  CJGCInstrRestore.cpp
   CJSimpleOpt.cpp
   CJGenericIntrinsicOpt.cpp
   CJSimpleRangeAnalysis.cpp

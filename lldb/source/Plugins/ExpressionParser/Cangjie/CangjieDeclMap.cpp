@@ -1411,8 +1411,18 @@ void CangjieDeclMap::AddImportSpec(OwnedPtr<Cangjie::AST::File>& file, std::stri
       continue;
     }
     auto import = MakeOwned<ImportSpec>();
-    import->content.prefixPaths = Utils::SplitQualifiedName(fullpkg);
-
+    auto pos = fullpkg.find(":");
+    if (pos != std::string::npos) {
+      // fullpkg: "org:a"
+      import->content.hasDoubleColon = true;
+      import->content.prefixPaths.emplace_back(fullpkg.substr(0, pos));
+      std::vector<std::string> paths = Utils::SplitQualifiedName(fullpkg.substr(pos + 1));
+      for (auto path : paths) {
+        import->content.prefixPaths.emplace_back(path);
+      }
+    } else {
+      import->content.prefixPaths = Utils::SplitQualifiedName(fullpkg);
+    }
     const size_t prefixLen = import->content.prefixPaths.size();
     import->content.prefixPoses.resize(prefixLen);
     import->content.prefixDotPoses.resize(prefixLen);
@@ -1444,6 +1454,16 @@ void CangjieDeclMap::CollectImportPkgName()
     pkgname = pkgname.substr(0, pos);
     if (pkgname.empty() || pkgname == "std") {
       return;
+    }
+    pos = pkgname.find(PACKAGE_SUFFIX);
+    if (pos != std::string::npos) {
+      // "org::a" -> "org:a"
+      pkgname.replace(pos, 1, "");
+    }
+    pos = pkgname.find("/");
+    if (pos != std::string::npos) {
+      // "org/a" -> "org:a"
+      pkgname.replace(pos, 1, ":");
     }
     m_fullpkgs.insert(pkgname);
     Log *log = GetLog(LLDBLog::Expressions);
