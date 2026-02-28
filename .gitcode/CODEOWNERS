@@ -1,0 +1,34 @@
+/.gitcode/ @xuanjz
+
+# Transforms - Scalar
+/llvm/lib/Transforms/Scalar/ @lijiawei_123 @wanghuihui @wzy_00889928 @leeguo
+/llvm/include/llvm/Transforms/Scalar/ @lijiawei_123 @leeguo @wanghuihui
+
+# Transforms - IPO
+/llvm/lib/Transforms/IPO/ @lijiawei_123 @wanghuihui @wzy_00889928
+/llvm/include/llvm/Transforms/IPO/ @lijiawei_123
+
+# Transforms - Obfuscator
+/llvm/lib/Transforms/Obfuscator/ @lijiawei_123 @wanghuihui
+
+# CodeGen
+/llvm/lib/CodeGen/ @lijiawei_123 @wanghuihui @wzy_00889928
+/llvm/lib/CodeGen/AsmPrinter/ @lijiawei_123 @wanghuihui
+/llvm/include/llvm/CodeGen/ @lijiawei_123 @wanghuihui @wzy_00889928
+
+# Target - ARM
+/llvm/lib/Target/ARM/ @lijiawei_123 @wanghuihui
+
+# Target - AArch64
+/llvm/lib/Target/AArch64/ @lijiawei_123 @wzy_00889928
+
+# Analysis
+/llvm/lib/Analysis/ @lijiawei_123 @wanghuihui @leeguo
+/llvm/include/llvm/Analysis/ @lijiawei_123 @wanghuihui @leeguo
+
+# MC
+/llvm/lib/MC/ @lijiawei_123 @wzy_00889928
+
+# Tools
+/llvm/tools/opt/ @lijiawei_123 @wanghuihui
+/llvm/tools/llvm-objdump/ @lijiawei_123 @wzy_00889928
