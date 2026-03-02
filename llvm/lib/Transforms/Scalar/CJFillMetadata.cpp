@@ -578,6 +578,31 @@ MDTuple *llvm::getMDOperand(const MDTuple *MD, unsigned Idx) {
 }
 
 unsigned llvm::getTypeModifier(StringRef Name) {
+  constexpr StringRef REFLECT_VERSION_PREFIX = "reflectVersion";
+  constexpr size_t REFLECT_VERSION_PREFIX_LEN = REFLECT_VERSION_PREFIX.size();
+  constexpr unsigned MAX_REFLECT_VERSION = 7; // 3 bits: 0b111
+  constexpr unsigned VERSION_BIT_MASK_1 = 1; // 0b001
+  constexpr unsigned VERSION_BIT_MASK_2 = 2; // 0b010
+  constexpr unsigned VERSION_BIT_MASK_3 = 4; // 0b100
+
+  if (Name.startswith(REFLECT_VERSION_PREFIX)) {
+    StringRef VersionStr = Name.substr(REFLECT_VERSION_PREFIX_LEN);
+    unsigned Version = 0;
+    if (!VersionStr.getAsInteger(10, Version) &&
+        Version > 0 &&
+        Version <= MAX_REFLECT_VERSION) {
+      unsigned Result = 0;
+      if (Version & VERSION_BIT_MASK_1)
+        Result |= RMT_REFLECT_VER_BIT1;
+      if (Version & VERSION_BIT_MASK_2)
+        Result |= RMT_REFLECT_VER_BIT2;
+      if (Version & VERSION_BIT_MASK_3)
+        Result |= RMT_REFLECT_VER_BIT3;
+      return Result;
+    }
+    return RMT_MAX;
+  }
+
   return StringSwitch<unsigned>(Name)
       .Case("default", RMT_DEFAULT)
       .Case("private", RMT_PRIVATE)
@@ -600,6 +625,8 @@ unsigned llvm::getTypeModifier(StringRef Name) {
       .Case("hasSRet1", RMT_HAS_SRET1)
       .Case("hasSRet2", RMT_HAS_SRET2)
       .Case("hasSRet3", RMT_HAS_SRET3)
+      .Case("enumCtor", RMT_ENUM_CTOR)
+      .Case("unknownSize", RMT_UNKNOWN_SIZE)
       .Default(RMT_MAX);
 }
 
@@ -843,20 +870,25 @@ Constant *ReflectInfo::getReflectionInfo(GlobalVariable *GV, bool IsEnum) {
   TIName = GV->getName();
   if (enable(M)) {
     if (GV->hasAttribute(CFileKlassStr)) {
-      if (!TypeInfos.contains(GV)) {
+      if (!IsEnum && !TypeInfos.contains(GV)) {
         report_fatal_error(GV->getName() +
                            ": typeinfo's reflect info don't exist in package "
                            "info at the same time!");
       }
     } else if (GV->hasAttribute("cj_tt")) {
-      if (!TypeTemplates.contains(GV)) {
+      if (!IsEnum && !TypeTemplates.contains(GV)) {
         report_fatal_error(GV->getName() +
                            ": type_template's reflect info don't exist in "
                            "package info at the same time!");
       }
     }
     if (IsEnum) {
-      return getEnumReflectInfo(ReflectMD);
+      if (ReflectMD->getNumOperands() == ERT_MAX)
+        return getEnumReflectInfo(ReflectMD);
+      if (ReflectMD->getNumOperands() == ECRT_MAX)
+        return getEnumCtorReflectInfo(ReflectMD);
+      report_fatal_error(GV->getName() +
+                         ": enum reflect info's operand number error!");
     } else {
       return getClassReflectInfo(ReflectMD);
     }
@@ -897,6 +929,7 @@ Constant *ReflectInfo::getClassReflectInfo(const MDTuple *ReflectMD) {
 Constant *ReflectInfo::getEnumReflectInfo(const MDTuple *ReflectMD) {
   // record all reflection info
   EnumReflectInfo Info(M);
+  Info.GenericClass = getStringFromMD(ReflectMD, ERT_GENERIC_CLASS);
   parseAttributes(getMDOperand(ReflectMD, ERT_ATTRIBUTE), Info.Modifier,
                   Info.Annotation);
   parseEnumCtorMDs(Info.EnumCtors, getMDOperand(ReflectMD, ERT_ENUM_CTOR));
@@ -907,6 +940,20 @@ Constant *ReflectInfo::getEnumReflectInfo(const MDTuple *ReflectMD) {
 
   SmallVector<Constant *, 0> BodyVec(FET_PTRS);
   fillEnumReflectInfo(Info, BodyVec);
+
+  std::string GVName = TIName.str() + ".reflect";
+  auto *ReflectGV = createGlobalVal(GVName, GVName + "Type", BodyVec);
+  return ConstantExpr::getBitCast(ReflectGV, Int8PtrTy);
+}
+
+// Reflection: !{type attributes}
+Constant *ReflectInfo::getEnumCtorReflectInfo(const MDTuple *ReflectMD) {
+  EnumCtorReflectInfo Info(M);
+  parseAttributes(getMDOperand(ReflectMD, ECRT_ATTRIBUTE), Info.Modifier,
+                  Info.Annotation);
+
+  SmallVector<Constant *, 0> BodyVec(FECT_PTRS);
+  fillEnumCtorReflectInfo(Info, BodyVec);
 
   std::string GVName = TIName.str() + ".reflect";
   auto *ReflectGV = createGlobalVal(GVName, GVName + "Type", BodyVec);
@@ -1121,6 +1168,11 @@ void ReflectInfo::fillEnumReflectInfo(EnumReflectInfo &Info,
   BodyVec[FET_STATIC_METHOD] =
       ConstantInt::get(Int32Ty, Info.StaticMethods.size());
   BodyVec[FET_ANNOTATION] = Info.Annotation;
+  if (Info.GenericClass.empty()) {
+    BodyVec[FET_GENERIC_CLASS] = Int8PtrNull;
+  } else {
+    BodyVec[FET_GENERIC_CLASS] = getNameGlobal(M, Info.GenericClass);
+  }
 
   for (unsigned Idx = 0; Idx < Info.InstanceMethods.size(); ++Idx) {
     BodyVec.push_back(Info.InstanceMethods[Idx]->fillMethodInfo(Idx, TIName));
@@ -1128,6 +1180,13 @@ void ReflectInfo::fillEnumReflectInfo(EnumReflectInfo &Info,
   for (unsigned Idx = 0; Idx < Info.StaticMethods.size(); ++Idx) {
     BodyVec.push_back(Info.StaticMethods[Idx]->fillMethodInfo(Idx, TIName));
   }
+}
+
+void ReflectInfo::fillEnumCtorReflectInfo(EnumCtorReflectInfo &Info,
+                                          SmallVector<Constant *, 0> &BodyVec) {
+  BodyVec[FECT_ANNOTATION] = Info.Annotation;
+  BodyVec[FECT_MODIFIER] = ConstantInt::get(Int32Ty, Info.Modifier);
+  BodyVec[FECT_CTOR_CNT] = ConstantInt::get(Int32Ty, 0);
 }
 
 void ReflectInfo::parseAttributes(MDTuple *Attr, unsigned &Modifier,

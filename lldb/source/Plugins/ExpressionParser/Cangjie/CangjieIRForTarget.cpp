@@ -479,6 +479,11 @@ bool CangjieIRForTarget::HandleIRForExecute() {
 lldb_private::CompilerType CangjieIRForTarget::GetCompilerTypeByName(std::string &name) {
   std::string demangled_name = lldb_private::Mangled::GetDemangledTypeName(name);
   lldb_private::Log *log = GetLog(LLDBLog::Expressions);
+  auto pos = demangled_name.find(":");
+  if (pos != std::string::npos && pos != demangled_name.find("::")) {
+    // org:a::AA
+    demangled_name.replace(pos, 1, "::");
+  }
   auto type = m_decl_map->FindParsedTypesByName(demangled_name);
   if (type.GetTypeClass() == lldb::eTypeClassStruct &&
     type.GetTypeName().GetStringRef().contains(lldb_private::E0_PREFIX_NAME)) {

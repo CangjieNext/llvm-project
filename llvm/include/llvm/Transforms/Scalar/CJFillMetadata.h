@@ -143,7 +143,12 @@ enum ReflectModifyType : uint32_t {
   RMT_HAS_SRET1 = 0x1 << 18, // has sret and it is 'T'
   RMT_HAS_SRET2 = 0x1 << 19, // has sret and it is 'known struct T'
   RMT_HAS_SRET3 = 0x1 << 20, // has sret and it is 'unknow struct T'
-  RMT_MAX = 0x1 << 21,
+  RMT_ENUM_CTOR = 0x1 << 21,
+  RMT_UNKNOWN_SIZE = 0x1 << 22,
+  RMT_REFLECT_VER_BIT1 = 0x1 << 28,
+  RMT_REFLECT_VER_BIT2 = 0x1 << 29,
+  RMT_REFLECT_VER_BIT3 = 0x1 << 30,
+  RMT_MAX = 0x1U << 31,
 };
 
 struct ExtensionDefData {

@@ -438,6 +438,8 @@ private:
       StructType *ST = Klass.getLayoutType();
       Assert(ST, "Klass can not find RelatedType!", &GV);
       for (unsigned Idx = 0; Idx < Klass.getFieldNum(); Idx++) {
+        if (Klass.isEnum())
+          break;
         GlobalVariable *FieldGV = Klass.getField(Idx);
         if (!FieldGV->hasInitializer())
           continue;
@@ -517,9 +519,14 @@ private:
   // !{<name>, !{enum ctors}, !{instance methods}, !{static methods},
   //   !{attributes}}
   void verifyEnumReflection(MDTuple *ReflectMD) {
-    Assert(ReflectMD->getNumOperands() == ERT_MAX,
+    Assert(ReflectMD->getNumOperands() == ERT_MAX ||
+           ReflectMD->getNumOperands() == ECRT_MAX,
            "EnumReflection format: operand numbers error!", ReflectMD);
-
+    if (ReflectMD->getNumOperands() == ECRT_MAX) {
+      const MDTuple *AttributeMD = getMDOperand(ReflectMD, ECRT_ATTRIBUTE);
+      verifyReflectionAttribute(AttributeMD);
+      return;
+    }
     // check enum ctors
     const MDTuple *CtorMDs = getMDOperand(ReflectMD, ERT_ENUM_CTOR);
     for (unsigned Idx = 0; Idx < CtorMDs->getNumOperands(); ++Idx) {
