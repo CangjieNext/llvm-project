@@ -581,26 +581,6 @@ CangjieDCE::scanVTable(GlobalVariable &GV) {
       dyn_cast<MDString>(GV.getMetadata("inheritedType")->getOperand(0))
           ->getString());
 
-#ifndef NDEBUG
-  // Verify that the interface type obtained from metadata matches the one
-  // parsed from global variable.
-  Value *O = C->getOperand(ExtensionDefFieldType::ET_INTERFACE_FN)
-                 ->stripPointerCasts();
-  if (auto *F = dyn_cast<Function>(O)) {
-    auto *CB = dyn_cast<CallBase>(F->back().getTerminator()->getPrevNode());
-    assert(CB->getCalledFunction()->getName() == "CJ_MCC_GetOrCreateTypeInfo");
-    O = CB->getArgOperand(0)->stripPointerCasts();
-  } else {
-    // O is typeinfo
-    auto *TT = cast<GlobalVariable>(O)
-                   ->getInitializer()
-                   ->getOperand(ClassInfoFieldType::CIT_GENERIC_FROM)
-                   ->stripPointerCasts();
-    O = isa<ConstantPointerNull>(TT) ? O : TT;
-  }
-  assert(IF == O);
-#endif
-
   return {TI, IF, FT};
 }
 

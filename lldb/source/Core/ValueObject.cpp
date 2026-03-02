@@ -3267,6 +3267,11 @@ bool ValueObject::GetCangjieDynamicType(
     // "::" size is 2.
     pos = dynamic_name.find(":", pos + 2);
   }
+  pos = dynamic_name.find("/");
+  while (pos != std::string::npos) {
+    dynamic_name.replace(pos, 1, "::");
+    pos = dynamic_name.find("/", pos + 2);  // size of "::" is 2
+  }
   lldb_private::TypeList types;
   llvm::DenseSet<SymbolFile *> searched_symbol_files;
   bool is_ti_type = false;
