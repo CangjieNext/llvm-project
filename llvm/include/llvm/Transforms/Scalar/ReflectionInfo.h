@@ -47,10 +47,16 @@ enum ClassDebugInfoType : uint8_t {
 enum EnumReflectionType : uint8_t {
   ERT_TYPE_NAME = 0,
   ERT_ENUM_CTOR,
+  ERT_GENERIC_CLASS,
   ERT_INSTANCE_METHOD,
   ERT_STATIC_METHOD,
   ERT_ATTRIBUTE,
   ERT_MAX,
+};
+
+enum EnumCtorReflectionType : uint8_t {
+  ECRT_ATTRIBUTE = 0,
+  ECRT_MAX,
 };
 
 enum EnumDebugInfoType : uint8_t {
@@ -104,7 +110,15 @@ enum FillEnumReflectInfoType : uint8_t {
   FET_INSTANCE_METHOD,
   FET_STATIC_METHOD,
   FET_ANNOTATION = 5,
+  FET_GENERIC_CLASS,
   FET_PTRS,
+};
+
+enum FillEnumCtorReflectInfoType : uint8_t {
+  FECT_ANNOTATION = 0,
+  FECT_MODIFIER,
+  FECT_CTOR_CNT,
+  FECT_PTRS,
 };
 
 struct BaseInfo {
@@ -191,6 +205,7 @@ struct ClassReflectInfo : BaseInfo {
 struct EnumReflectInfo : BaseInfo {
   unsigned Modifier = 0;
   Constant *Annotation;
+  StringRef GenericClass;
   SmallVector<EnumCtorInfo, 8> EnumCtors;
   SmallVector<MethodInfo *, 8> InstanceMethods;
   SmallVector<MethodInfo *, 8> StaticMethods;
@@ -198,6 +213,12 @@ struct EnumReflectInfo : BaseInfo {
   explicit EnumReflectInfo(Module &M) : BaseInfo(M) {}
 
   Constant *fillEnumCtorInfos(StringRef TypeInfoName);
+};
+
+struct EnumCtorReflectInfo : BaseInfo {
+  unsigned Modifier = 0;
+  Constant *Annotation;
+  explicit EnumCtorReflectInfo(Module &M) : BaseInfo(M) {}
 };
 
 class ReflectInfo : BaseInfo {
@@ -213,6 +234,7 @@ public:
   Constant *getReflectionInfo(GlobalVariable *GV, bool IsEnum);
   Constant *getClassReflectInfo(const MDTuple *ReflectMD);
   Constant *getEnumReflectInfo(const MDTuple *ReflectMD);
+  Constant *getEnumCtorReflectInfo(const MDTuple *ReflectMD);
   Constant *getClassDebugInfo(const MDTuple *ReflectMD);
   Constant *getEnumDebugInfo(const MDTuple *ReflectMD);
   bool fillPackageInfo();
@@ -254,6 +276,8 @@ private:
                             SmallVector<Constant *, 0> &BodyVec);
   void fillEnumReflectInfo(EnumReflectInfo &Info,
                            SmallVector<Constant *, 0> &BodyVec);
+  void fillEnumCtorReflectInfo(EnumCtorReflectInfo &Info,
+                               SmallVector<Constant *, 0> &BodyVec);
   void getGlobalsFromNamedMD(SetVector<GlobalVariable *> &GVs,
                              NamedMDNode *MDNode);
   MethodInfo *getMethodInfo() {
