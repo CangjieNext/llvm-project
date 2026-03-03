@@ -28,11 +28,11 @@ using namespace lldb_private;
 using namespace lldb_private::CangjieExpr;
 
 bool CangjieCompilerInstance::PerformCodeGen() {
-  if (chirData.GetCurrentCHIRPackage() == nullptr) {
+  CJC_NULLPTR_CHECK(chirData);
+  if (chirData->GetCurrentCHIRPackage() == nullptr) {
     return false;
   }
-  Cangjie::CHIR::CHIRBuilder builder(chirData.GetCHIRContext());
-  auto llvmModules = Cangjie::CodeGen::GenPackageModules(builder, chirData, invocation.globalOptions, *this, false);
+  auto llvmModules = Cangjie::CodeGen::GenPackageModules(*this, false);
   CJC_ASSERT(llvmModules.size() == 1);
   m_module_up = std::move(llvmModules[0]);
   return true;
