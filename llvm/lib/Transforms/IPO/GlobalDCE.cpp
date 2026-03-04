@@ -596,7 +596,12 @@ void CangjieDCE::updateDependencies(
                              uint64_t Offset) {
     for (auto *FT : FTs) {
       auto *C = FT->getInitializer();
-      if (C->getNumOperands() <= Offset)
+      unsigned N = C->getNumOperands();
+      if (HasCompilerInfo[FT]) {
+        assert(N % 2 == 0 && "front end generate error functable.");
+        N /= 2;
+      }
+      if (N <= Offset)
         continue;
       Function *Callee = dyn_cast_or_null<Function>(
           C->getOperand(Offset)->stripPointerCasts());
@@ -606,9 +611,6 @@ void CangjieDCE::updateDependencies(
       this->DCE.GVDependencies[Caller].insert(Callee);
       if (!HasCompilerInfo[FT])
         continue;
-      unsigned N = C->getNumOperands();
-      assert(N % 2 == 0 && Offset < N / 2 &&
-             "front end generate error functable");
       if (auto *Pair = dyn_cast_or_null<GlobalVariable>(
               C->getOperand(Offset + N / 2)->stripPointerCasts()))
         this->DCE.GVDependencies[Caller].insert(Pair);
