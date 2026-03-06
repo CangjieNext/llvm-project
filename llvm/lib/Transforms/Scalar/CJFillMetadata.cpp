@@ -886,7 +886,8 @@ Constant *ReflectInfo::getReflectionInfo(GlobalVariable *GV, bool IsEnum) {
       if (ReflectMD->getNumOperands() == ERT_MAX)
         return getEnumReflectInfo(ReflectMD);
       if (ReflectMD->getNumOperands() == ECRT_MAX)
-        return getEnumCtorReflectInfo(ReflectMD);
+        // for compatibility: old runtime cannot parse this metadata field
+        return;
       report_fatal_error(GV->getName() +
                          ": enum reflect info's operand number error!");
     } else {
