@@ -741,10 +741,22 @@ ValueObjectSP CjHashMapSyntheticFrontEnd::GetChildAtIndex(size_t idx) {
   return ValueObjectSP();
 }
 
+#include "lldb/Utility/LLDBLog.h"
+#include "lldb/Utility/Log.h"
+
 bool CjHashMapSyntheticFrontEnd::Update() {
+  lldb_private::Log *log = GetLog(LLDBLog::Expressions);
+  StreamString str;
+  m_backend.GetCompilerType().GetPointeeType().DumpTypeDescription(&str);
+  LLDB_LOGF(log, "------%s-------", str.GetData());
+
+
   m_appendIndex = m_backend.GetChildMemberWithName(ConstString("appendIndex"), true);
+  LLDB_LOGF(log, "------%s-------", str.GetData());
   m_freeSize = m_backend.GetChildMemberWithName(ConstString("freeSize"), true);
+  LLDB_LOGF(log, "------%s-------", str.GetData());
   auto entries = m_backend.GetChildMemberWithName(ConstString("entries"), true);
+  LLDB_LOGF(log, "------%s-------", str.GetData());
   if (entries) {
     m_data = new CjArraySyntheticFrontEnd(entries);
   }

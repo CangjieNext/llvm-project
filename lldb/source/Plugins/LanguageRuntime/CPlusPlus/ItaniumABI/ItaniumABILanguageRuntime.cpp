@@ -1114,6 +1114,9 @@ CompilerType ItaniumABILanguageRuntime::GetDynamicTypeFromPrimitiveType(TypeSyst
   return dynamic_type;
 }
 
+#include "lldb/Utility/LLDBLog.h"
+#include "lldb/Utility/Log.h"
+
 CompilerType ItaniumABILanguageRuntime::GetDynamicTypeFromGenericTypeInfo(
     TypeSystemClang& ast, TypeInfo& typeInfo) {
     auto type_name = GetTypeName(*m_process, typeInfo);
@@ -1165,6 +1168,10 @@ CompilerType ItaniumABILanguageRuntime::GetDynamicTypeFromGenericTypeInfo(
       default:
         break;
     }
+  lldb_private::Log *log = GetLog(LLDBLog::Expressions);
+  StreamString str;
+  dynamic_type.GetPointeeType().DumpTypeDescription(&str);
+  LLDB_LOGF(log, "00------%s-------", str.GetData());
     return dynamic_type;
 }
 
@@ -1184,9 +1191,10 @@ bool ItaniumABILanguageRuntime::GetGenericDynamicType(ValueObject &in_value,
       return false;
     }
     auto dynamic_type = GetDynamicTypeFromGenericTypeInfo(*ast, typeInfo);
-    if (!dynamic_type.IsValid()) {
+    if (!dynamic_type.IsValid() || !dynamic_type.IsCompleteType()) {
       return false;
     }
+
     in_value.SetGenericValueType(!IsRefType(typeInfo.type));
     class_type_or_name.SetCompilerType(dynamic_type);
     in_value.SetOverrideType(dynamic_type);
