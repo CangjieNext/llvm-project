@@ -357,9 +357,7 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
     if (CJPipeline) {
       MPM.addPass(CJSpecificOpt(OptLevel));
       MPM.addPass(PlaceSafepoints());
-      if (OptLevel > 1) {
-        MPM.addPass(CJBarrierOpt());
-      }
+      MPM.addPass(CJBarrierOpt());
       MPM.addPass(CJRewriteStatepoint(OptLevel));
     }
   };

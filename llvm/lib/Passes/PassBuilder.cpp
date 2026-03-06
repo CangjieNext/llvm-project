@@ -1246,9 +1246,7 @@ Error PassBuilder::parseModulePass(ModulePassManager &MPM,
       if (CJPipeline && !CangjieLTOPreOpt) {
         MPM.addPass(CJSpecificOpt(L.getSpeedupLevel()));
         MPM.addPass(PlaceSafepoints());
-        if (L.getSpeedupLevel() > 1) {
-          MPM.addPass(CJBarrierOpt());
-        }
+        MPM.addPass(CJBarrierOpt());
         MPM.addPass(CJRewriteStatepoint(L.getSpeedupLevel()));
         if (EnableConfigFlatten || EnableConfigBcf)
           MPM.addPass(ControlFlowObfuscator());
