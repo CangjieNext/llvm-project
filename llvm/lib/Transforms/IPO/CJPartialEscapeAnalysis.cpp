@@ -2217,6 +2217,7 @@ static void memPtrspreadEscape(
 }
 
 void CJEscapeAnalysis::setInfoEscaped(GCPtr *GP, BasicBlock *BB) {
+  assert(GP && "CJEscapeAnalysis::setInfoEscaped GCPtr should not be nullptr!");
   GP->setInfoEscaped();
   if (!EscapeBBInfo[BB].count(GP)) {
     EscapeBBInfo[BB][GP] = NotEscape;
@@ -2275,7 +2276,7 @@ bool CJEscapeAnalysis::isEscapedValue(Value *V) {
     }
     return true;
   }
-  return false;
+  return true;
 }
 
 class EscapeAnalysisImpl : public InstVisitor<EscapeAnalysisImpl>,
@@ -2366,6 +2367,7 @@ public:
     }
   }
 #endif
+
   void initialize() {
     for (Function *Func : SCCFunctions) {
       ProcessedFunc = Func;
@@ -2642,6 +2644,7 @@ public:
   }
 
   void bindInfoEscape(GCPtr *P, GCPtr *V, BasicBlock *BB) {
+    assert((P && V) && "CJEscapeAnalysis::bindInfoEscape GCPtr should not be nullptr!");
     P->InfoEscapedVec.insert(V);
     V->InfoEscapedVec.insert(P);
     unsigned PES = isEscapedValue(P->P) ? Escaped : NotEscape;
@@ -2664,6 +2667,7 @@ public:
     Value *P = II->getOperand(2);
     GCPtr *GP = GCPtr::create(P, *this, LI);
     GCPtr *GV = GCPtr::create(V, *this, LI);
+    assert((GP && GV) && "CJEscapeAnalysis::handleGCWrite GCPtr should not be nullptr!");
     if (isEscapedValue(P) || GP->LoopDepth < GV->LoopDepth) {
       if (auto VI = dyn_cast<Instruction>(V)) {
         EscapeBBInfo[II->getParent()][GV] = Escaped;
@@ -2798,8 +2802,8 @@ public:
     } else if (isEscapedValue(V)) {
       for (auto Offset : RefOffsets) {
         uint64_t PVOffset = POffset + Offset - BeginOff;
-        EscapeBBInfo[I->getParent()]
-                    [MemPtr::create(Base, PVOffset, *this, LI)] = Escaped;
+        auto *Ptr = MemPtr::create(Base, PVOffset, *this, LI);
+        EscapeBBInfo[I->getParent()][Ptr] = Escaped;
       }
       return;
     }
@@ -3136,6 +3140,7 @@ public:
     Value *P = SI.getPointerOperand();
     GCPtr *GP = GCPtr::create(P, *this, LI);
     GCPtr *GV = GCPtr::create(V, *this, LI);
+    assert((GP && GV) && "CJEscapeAnalysis::visitStoreInst GCPtr should not be nullptr!");
     if (isEscapedValue(P) || GP->LoopDepth < GV->LoopDepth) {
       if (auto VI = dyn_cast<Instruction>(V)) {
         EscapeBBInfo[SI.getParent()][GV] = Escaped;
