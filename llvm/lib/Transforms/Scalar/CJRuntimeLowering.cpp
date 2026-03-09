@@ -105,7 +105,8 @@ const static StdMap<unsigned, StringRef> RuntimeMap {
     {Intrinsic::cj_get_exported_ref, "CJ_MCC_GetExportedRef"},
     {Intrinsic::cj_remove_exported_ref, "CJ_MCC_RemoveExportedRef"},
     {Intrinsic::cj_create_export_handle, "CJ_MCC_CreateExportHandle"},
-    {Intrinsic::cj_blackhole, "CJ_LLVM_BlackHole"}};
+    {Intrinsic::cj_blackhole, "CJ_LLVM_BlackHole"},
+    {Intrinsic::cj_get_lambda_addr, "CJ_MCC_GetJSLambdaAddr"}};
 
 struct LowerGetFieldOffset {
   CallBase *CI;
@@ -995,6 +996,7 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
     case Intrinsic::cj_post_throw_exception:
     case Intrinsic::cj_register_implicit_exception_raisers:
     case Intrinsic::cj_blackhole:
+    case Intrinsic::cj_get_lambda_addr:
       Lowering.replaceWithRuntimeFunc(CI, true, false);
       Changed = true;
       break;
