@@ -43,6 +43,8 @@ public:
   DenseMap<Value *, GCPtr *> AllPtrLocInfo;
   DenseMap<std::pair<Value *, int>, MemPtr *> AllMemLocInfo;
   DenseMap<BasicBlock *, DenseMap<GCPtr *, unsigned>> EscapeBBInfo;
+private:
+  void clearNullptrInEscapeBBInfo();
 };
 
 Type *getAllocaType(GlobalVariable *Klass, bool &HasRef, uint32_t &AS, bool &,

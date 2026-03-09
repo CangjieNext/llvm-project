@@ -2275,7 +2275,10 @@ bool CJEscapeAnalysis::isEscapedValue(Value *V) {
     }
     return true;
   }
-  return false;
+  if (auto *GCPtrMapped = AllPtrLocInfo[Base]) {
+    return !GCPtrMapped->isInitialized() || GCPtrMapped->isInfoEscaped();
+  }
+  return true;
 }
 
 class EscapeAnalysisImpl : public InstVisitor<EscapeAnalysisImpl>,
@@ -2366,6 +2369,17 @@ public:
     }
   }
 #endif
+
+  void clearNullptrInEscapeBBInfo() {
+    for (Function *Func : SCCFunctions) {
+      for (BasicBlock &BB : *Func) {
+          if (EscapeBBInfo[&BB].count(nullptr)) {
+              EscapeBBInfo[&BB].erase(nullptr);
+          }
+      }
+    }
+  }
+
   void initialize() {
     for (Function *Func : SCCFunctions) {
       ProcessedFunc = Func;
@@ -2376,6 +2390,7 @@ public:
         }
       }
     }
+    clearNullptrInEscapeBBInfo();
 #ifndef NDEBUG
     dumpAnalysisInfo(true);
 #endif
@@ -2581,6 +2596,7 @@ public:
     for (Function *Func : SCCFunctions) {
       processFunc(Func);
     }
+    clearNullptrInEscapeBBInfo();
 #ifndef NDEBUG
     dumpAnalysisInfo(false);
 #endif
@@ -2664,6 +2680,9 @@ public:
     Value *P = II->getOperand(2);
     GCPtr *GP = GCPtr::create(P, *this, LI);
     GCPtr *GV = GCPtr::create(V, *this, LI);
+    if (GP == nullptr || GV == nullptr) {
+      return;
+    }
     if (isEscapedValue(P) || GP->LoopDepth < GV->LoopDepth) {
       if (auto VI = dyn_cast<Instruction>(V)) {
         EscapeBBInfo[II->getParent()][GV] = Escaped;
@@ -2697,7 +2716,11 @@ public:
         isValueInvalid(V)) {
       return;
     }
-    EscapeBBInfo[II->getParent()][GCPtr::create(V, *this, LI)] = Escaped;
+    auto *Ptr = GCPtr::create(V, *this, LI);
+    if (Ptr == nullptr) {
+      return;
+    }
+    EscapeBBInfo[II->getParent()][Ptr] = Escaped;
     StoreRelations[II->getParent()][II->getOperand(1)].insert(V);
   }
 
@@ -2938,7 +2961,9 @@ public:
     int Offset = 0;
     if (isGCPointerType(I->getType())) {
       GCPtr *PI = GCPtr::create(I, *this, LI);
-      EscapeBBInfo[I->getParent()][PI] = Escaped;
+      if (PI != nullptr) {
+        EscapeBBInfo[I->getParent()][PI] = Escaped;
+      }
     }
 
     for (unsigned Idx = 0; Idx < I->getNumOperands(); Idx++) {
@@ -2972,6 +2997,9 @@ public:
       return;
     }
     GCPtr *P = GCPtr::create(&PN, *this, LI);
+    if (P == nullptr) {
+      return;
+    }
     unsigned LD = P->LoopDepth;
     bool NeedEscapeInnerLoop = false;
     for (unsigned Idx = 0; Idx < PN.getNumIncomingValues(); Idx++) {
@@ -3048,6 +3076,9 @@ public:
 
     assert(SI.getType()->isPointerTy() && "selectInst.");
     GCPtr *P = GCPtr::create(&SI, *this, LI);
+    if (P == nullptr) {
+      return;
+    }
     if (isEscapedValue(SI.getTrueValue()) ||
         isEscapedValue(SI.getFalseValue())) {
       EscapeBBInfo[SI.getParent()][P] = Escaped;
@@ -3079,6 +3110,9 @@ public:
 
   void handleLoad(Value *P, Instruction *V) {
     GCPtr *LoadPtr = GCPtr::create(V, *this, LI);
+    if (LoadPtr == nullptr) {
+      return;
+    }
     LoadValues.insert(LoadPtr);
     BasicBlock *CurBB = V->getParent();
     if (isEscapedValue(P)) {
@@ -3136,6 +3170,9 @@ public:
     Value *P = SI.getPointerOperand();
     GCPtr *GP = GCPtr::create(P, *this, LI);
     GCPtr *GV = GCPtr::create(V, *this, LI);
+    if (GP == nullptr || GV == nullptr) {
+      return;
+    }
     if (isEscapedValue(P) || GP->LoopDepth < GV->LoopDepth) {
       if (auto VI = dyn_cast<Instruction>(V)) {
         EscapeBBInfo[SI.getParent()][GV] = Escaped;
