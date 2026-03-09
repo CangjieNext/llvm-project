@@ -478,6 +478,8 @@ def int_cj_get_exported_ref        : Intrinsic<[llvm_gcptr_ty],
 def int_cj_remove_exported_ref     : Intrinsic<[], [llvm_i64_ty]>;
 def int_cj_create_export_handle         : Intrinsic<[llvm_i64_ty],
                                                 [llvm_gcptr_ty]>;
+def int_cj_get_lambda_addr          : Intrinsic<[llvm_ptr_ty],
+                                                [llvm_gcptr_ty]>;
 
 //===------------------- Cangjie runtime Intrinsics ------------------------===//
 //
