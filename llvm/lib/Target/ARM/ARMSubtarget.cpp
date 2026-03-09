@@ -72,6 +72,9 @@ ForceFastISel("arm-force-fast-isel",
 static cl::opt<bool> EnableSubRegLiveness("arm-enable-subreg-liveness",
                                           cl::init(false), cl::Hidden);
 
+namespace llvm {
+extern cl::opt<bool> CJPipeline;
+}
 /// initializeSubtargetDependencies - Initializes using a CPU and feature string
 /// so that we can use initializer lists for subtarget initialization.
 ARMSubtarget &ARMSubtarget::initializeSubtargetDependencies(StringRef CPU,
@@ -206,7 +209,7 @@ void ARMSubtarget::initSubtargetFeatures(StringRef CPU, StringRef FS) {
 
   if (isAAPCS_ABI())
     stackAlignment = Align(8);
-  if (isTargetNaCl() || isAAPCS16_ABI())
+  if (isTargetNaCl() || isAAPCS16_ABI() || CJPipeline)
     stackAlignment = Align(16);
 
   // FIXME: Completely disable sibcall for Thumb1 since ThumbRegisterInfo::
