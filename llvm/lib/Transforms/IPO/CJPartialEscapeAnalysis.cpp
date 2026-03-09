@@ -2275,7 +2275,11 @@ bool CJEscapeAnalysis::isEscapedValue(Value *V) {
     }
     return true;
   }
-  return false;
+  auto *GCPtrMapped = AllPtrLocInfo[Base];
+  if (GCPtrMapped && GCPtrMapped->isInitialized() && !GCPtrMapped->isInfoEscaped()) {
+    return false;
+  }
+  return true;
 }
 
 class EscapeAnalysisImpl : public InstVisitor<EscapeAnalysisImpl>,
