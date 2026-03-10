@@ -34,6 +34,7 @@
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include <unordered_map>
 
 using namespace llvm;
@@ -51,12 +52,19 @@ cl::opt<std::string> InputFileName("cj-ic-input-file",
                                    cl::init("./ProfileOutput.txt"));
 cl::opt<bool> EnableCJNewArrayFast("enable-cangjie-new-array-fastpath",
                                    cl::init(true), cl::ReallyHidden);
+cl::opt<bool> EnableCJExceptionTailExtract(
+    "enable-cangjie-exception-tail-extract", cl::init(true),
+    cl::ReallyHidden);
 } // namespace llvm
 
 namespace {
 
 const static StringRef ArithmeticExceptionMangleStr =
     "CJ_MCC_ThrowArithmeticException";
+const static StringRef ExceptionCtor0MangleStr =
+    "CJ_MCC_ThrowExceptionByCtor0";
+const static StringRef ExceptionCtorStringMangleStr =
+    "CJ_MCC_ThrowExceptionByCtorString";
 const static StringRef C2NStubStr = "CJ_MCC_C2NStub";
 const static StringRef N2CStubStr = "CJ_MCC_N2CStub";
 const static StringRef FinalizerStr = "CJ_MCC_OnFinalizerCreated";
@@ -642,6 +650,32 @@ public:
 
   void markLoweringDivisionCheck(CallBase *CI) { DivisionChecks.push_back(CI); }
 
+  bool extractExceptionTails(Function &F) {
+    if (!EnableCJExceptionTailExtract ||
+        Triple(F.getParent()->getTargetTriple()).isOSWindows()) 
+      return false;
+
+    SmallVector<CallInst *, 8> ThrowCalls;
+    for (Instruction &I : instructions(F)) {
+      auto *CI = dyn_cast<CallInst>(&I);
+      if (!CI || CI->getCalledFunction() == nullptr)
+        continue;
+      if (!CI->getCalledFunction()->getName().equals("CJ_MCC_ThrowException"))
+        continue;
+      if (!isa<UnreachableInst>(CI->getNextNode()))
+        continue;
+      ThrowCalls.push_back(CI);
+    }
+
+    bool Changed = false;
+    for (CallInst *ThrowCI : ThrowCalls) {
+      if (ThrowCI->getParent() == nullptr)
+        continue;
+      Changed |= tryExtractExceptionTail(ThrowCI);
+    }
+    return Changed;
+  }
+
   bool loweringGCDiv(CallBase *CI) {
     IRBuilder<> Builder(CI);
     Type *TypeOfOperand = CI->getOperand(1)->getType();
@@ -738,6 +772,113 @@ private:
   SmallVector<CallBase *, 8> DivisionChecks;
   // map intrinsic to runtime API function type.
   DenseMap<StringRef, Function *> RTFuncMap;
+
+  bool isStdCoreStringPtr(Type *Ty) const {
+    auto *PtrTy = dyn_cast<PointerType>(Ty);
+    if (!PtrTy)
+      return false;
+    auto *StructTy =
+        dyn_cast<StructType>(PtrTy->getNonOpaquePointerElementType());
+    return StructTy != nullptr && StructTy->hasName() &&
+           StructTy->getName().equals("record.std.core:String");
+  }
+
+  Function *getOrInsertExceptionTailFunc0(Type *TypeInfoTy) {
+    auto *I8PtrTy = Type::getInt8PtrTy(C);
+    auto *FT = FunctionType::get(Type::getVoidTy(C), {TypeInfoTy, I8PtrTy},
+                                 false);
+    Function *Func = M.getFunction(ExceptionCtor0MangleStr);
+    if (Func == nullptr) {
+      Func = M.declareCJRuntimeFunc(ExceptionCtor0MangleStr, FT, false, false);
+      Func->addFnAttr(Attribute::NoReturn);
+    }
+    return Func;
+  }
+
+  Function *getOrInsertExceptionTailFuncString(Type *TypeInfoTy, Type *MsgTy) {
+    auto *I8PtrTy = Type::getInt8PtrTy(C);
+    auto *FT =
+        FunctionType::get(Type::getVoidTy(C), {TypeInfoTy, I8PtrTy, MsgTy},
+                          false);
+    Function *Func = M.getFunction(ExceptionCtorStringMangleStr);
+    if (Func == nullptr) {
+      Func = M.declareCJRuntimeFunc(ExceptionCtorStringMangleStr, FT, false,
+                                    false);
+      Func->addFnAttr(Attribute::NoReturn);
+    }
+    return Func;
+  }
+
+  bool tryExtractExceptionTail(CallInst *ThrowCI) {
+    Value *ThrownObj = ThrowCI->getArgOperand(0)->stripPointerCasts();
+    auto *NewObjCall = dyn_cast<CallInst>(ThrownObj);
+    if (NewObjCall == nullptr)
+      return false;
+    if (NewObjCall->getCalledFunction() == nullptr ||
+        !NewObjCall->getCalledFunction()->getName().equals("CJ_MCC_NewObject"))
+      return false;
+    if (NewObjCall->getNumUses() != 2)
+      return false;
+
+    CallInst *CtorCall = nullptr;
+    for (Instruction *Prev = ThrowCI->getPrevNode(); Prev != nullptr;
+         Prev = Prev->getPrevNode()) {
+      if (isa<DbgInfoIntrinsic>(Prev))
+        continue;
+      if (auto *CI = dyn_cast<CallInst>(Prev)) {
+        CtorCall = CI;
+        break;
+      }
+    }
+    if (CtorCall == nullptr || CtorCall->arg_empty())
+      return false;
+    if (CtorCall->getArgOperand(0)->stripPointerCasts() != NewObjCall)
+      return false;
+
+    if (NewObjCall->getParent() != CtorCall->getParent() ||
+        CtorCall->getParent() != ThrowCI->getParent())
+      return false;
+
+    Value *TypeInfo = nullptr;
+    Function *Helper = nullptr;
+    SmallVector<Value *, 3> HelperArgs;
+    IRBuilder<> IRB(ThrowCI);
+    Value *CtorPtr = CtorCall->getCalledOperand();
+    if (CtorPtr->getType() != IRB.getInt8PtrTy()) {
+      CtorPtr = IRB.CreateBitCast(CtorPtr, IRB.getInt8PtrTy());
+    }
+
+    if (CtorCall->arg_size() == 2) {
+      TypeInfo = CtorCall->getArgOperand(1);
+      Helper = getOrInsertExceptionTailFunc0(TypeInfo->getType());
+      HelperArgs = {TypeInfo, CtorPtr};
+    } else if (CtorCall->arg_size() == 3 &&
+               isStdCoreStringPtr(CtorCall->getArgOperand(1)->getType())) {
+      TypeInfo = CtorCall->getArgOperand(2);
+      Helper =
+          getOrInsertExceptionTailFuncString(TypeInfo->getType(),
+                                             CtorCall->getArgOperand(1)->getType());
+      HelperArgs = {TypeInfo, CtorPtr, CtorCall->getArgOperand(1)};
+    } else {
+      return false;
+    }
+
+    auto *HelperCall = IRB.CreateCall(Helper, HelperArgs);
+    HelperCall->setDebugLoc(ThrowCI->getDebugLoc());
+    HelperCall->setDoesNotReturn();
+
+    Instruction *SizeInst = dyn_cast<Instruction>(NewObjCall->getArgOperand(1));
+    Instruction *TypeInfoInst = dyn_cast<Instruction>(NewObjCall->getArgOperand(0));
+    ThrowCI->eraseFromParent();
+    CtorCall->eraseFromParent();
+    if (NewObjCall->use_empty())
+      NewObjCall->eraseFromParent();
+    if (SizeInst != nullptr)
+      RecursivelyDeleteTriviallyDeadInstructions(SizeInst);
+    if (TypeInfoInst != nullptr)
+      RecursivelyDeleteTriviallyDeadInstructions(TypeInfoInst);
+    return true;
+  }
 
   StringRef getRuntimeFuncName(CallBase *CI) const {
     Intrinsic::ID IID = CI->getIntrinsicID();
@@ -1062,6 +1203,7 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
     }
   }
   Lowering.finishAll();
+  Changed |= Lowering.extractExceptionTails(F);
   return Changed;
 }
 
