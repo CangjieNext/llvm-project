@@ -577,9 +577,42 @@ void GlobalMerge::collectUsedGlobalVariables(Module &M, StringRef Name) {
       MustKeepGlobalVariables.insert(G);
 }
 
+static void collectReferencedGlobalVariables(
+    const Constant *C, SmallPtrSetImpl<const Constant *> &Visited,
+    SmallPtrSetImpl<const GlobalVariable *> &Globals) {
+  if (C == nullptr || !Visited.insert(C).second)
+    return;
+
+  if (const auto *GV = dyn_cast<GlobalVariable>(C->stripPointerCasts())) {
+    Globals.insert(GV);
+    return;
+  }
+
+  for (const Use &U : C->operands()) {
+    if (const auto *Nested = dyn_cast<Constant>(U.get()))
+      collectReferencedGlobalVariables(Nested, Visited, Globals);
+  }
+}
+
 void GlobalMerge::setMustKeepGlobalVariables(Module &M) {
   collectUsedGlobalVariables(M, "llvm.used");
   collectUsedGlobalVariables(M, "llvm.compiler.used");
+
+  for (GlobalVariable &GV : M.globals()) {
+    if (!GV.hasAttribute("CFileReflect") || !GV.hasInitializer())
+      continue;
+
+    MustKeepGlobalVariables.insert(&GV);
+
+    SmallPtrSet<const Constant *, 16> Visited;
+    SmallPtrSet<const GlobalVariable *, 16> ReferencedGVs;
+    collectReferencedGlobalVariables(GV.getInitializer(), Visited,
+                                     ReferencedGVs);
+    for (const GlobalVariable *RefGV : ReferencedGVs) {
+      if (RefGV != &GV)
+        MustKeepGlobalVariables.insert(RefGV);
+    }
+  }
 
   for (Function &F : M) {
     for (BasicBlock &BB : F) {
@@ -646,6 +679,11 @@ bool GlobalMerge::doInitialization(Module &M) {
     // Ignore all 'special' globals.
     if (GV.getName().startswith("llvm.") ||
         GV.getName().startswith(".llvm."))
+      continue;
+
+    // Reflection globals rely on their original symbol identity during
+    // AsmPrinter's CFileReflect lowering and must not be merged.
+    if (GV.hasAttribute("CFileReflect"))
       continue;
 
     // Ignore all "required" globals:
