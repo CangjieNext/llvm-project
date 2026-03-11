@@ -521,7 +521,6 @@ void MergeFunctions::doExceptionOutline(Module &M) {
 
 bool MergeFunctions::runOnModule(Module &M) {
   bool Changed = false;
-  doExceptionOutline(M);
   SmallVector<GlobalValue *, 4> UsedV;
   collectUsedGlobalVariables(M, UsedV, /*CompilerUsed=*/false);
   collectUsedGlobalVariables(M, UsedV, /*CompilerUsed=*/true);
