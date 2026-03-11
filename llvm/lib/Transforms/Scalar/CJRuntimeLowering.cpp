@@ -34,6 +34,7 @@
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/CodeExtractor.h"
 #include <unordered_map>
 
 using namespace llvm;
@@ -51,12 +52,17 @@ cl::opt<std::string> InputFileName("cj-ic-input-file",
                                    cl::init("./ProfileOutput.txt"));
 cl::opt<bool> EnableCJNewArrayFast("enable-cangjie-new-array-fastpath",
                                    cl::init(true), cl::ReallyHidden);
+cl::opt<bool> EnableCJExceptionBBOutline(
+    "enable-cangjie-exception-bb-outline", cl::init(true),
+    cl::ReallyHidden);
 } // namespace llvm
 
 namespace {
 
 const static StringRef ArithmeticExceptionMangleStr =
     "CJ_MCC_ThrowArithmeticException";
+const static StringRef ExceptionOutlinedFuncSuffix =
+    "exception_outlined_func";
 const static StringRef C2NStubStr = "CJ_MCC_C2NStub";
 const static StringRef N2CStubStr = "CJ_MCC_N2CStub";
 const static StringRef FinalizerStr = "CJ_MCC_OnFinalizerCreated";
@@ -642,6 +648,49 @@ public:
 
   void markLoweringDivisionCheck(CallBase *CI) { DivisionChecks.push_back(CI); }
 
+  bool isLTOModule() const {
+    if (M.getModuleIdentifier() == "ld-temp.o")
+      return true;
+    return M.getModuleFlag("ThinLTO") != nullptr;
+  }
+
+  bool hasCommandLineFlag(StringRef Name) const {
+    auto &Opts = cl::getRegisteredOptions();
+    auto It = Opts.find(Name);
+    return It != Opts.end() && It->second->getNumOccurrences() > 0;
+  }
+
+  bool isLTOCompileMode() const {
+    return CJLTOOpt || hasCommandLineFlag("cangjie-lto") || isLTOModule();
+  }
+
+  bool outlineExceptionBBs(Function &F) {
+    if (!EnableCJExceptionBBOutline ||
+        Triple(F.getParent()->getTargetTriple()).isOSWindows() ||
+        isLTOCompileMode() || isBlockedForExceptionOutline(F))
+      return false;
+
+    bool Changed = false;
+    while (true) {
+      BasicBlock *Candidate = nullptr;
+      for (BasicBlock &BB : F) {
+        if (isExceptionOutlineCandidate(BB)) {
+          Candidate = &BB;
+          break;
+        }
+      }
+      if (Candidate == nullptr)
+        break;
+
+      CodeExtractorAnalysisCache CEAC(F);
+      Function *Outlined = outlineExceptionBB(*Candidate, CEAC);
+      if (Outlined == nullptr)
+        break;
+      Changed = true;
+    }
+    return Changed;
+  }
+
   bool loweringGCDiv(CallBase *CI) {
     IRBuilder<> Builder(CI);
     Type *TypeOfOperand = CI->getOperand(1)->getType();
@@ -738,6 +787,95 @@ private:
   SmallVector<CallBase *, 8> DivisionChecks;
   // map intrinsic to runtime API function type.
   DenseMap<StringRef, Function *> RTFuncMap;
+
+  bool isBlockedForExceptionOutline(const Function &F) const {
+    return F.isDeclaration() ||
+           F.getName().equals("rt$ThrowStackOverflowError") ||
+           F.getName().equals("rt$ThrowImplicitException") ||
+           F.getName().contains(ExceptionOutlinedFuncSuffix);
+  }
+
+  bool isThrowExceptionInstruction(const Instruction &Inst) const {
+    auto *CI = dyn_cast<CallInst>(&Inst);
+    if (CI == nullptr || CI->getCalledFunction() == nullptr)
+      return false;
+    return CI->getCalledFunction()->getName().equals("CJ_MCC_ThrowException");
+  }
+
+  bool isExceptionTerminatedBlock(BasicBlock &BB) const {
+    if (!isa<UnreachableInst>(BB.getTerminator()))
+      return false;
+
+    for (Instruction &Inst : BB) {
+      if (!isThrowExceptionInstruction(Inst))
+        continue;
+
+      for (Instruction *Next = Inst.getNextNode(); Next != nullptr;
+           Next = Next->getNextNode()) {
+        if (Next == BB.getTerminator())
+          return true;
+        if (!isa<DbgInfoIntrinsic>(Next))
+          return false;
+      }
+    }
+    return false;
+  }
+
+  void collectExceptionOutlineInputs(BasicBlock &BB,
+                                     SetVector<Value *> &ArgInputs) const {
+    for (Instruction &Inst : BB) {
+      if (auto *CB = dyn_cast<CallBase>(&Inst)) {
+        if (Function *Callee = CB->getCalledFunction()) {
+          if (!Callee->getName().startswith("CJ_MCC") && !Callee->isIntrinsic())
+            ArgInputs.insert(Callee);
+        }
+      }
+      for (Value *Operand : Inst.operands()) {
+        if (auto *GV = dyn_cast<GlobalVariable>(Operand)) {
+          ArgInputs.insert(GV);
+        } else if (auto *CE = dyn_cast<ConstantExpr>(Operand)) {
+          if (CE->getOpcode() == Instruction::BitCast)
+            ArgInputs.insert(CE);
+        }
+      }
+    }
+  }
+
+  bool isExceptionOutlineCandidate(BasicBlock &BB) const {
+    if (isBlockedForExceptionOutline(*BB.getParent()) ||
+        !isExceptionTerminatedBlock(BB))
+      return false;
+
+    SmallVector<BasicBlock *, 1> Region{&BB};
+    CodeExtractor CE(Region, nullptr, false, nullptr, nullptr, nullptr, false,
+                     false, nullptr, ExceptionOutlinedFuncSuffix.str());
+    return CE.isEligible();
+  }
+
+  Function *outlineExceptionBB(BasicBlock &BB,
+                               const CodeExtractorAnalysisCache &CEAC) {
+    Function &Caller = *BB.getParent();
+    SmallVector<BasicBlock *, 1> Region{&BB};
+    CodeExtractor CE(Region, nullptr, false, nullptr, nullptr, nullptr, false,
+                     false, nullptr, ExceptionOutlinedFuncSuffix.str());
+    SetVector<Value *> ArgInputs;
+    SetVector<Value *> Outputs;
+    collectExceptionOutlineInputs(BB, ArgInputs);
+    Function *Outlined = CE.extractCodeRegion(CEAC, ArgInputs, Outputs);
+    if (Outlined == nullptr)
+      return nullptr;
+
+    if (Caller.hasGC())
+      Outlined->setGC(Caller.getGC());
+    if (Caller.hasPersonalityFn())
+      Outlined->setPersonalityFn(Caller.getPersonalityFn());
+    Outlined->addFnAttr(Attribute::NoReturn);
+    Outlined->addFnAttr(Attribute::NoInline);
+    Outlined->addFnAttr(Attribute::Cold);
+    Outlined->addFnAttr(Attribute::OptimizeForSize);
+    Outlined->addFnAttr(Attribute::MinSize);
+    return Outlined;
+  }
 
   StringRef getRuntimeFuncName(CallBase *CI) const {
     Intrinsic::ID IID = CI->getIntrinsicID();
@@ -1062,6 +1200,7 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
     }
   }
   Lowering.finishAll();
+  Changed |= Lowering.outlineExceptionBBs(F);
   return Changed;
 }
 
