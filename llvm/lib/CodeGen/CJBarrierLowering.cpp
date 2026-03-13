@@ -1155,11 +1155,11 @@ bool CJBarrierLowering::runOnFunction(Function &F) {
     return false;
 
   const Triple TT(F.getParent()->getTargetTriple());
-  if (TT.isARM()){
-    EnableTaggedPointer = false;
-    EnableGCPhase = false;
-    EnableGCFastPath = false;
-  }
+    if (TT.isARM() || TT.isAArch64()){
+        EnableTaggedPointer = false;
+        EnableGCPhase = false;
+        EnableGCFastPath = false;
+    }
 
   bool Changed = false;
   SetVector<CallInst *> Barriers;
