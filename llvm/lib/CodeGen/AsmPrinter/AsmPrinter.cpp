@@ -129,7 +129,7 @@ using namespace llvm;
 
 #define DEBUG_TYPE "asm-printer"
 static cl::opt<bool> EnableCJNewObjFast("enable-cangjie-new-obj-fastpath",
-                                        cl::init(true), cl::ReallyHidden);
+                                        cl::init(false), cl::ReallyHidden);
 static cl::opt<bool> ReflectOffset("reflect-offset", cl::init(true),
                                    cl::NotHidden);
 

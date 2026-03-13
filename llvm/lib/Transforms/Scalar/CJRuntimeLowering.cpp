@@ -50,7 +50,7 @@ cl::opt<std::string> InputFileName("cj-ic-input-file",
                                    cl::value_desc("filename"),
                                    cl::init("./ProfileOutput.txt"));
 cl::opt<bool> EnableCJNewArrayFast("enable-cangjie-new-array-fastpath",
-                                   cl::init(true), cl::ReallyHidden);
+                                   cl::init(false), cl::ReallyHidden);
 } // namespace llvm
 
 namespace {

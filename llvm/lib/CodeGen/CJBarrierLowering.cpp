@@ -41,10 +41,10 @@ using namespace cangjie;
 #define DEBUG_TYPE "cj-barrier-lowering"
 
 static cl::opt<bool> EnableTaggedPointer("enable-tagged-pointer",
-                                         cl::init(true), cl::Hidden);
-static cl::opt<bool> EnableGCPhase("enable-gc-phase", cl::init(true),
+                                         cl::init(false), cl::Hidden);
+static cl::opt<bool> EnableGCPhase("enable-gc-phase", cl::init(false),
                                    cl::Hidden);
-static cl::opt<bool> EnableGCFastPath("enable-gc-fast-path", cl::init(true),
+static cl::opt<bool> EnableGCFastPath("enable-gc-fast-path", cl::init(false),
                                       cl::Hidden);
 static cl::opt<bool> EnableGCStateLoop("cj-gcstate-dup-loop", cl::init(false),
                                        cl::ReallyHidden);
