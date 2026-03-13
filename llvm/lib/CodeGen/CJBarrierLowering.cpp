@@ -1160,6 +1160,11 @@ bool CJBarrierLowering::runOnFunction(Function &F) {
     EnableGCPhase = false;
     EnableGCFastPath = false;
   }
+  if (TT.isAArch64()){
+    EnableTaggedPointer = false;
+    EnableGCPhase = false;
+    EnableGCFastPath = false;
+  }
 
   bool Changed = false;
   SetVector<CallInst *> Barriers;
