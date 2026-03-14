@@ -610,7 +610,7 @@ public:
     auto *GEP = IRB.CreateGEP(Int8PtrTy, BC0, {CB->getArgOperand(2)});
     auto *LI = IRB.CreateLoad(Int8PtrTy, GEP);
     LI->setMetadata(LLVMContext::MD_invariant_load, MDNode::get(C, {}));
-    LI->setMetadata("FuncTable",
+    LI->setMetadata(LLVMContext::MD_func_table,
                     MDNode::get(C, {ConstantAsMetadata::get(cast<ConstantInt>(
                                        CB->getArgOperand(2)))}));
     LI->setMetadata(LLVMContext::MD_obj_type,
