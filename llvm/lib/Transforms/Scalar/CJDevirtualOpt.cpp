@@ -64,7 +64,8 @@ struct DevirtualCallData {
         break;
       }
       case Instruction::Load: {
-        if (I->hasMetadata(LLVMContext::MD_func_table)) {
+        if (I->hasMetadata(LLVMContext::MD_func_table) &&
+            I->hasMetadata(LLVMContext::MD_intro_type)) {
           FTLIS.push_back(cast<LoadInst>(I));
           break;
         }
@@ -358,6 +359,13 @@ static bool devirtual(DevirtualCallData &CallData) {
     for (auto *FTLI : FTLIS) {
       MDNode *MDFT = FTLI->getMetadata(LLVMContext::MD_func_table);
       assert(MDFT != nullptr && "metadata IntroType must have value");
+      // Skip merged metadata format (produced when instructions with different
+      // VFE metadata are combined). Merged format has MDNode operands instead
+      // of ConstantAsMetadata.
+      if (isa<MDNode>(MDFT->getOperand(0))) {
+        UnresolvedLoad.push_back(FTLI);
+        continue;
+      }
       uint64_t FuncIndex =
           mdconst::extract<ConstantInt>(MDFT->getOperand(0))->getZExtValue();
       bool Resolved = DevirtualImpl(Klass0, GetKlass1(FTLI), FTLI, FuncIndex);
