@@ -885,9 +885,6 @@ Constant *ReflectInfo::getReflectionInfo(GlobalVariable *GV, bool IsEnum) {
     if (IsEnum) {
       if (ReflectMD->getNumOperands() == ERT_MAX)
         return getEnumReflectInfo(ReflectMD);
-      if (ReflectMD->getNumOperands() == ECRT_MAX)
-        return Int8PtrNull;
-        // return getEnumCtorReflectInfo(ReflectMD);
       report_fatal_error(GV->getName() +
                          ": enum reflect info's operand number error!");
     } else {
@@ -943,20 +940,6 @@ Constant *ReflectInfo::getEnumReflectInfo(const MDTuple *ReflectMD) {
 
   SmallVector<Constant *, 0> BodyVec(FET_PTRS);
   fillEnumReflectInfo(Info, BodyVec);
-
-  std::string GVName = TIName.str() + ".reflect";
-  auto *ReflectGV = createGlobalVal(GVName, GVName + "Type", BodyVec);
-  return ConstantExpr::getBitCast(ReflectGV, Int8PtrTy);
-}
-
-// Reflection: !{type attributes}
-Constant *ReflectInfo::getEnumCtorReflectInfo(const MDTuple *ReflectMD) {
-  EnumCtorReflectInfo Info(M);
-  parseAttributes(getMDOperand(ReflectMD, ECRT_ATTRIBUTE), Info.Modifier,
-                  Info.Annotation);
-
-  SmallVector<Constant *, 0> BodyVec(FECT_PTRS);
-  fillEnumCtorReflectInfo(Info, BodyVec);
 
   std::string GVName = TIName.str() + ".reflect";
   auto *ReflectGV = createGlobalVal(GVName, GVName + "Type", BodyVec);
@@ -1186,13 +1169,6 @@ void ReflectInfo::fillEnumReflectInfo(EnumReflectInfo &Info,
   for (unsigned Idx = 0; Idx < Info.CtorAnnotationMethods.size(); ++Idx) {
     BodyVec.push_back(Info.CtorAnnotationMethods[Idx]);
   }
-}
-
-void ReflectInfo::fillEnumCtorReflectInfo(EnumCtorReflectInfo &Info,
-                                          SmallVector<Constant *, 0> &BodyVec) {
-  BodyVec[FECT_ANNOTATION] = Info.Annotation;
-  BodyVec[FECT_MODIFIER] = ConstantInt::get(Int32Ty, Info.Modifier);
-  BodyVec[FECT_CTOR_CNT] = ConstantInt::get(Int32Ty, 0);
 }
 
 void ReflectInfo::parseAttributes(MDTuple *Attr, unsigned &Modifier,
