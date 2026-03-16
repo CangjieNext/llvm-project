@@ -548,7 +548,7 @@ private:
     // check ctor annotation methods
     const MDTuple *CtorAnnoMDs = getMDOperand(ReflectMD, ERT_CTOR_ANNOTATIONS);
     for (unsigned Idx = 0; Idx < CtorAnnoMDs->getNumOperands(); ++Idx) {
-      String auto AnnoMethodName = getStringFromMD(CtorAnnoMDs, Idx);
+      auto AnnoMethodName = getStringFromMD(CtorAnnoMDs, Idx);
       if (!AnnoMethodName.empty()) {
         Function *Func = M.getFunction(AnnoMethodName);
         Assert(Func, "Enum ctor annotation method not found!", ReflectMD);
