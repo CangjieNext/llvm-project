@@ -51,6 +51,7 @@ enum EnumReflectionType : uint8_t {
   ERT_INSTANCE_METHOD,
   ERT_STATIC_METHOD,
   ERT_ATTRIBUTE,
+  ERT_CTOR_ANNOTATIONS,
   ERT_MAX,
 };
 
@@ -209,6 +210,7 @@ struct EnumReflectInfo : BaseInfo {
   SmallVector<EnumCtorInfo, 8> EnumCtors;
   SmallVector<MethodInfo *, 8> InstanceMethods;
   SmallVector<MethodInfo *, 8> StaticMethods;
+  SmallVector<Constant*, 8> CtorAnnotationMethods;
 
   explicit EnumReflectInfo(Module &M) : BaseInfo(M) {}
 
@@ -269,6 +271,8 @@ private:
                               MDTuple *MethodMDs);
   void parseStaticMethodMDs(SmallVectorImpl<MethodInfo *> &Infos,
                             MDTuple *MethodMDs);
+  void parseCtorAnnotationMDs(SmallVectorImpl<MethodInfo *> &Infos,
+                              MDTuple *CtorAnnoMDs);
   void parseEnumCtorMDs(SmallVectorImpl<EnumCtorInfo> &Info, MDTuple *CtorMDs);
   void parseOneInstanceFieldMd(FieldInfo &Info, MDTuple *FieldMD);
   void parseOneStaticFieldMd(FieldInfo &Info, MDTuple *FieldMD);
