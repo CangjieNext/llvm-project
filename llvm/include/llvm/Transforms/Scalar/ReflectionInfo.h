@@ -50,13 +50,9 @@ enum EnumReflectionType : uint8_t {
   ERT_GENERIC_CLASS,
   ERT_INSTANCE_METHOD,
   ERT_STATIC_METHOD,
+  ERT_CTOR_ANNOTATIONS,
   ERT_ATTRIBUTE,
   ERT_MAX,
-};
-
-enum EnumCtorReflectionType : uint8_t {
-  ECRT_ATTRIBUTE = 0,
-  ECRT_MAX,
 };
 
 enum EnumDebugInfoType : uint8_t {
@@ -112,13 +108,6 @@ enum FillEnumReflectInfoType : uint8_t {
   FET_ANNOTATION = 5,
   FET_GENERIC_CLASS,
   FET_PTRS,
-};
-
-enum FillEnumCtorReflectInfoType : uint8_t {
-  FECT_ANNOTATION = 0,
-  FECT_MODIFIER,
-  FECT_CTOR_CNT,
-  FECT_PTRS,
 };
 
 struct BaseInfo {
@@ -209,16 +198,11 @@ struct EnumReflectInfo : BaseInfo {
   SmallVector<EnumCtorInfo, 8> EnumCtors;
   SmallVector<MethodInfo *, 8> InstanceMethods;
   SmallVector<MethodInfo *, 8> StaticMethods;
+  SmallVector<Constant*, 8> CtorAnnotationMethods;
 
   explicit EnumReflectInfo(Module &M) : BaseInfo(M) {}
 
   Constant *fillEnumCtorInfos(StringRef TypeInfoName);
-};
-
-struct EnumCtorReflectInfo : BaseInfo {
-  unsigned Modifier = 0;
-  Constant *Annotation;
-  explicit EnumCtorReflectInfo(Module &M) : BaseInfo(M) {}
 };
 
 class ReflectInfo : BaseInfo {
@@ -234,7 +218,6 @@ public:
   Constant *getReflectionInfo(GlobalVariable *GV, bool IsEnum);
   Constant *getClassReflectInfo(const MDTuple *ReflectMD);
   Constant *getEnumReflectInfo(const MDTuple *ReflectMD);
-  Constant *getEnumCtorReflectInfo(const MDTuple *ReflectMD);
   Constant *getClassDebugInfo(const MDTuple *ReflectMD);
   Constant *getEnumDebugInfo(const MDTuple *ReflectMD);
   bool fillPackageInfo();
@@ -269,6 +252,8 @@ private:
                               MDTuple *MethodMDs);
   void parseStaticMethodMDs(SmallVectorImpl<MethodInfo *> &Infos,
                             MDTuple *MethodMDs);
+  void parseCtorAnnotationMDs(SmallVectorImpl<Constant*> &Infos,
+                              MDTuple *CtorAnnoMDs);
   void parseEnumCtorMDs(SmallVectorImpl<EnumCtorInfo> &Info, MDTuple *CtorMDs);
   void parseOneInstanceFieldMd(FieldInfo &Info, MDTuple *FieldMD);
   void parseOneStaticFieldMd(FieldInfo &Info, MDTuple *FieldMD);
@@ -276,8 +261,6 @@ private:
                             SmallVector<Constant *, 0> &BodyVec);
   void fillEnumReflectInfo(EnumReflectInfo &Info,
                            SmallVector<Constant *, 0> &BodyVec);
-  void fillEnumCtorReflectInfo(EnumCtorReflectInfo &Info,
-                               SmallVector<Constant *, 0> &BodyVec);
   void getGlobalsFromNamedMD(SetVector<GlobalVariable *> &GVs,
                              NamedMDNode *MDNode);
   MethodInfo *getMethodInfo() {
