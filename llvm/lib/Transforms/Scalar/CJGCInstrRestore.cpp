@@ -15,7 +15,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Scalar/CJGCInstrRestore.h"
+#include "llvm/ADT/Optional.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/SafepointIRVerifier.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -24,15 +27,273 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/Alignment.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Scalar.h"
 
 using namespace llvm;
 
 #define DEBUG_TYPE "CJGCInstrRestore"
 
+namespace {
+
+enum class VectorGCMemoryAccessKind {
+  None,
+  HeapBarrier,
+  StaticBarrier,
+};
+
+struct VectorLayout {
+  VectorType *VecTy = nullptr;
+  Type *ElemTy = nullptr;
+  Align VecAlign;
+  uint64_t ElemSize = 0;
+
+  Align getElemAlign(unsigned I) const {
+    return commonAlignment(VecAlign, I * ElemSize);
+  }
+};
+
+Type *getVectorGCValueType(Instruction *Instr) {
+  if (auto *LI = dyn_cast<LoadInst>(Instr))
+    return LI->getType();
+  if (auto *SI = dyn_cast<StoreInst>(Instr))
+    return SI->getValueOperand()->getType();
+  return nullptr;
+}
+
+VectorType *getVectorGCPtrType(Type *Ty) {
+  auto *VT = dyn_cast_or_null<VectorType>(Ty);
+  if (!VT || !isGCPointerType(VT->getElementType()))
+    return nullptr;
+  return VT;
+}
+
+VectorGCMemoryAccessKind classifyVectorGCMemoryAccess(Instruction *Instr) {
+  auto *VT = getVectorGCPtrType(getVectorGCValueType(Instr));
+  if (!VT)
+    return VectorGCMemoryAccessKind::None;
+
+  Value *PtrOperand = nullptr;
+  if (auto *LI = dyn_cast<LoadInst>(Instr)) {
+    PtrOperand = LI->getPointerOperand();
+  } else if (auto *SI = dyn_cast<StoreInst>(Instr)) {
+    PtrOperand = SI->getPointerOperand();
+  } else {
+    return VectorGCMemoryAccessKind::None;
+  }
+
+  Value *PtrBase = findMemoryBasePointer(PtrOperand);
+  if (isGCPointerType(PtrBase->getType()))
+    return VectorGCMemoryAccessKind::HeapBarrier;
+  if (isa<Constant>(PtrBase))
+    return VectorGCMemoryAccessKind::StaticBarrier;
+  return VectorGCMemoryAccessKind::None;
+}
+
+void reportUnsupportedVectorGCMemoryAccess(Instruction &Instr,
+                                           StringRef Reason) {
+  std::string Msg;
+  raw_string_ostream OS(Msg);
+  OS << "CJGCInstrRestore: " << Reason
+     << " vector GC memory access is unsupported: " << Instr;
+  report_fatal_error(Twine(OS.str()), false);
+}
+
+Optional<VectorLayout> getVectorLayout(Type *Ty, Align Alignment,
+                                       const DataLayout &DL) {
+  VectorLayout Layout;
+  Layout.VecTy = dyn_cast<VectorType>(Ty);
+  if (!Layout.VecTy)
+    return None;
+
+  Layout.ElemTy = Layout.VecTy->getElementType();
+  if (!DL.typeSizeEqualsStoreSize(Layout.ElemTy))
+    return None;
+
+  Layout.VecAlign = Alignment;
+  Layout.ElemSize = DL.getTypeStoreSize(Layout.ElemTy);
+  return Layout;
+}
+
+bool canTransferScalarizedMetadata(unsigned Tag,
+                                   unsigned ParallelLoopAccessMDKind) {
+  return Tag == LLVMContext::MD_tbaa ||
+         Tag == LLVMContext::MD_fpmath ||
+         Tag == LLVMContext::MD_tbaa_struct ||
+         Tag == LLVMContext::MD_invariant_load ||
+         Tag == LLVMContext::MD_alias_scope ||
+         Tag == LLVMContext::MD_noalias ||
+         Tag == ParallelLoopAccessMDKind ||
+         Tag == LLVMContext::MD_access_group;
+}
+
+void transferScalarizedMetadataAndIRFlags(
+    Instruction &Op, SmallVectorImpl<Instruction *> &NewInsts) {
+  unsigned ParallelLoopAccessMDKind =
+      Op.getContext().getMDKindID("llvm.mem.parallel_loop_access");
+  SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
+  Op.getAllMetadataOtherThanDebugLoc(MDs);
+
+  for (Instruction *NewInst : NewInsts) {
+    for (const auto &MD : MDs) {
+      if (canTransferScalarizedMetadata(MD.first, ParallelLoopAccessMDKind))
+        NewInst->setMetadata(MD.first, MD.second);
+    }
+    NewInst->copyIRFlags(&Op);
+    if (Op.getDebugLoc() && !NewInst->getDebugLoc())
+      NewInst->setDebugLoc(Op.getDebugLoc());
+  }
+}
+
+Value *getScalarizedVectorBasePointer(IRBuilder<> &Builder, Value *Ptr,
+                                      Type *ElemTy, const Twine &Name) {
+  Type *ScalarPtrTy =
+      PointerType::get(ElemTy, Ptr->getType()->getPointerAddressSpace());
+  if (Ptr->getType() == ScalarPtrTy)
+    return Ptr;
+  return Builder.CreateBitCast(Ptr, ScalarPtrTy, Name);
+}
+
+Value *getScalarizedVectorPointer(IRBuilder<> &Builder, Value *BasePtr,
+                                  Type *ElemTy, unsigned Index,
+                                  const Twine &Name) {
+  if (Index == 0)
+    return BasePtr;
+  return Builder.CreateConstGEP1_32(ElemTy, BasePtr, Index, Name);
+}
+
+bool scalarizeVectorGCLoad(LoadInst &LI) {
+  Optional<VectorLayout> Layout = getVectorLayout(
+      LI.getType(), LI.getAlign(), LI.getModule()->getDataLayout());
+  if (!Layout)
+    reportUnsupportedVectorGCMemoryAccess(LI, "layout");
+
+  auto *VT = dyn_cast<FixedVectorType>(Layout->VecTy);
+  if (!VT)
+    reportUnsupportedVectorGCMemoryAccess(LI, "non-fixed");
+
+  IRBuilder<> Builder(&LI);
+  Builder.SetCurrentDebugLocation(LI.getDebugLoc());
+  Value *BasePtr = getScalarizedVectorBasePointer(
+      Builder, LI.getPointerOperand(), Layout->ElemTy,
+      LI.getPointerOperand()->getName() + ".i0");
+
+  SmallVector<Instruction *, 8> ScalarLoads;
+  Value *Res = PoisonValue::get(Layout->VecTy);
+  for (unsigned I = 0; I < VT->getNumElements(); ++I) {
+    Value *Ptr = getScalarizedVectorPointer(
+        Builder, BasePtr, Layout->ElemTy, I,
+        LI.getPointerOperand()->getName() + ".i" + Twine(I));
+    auto *Load = Builder.CreateAlignedLoad(Layout->ElemTy, Ptr,
+                                           Layout->getElemAlign(I),
+                                           LI.getName() + ".i" + Twine(I));
+    ScalarLoads.push_back(Load);
+    Res = Builder.CreateInsertElement(Res, Load, Builder.getInt32(I),
+                                      LI.getName() + ".upto" + Twine(I));
+  }
+
+  transferScalarizedMetadataAndIRFlags(LI, ScalarLoads);
+  if (auto *ResInst = dyn_cast<Instruction>(Res))
+    ResInst->takeName(&LI);
+  LI.replaceAllUsesWith(Res);
+  LI.eraseFromParent();
+  return true;
+}
+
+bool scalarizeVectorGCStore(StoreInst &SI) {
+  Value *FullValue = SI.getValueOperand();
+  Optional<VectorLayout> Layout = getVectorLayout(
+      FullValue->getType(), SI.getAlign(), SI.getModule()->getDataLayout());
+  if (!Layout)
+    reportUnsupportedVectorGCMemoryAccess(SI, "layout");
+
+  auto *VT = dyn_cast<FixedVectorType>(Layout->VecTy);
+  if (!VT)
+    reportUnsupportedVectorGCMemoryAccess(SI, "non-fixed");
+
+  IRBuilder<> Builder(&SI);
+  Builder.SetCurrentDebugLocation(SI.getDebugLoc());
+  Value *BasePtr = getScalarizedVectorBasePointer(
+      Builder, SI.getPointerOperand(), Layout->ElemTy,
+      SI.getPointerOperand()->getName() + ".i0");
+
+  SmallVector<Instruction *, 8> ScalarStores;
+  for (unsigned I = 0; I < VT->getNumElements(); ++I) {
+    Value *Ptr = getScalarizedVectorPointer(
+        Builder, BasePtr, Layout->ElemTy, I,
+        SI.getPointerOperand()->getName() + ".i" + Twine(I));
+    Value *Val = Builder.CreateExtractElement(
+        FullValue, Builder.getInt32(I), FullValue->getName() + ".i" + Twine(I));
+    auto *Store =
+        Builder.CreateAlignedStore(Val, Ptr, Layout->getElemAlign(I));
+    ScalarStores.push_back(Store);
+  }
+
+  transferScalarizedMetadataAndIRFlags(SI, ScalarStores);
+  SI.eraseFromParent();
+  return true;
+}
+
+bool scalarizeBarrierSensitiveVectorGCMemoryOps(Function &F) {
+  SmallVector<Instruction *, 8> WorkList;
+
+  for (Instruction &I : instructions(F)) {
+    auto Kind = classifyVectorGCMemoryAccess(&I);
+    if (Kind == VectorGCMemoryAccessKind::None)
+      continue;
+
+    if (Kind == VectorGCMemoryAccessKind::StaticBarrier)
+      reportUnsupportedVectorGCMemoryAccess(
+          I, "static-barrier-sensitive");
+
+    auto *VT = dyn_cast<FixedVectorType>(getVectorGCValueType(&I));
+    if (!VT)
+      reportUnsupportedVectorGCMemoryAccess(I, "non-fixed");
+
+    if (auto *LI = dyn_cast<LoadInst>(&I)) {
+      if (!LI->isSimple())
+        reportUnsupportedVectorGCMemoryAccess(I, "non-simple");
+    } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      if (!SI->isSimple())
+        reportUnsupportedVectorGCMemoryAccess(I, "non-simple");
+    } else {
+      llvm_unreachable("unexpected instruction kind");
+    }
+
+    WorkList.push_back(&I);
+  }
+
+  if (WorkList.empty())
+    return false;
+
+  bool Changed = false;
+  for (Instruction *I : WorkList) {
+    if (auto *LI = dyn_cast<LoadInst>(I))
+      Changed |= scalarizeVectorGCLoad(*LI);
+    else if (auto *SI = dyn_cast<StoreInst>(I))
+      Changed |= scalarizeVectorGCStore(*SI);
+    else
+      llvm_unreachable("unexpected instruction kind");
+  }
+
+  for (Instruction &I : instructions(F)) {
+    if (classifyVectorGCMemoryAccess(&I) != VectorGCMemoryAccessKind::None)
+      reportUnsupportedVectorGCMemoryAccess(
+          I, "post-scalarization barrier-sensitive");
+  }
+
+  return Changed;
+}
+
+} // namespace
+
 PreservedAnalyses CJGCInstrRestore::run(Function &F,
                                         FunctionAnalysisManager &FAM) {
-  if (runImpl(F)) {
+  bool Changed = false;
+  Changed |= scalarizeBarrierSensitiveVectorGCMemoryOps(F);
+  Changed |= runImpl(F);
+  if (Changed) {
     return PreservedAnalyses::none();
   }
   return PreservedAnalyses::all();
