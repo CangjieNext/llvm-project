@@ -1275,7 +1275,8 @@ MemoryAccess StructLiveAnalysis::hasMemoryDefineOrUseValue(
     visitMemorySelect(cast<SelectInst>(I), AllocaDefs, AllocaUses);
     break;
   case Instruction::PHI:
-    AllocaDefs.insert(getFieldInfoByValue(I));
+    if (I->getType()->isPointerTy() && isStackContainGCPtr(I))
+      AllocaDefs.insert(getFieldInfoByValue(I));
     break;
   }
 
@@ -1386,6 +1387,11 @@ void LivenessData::recomputeLiveInValues(CallBase *Call, SafepointRecord &Info,
   Info.LiveSet = Updated;
 
   for (auto V : Updated) {
+    // FieldSet records alloca-backed memory roots. Updated may also contain
+    // vector/aggregate gc live values which do not have a single pointer base.
+    if (!V->getType()->isPointerTy())
+      continue;
+
     // Records them whose base is alloca contained gcptr.
     SetVector<Value *> AllocaSet;
     findAllocaInsts(V, AllocaSet);
