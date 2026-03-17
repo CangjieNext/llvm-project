@@ -16,6 +16,7 @@
 
 #include "llvm/Transforms/Scalar/CJGCInstrRestore.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/SafepointIRVerifier.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -24,15 +25,126 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/Scalarizer.h"
 
 using namespace llvm;
 
 #define DEBUG_TYPE "CJGCInstrRestore"
 
+namespace {
+
+enum class VectorGCMemoryAccessKind {
+  None,
+  HeapBarrier,
+  StaticBarrier,
+};
+
+Type *getVectorGCValueType(Instruction *Instr) {
+  if (auto *LI = dyn_cast<LoadInst>(Instr))
+    return LI->getType();
+  if (auto *SI = dyn_cast<StoreInst>(Instr))
+    return SI->getValueOperand()->getType();
+  return nullptr;
+}
+
+VectorType *getVectorGCPtrType(Type *Ty) {
+  auto *VT = dyn_cast_or_null<VectorType>(Ty);
+  if (!VT || !isGCPointerType(VT->getElementType()))
+    return nullptr;
+  return VT;
+}
+
+VectorGCMemoryAccessKind classifyVectorGCMemoryAccess(Instruction *Instr) {
+  auto *VT = getVectorGCPtrType(getVectorGCValueType(Instr));
+  if (!VT)
+    return VectorGCMemoryAccessKind::None;
+
+  Value *PtrOperand = nullptr;
+  if (auto *LI = dyn_cast<LoadInst>(Instr)) {
+    PtrOperand = LI->getPointerOperand();
+  } else if (auto *SI = dyn_cast<StoreInst>(Instr)) {
+    PtrOperand = SI->getPointerOperand();
+  } else {
+    return VectorGCMemoryAccessKind::None;
+  }
+
+  Value *PtrBase = findMemoryBasePointer(PtrOperand);
+  if (isGCPointerType(PtrBase->getType()))
+    return VectorGCMemoryAccessKind::HeapBarrier;
+  if (isa<Constant>(PtrBase))
+    return VectorGCMemoryAccessKind::StaticBarrier;
+  return VectorGCMemoryAccessKind::None;
+}
+
+void reportUnsupportedVectorGCMemoryAccess(Instruction &Instr,
+                                           StringRef Reason) {
+  std::string Msg;
+  raw_string_ostream OS(Msg);
+  OS << "CJGCInstrRestore: " << Reason
+     << " vector GC memory access is unsupported: " << Instr;
+  report_fatal_error(Twine(OS.str()), false);
+}
+
+bool scalarizeBarrierSensitiveVectorGCMemoryOps(Function &F,
+                                                FunctionAnalysisManager &FAM) {
+  bool NeedsScalarization = false;
+
+  for (Instruction &I : instructions(F)) {
+    auto Kind = classifyVectorGCMemoryAccess(&I);
+    if (Kind == VectorGCMemoryAccessKind::None)
+      continue;
+
+    if (Kind == VectorGCMemoryAccessKind::StaticBarrier)
+      reportUnsupportedVectorGCMemoryAccess(
+          I, "static-barrier-sensitive");
+
+    auto *VT = dyn_cast<FixedVectorType>(getVectorGCValueType(&I));
+    if (!VT)
+      reportUnsupportedVectorGCMemoryAccess(I, "non-fixed");
+
+    if (auto *LI = dyn_cast<LoadInst>(&I)) {
+      if (!LI->isSimple())
+        reportUnsupportedVectorGCMemoryAccess(I, "non-simple");
+    } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      if (!SI->isSimple())
+        reportUnsupportedVectorGCMemoryAccess(I, "non-simple");
+    } else {
+      llvm_unreachable("unexpected instruction kind");
+    }
+
+    NeedsScalarization = true;
+  }
+
+  if (!NeedsScalarization)
+    return false;
+
+  // CJGCInstrRestore only knows how to rebuild scalar GC barriers. Scalarize
+  // simple fixed-width vector GC memory operations before the regular restore
+  // path, and reject anything that still escapes this narrowing.
+  ScalarizerPass SP;
+  SP.setScalarizeLoadStore(true);
+  SP.setScalarizeVariableInsertExtract(true);
+  (void)SP.run(F, FAM);
+
+  for (Instruction &I : instructions(F)) {
+    if (classifyVectorGCMemoryAccess(&I) != VectorGCMemoryAccessKind::None)
+      reportUnsupportedVectorGCMemoryAccess(
+          I, "post-scalarization barrier-sensitive");
+  }
+
+  return true;
+}
+
+} // namespace
+
 PreservedAnalyses CJGCInstrRestore::run(Function &F,
                                         FunctionAnalysisManager &FAM) {
-  if (runImpl(F)) {
+  bool Changed = false;
+  Changed |= scalarizeBarrierSensitiveVectorGCMemoryOps(F, FAM);
+  Changed |= runImpl(F);
+  if (Changed) {
     return PreservedAnalyses::none();
   }
   return PreservedAnalyses::all();
