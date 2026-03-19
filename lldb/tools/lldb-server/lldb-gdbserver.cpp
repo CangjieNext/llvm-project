@@ -18,8 +18,8 @@
 #endif
 
 #include "LLDBServerUtilities.h"
-#include "Plugins/Process/gdb-remote/GDBRemoteCommunicationServerLLGS.h"
-#include "Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteCommunicationServerLLGS.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
 #include "lldb/Host/Config.h"
 #include "lldb/Host/ConnectionFileDescriptor.h"
 #include "lldb/Host/FileSystem.h"

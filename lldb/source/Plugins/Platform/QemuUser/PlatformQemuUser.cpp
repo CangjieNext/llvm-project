@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Plugins/Platform/QemuUser/PlatformQemuUser.h"
-#include "Plugins/Process/gdb-remote/ProcessGDBRemote.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemote.h"
 #include "lldb/Core/PluginManager.h"
 #include "lldb/Host/FileSystem.h"
 #include "lldb/Host/ProcessLaunchInfo.h"
