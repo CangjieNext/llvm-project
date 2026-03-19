@@ -69,6 +69,7 @@ add_lldb_library(liblldb SHARED ${option_framework}
   SBSymbolContextList.cpp
   SBTarget.cpp
   SBThread.cpp
+  SBCJThread.cpp
   SBThreadCollection.cpp
   SBThreadPlan.cpp
   SBTrace.cpp

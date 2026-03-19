@@ -59,6 +59,7 @@
 #include "lldb/API/SBSymbolContextList.h"
 #include "lldb/API/SBTarget.h"
 #include "lldb/API/SBThread.h"
+#include "lldb/API/SBCJThread.h"
 #include "lldb/API/SBThreadCollection.h"
 #include "lldb/API/SBThreadPlan.h"
 #include "lldb/API/SBTrace.h"
