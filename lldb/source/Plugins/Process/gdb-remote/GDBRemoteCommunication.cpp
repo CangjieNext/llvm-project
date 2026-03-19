@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "GDBRemoteCommunication.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteCommunication.h"
 
 #include <climits>
 #include <cstring>
@@ -35,7 +35,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/ScopedPrinter.h"
 
-#include "ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
 
 #if defined(__APPLE__)
 #define DEBUGSERVER_BASENAME "debugserver"

@@ -6,8 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ProcessGDBRemoteLog.h"
-#include "ProcessGDBRemote.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemote.h"
 #include "llvm/Support/Threading.h"
 
 using namespace lldb;

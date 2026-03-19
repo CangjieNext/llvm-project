@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "GDBRemoteRegisterContext.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteRegisterContext.h"
 
 #include "lldb/Target/ExecutionContext.h"
 #include "lldb/Target/Target.h"
@@ -15,9 +15,9 @@
 #include "lldb/Utility/RegisterValue.h"
 #include "lldb/Utility/Scalar.h"
 #include "lldb/Utility/StreamString.h"
-#include "ProcessGDBRemote.h"
-#include "ProcessGDBRemoteLog.h"
-#include "ThreadGDBRemote.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemote.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/ThreadGDBRemote.h"
 #include "Utility/ARM_DWARF_Registers.h"
 #include "Utility/ARM_ehframe_Registers.h"
 #include "lldb/Utility/StringExtractorGDBRemote.h"

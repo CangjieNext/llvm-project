@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "GDBRemoteRegisterFallback.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteRegisterFallback.h"
 
 namespace lldb_private {
 namespace process_gdb_remote {

@@ -10,9 +10,9 @@
 
 #include "lldb/Host/Config.h"
 
-#include "GDBRemoteCommunicationServer.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteCommunicationServer.h"
 
-#include "ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
 #include "lldb/Utility/StreamString.h"
 #include "lldb/Utility/StringExtractorGDBRemote.h"
 #include "lldb/Utility/UnimplementedError.h"
