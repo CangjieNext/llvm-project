@@ -139,6 +139,17 @@ public:
     lldb::SBThread
     GetThreadAtIndex (size_t index);
 
+    uint32_t
+    GetNumCJThreads ();
+
+    %feature("autodoc", "
+    Returns the INDEX'th cjthread from the list of current threads.  The index
+    of a cjthread is only valid for the current stop.  For a persistent cjthread
+    identifier use either the cjthread ID or the IndexID.  See help on SBCJThread
+    for more details.") GetCJThreadAtIndex;
+    lldb::SBCJThread
+    GetCJThreadAtIndex (size_t index);
+
     %feature("autodoc", "
     Returns the thread with the given thread ID.") GetThreadByID;
     lldb::SBThread
