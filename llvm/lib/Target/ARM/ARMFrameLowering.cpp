@@ -706,6 +706,38 @@ static int getMaxFPOffset(const ARMSubtarget &STI, const ARMFunctionInfo &AFI,
   return -FPCXTSaveSize - AFI.getArgRegsSaveSize() - MaxRegBytes;
 }
 
+// For arm: the size is addsize calculated for sp
+MachineBasicBlock::iterator ARMFrameLowering::preCJStackCheck(
+    MachineFunction &MF, MachineBasicBlock::iterator InsertPos, int32_t Size,
+    bool NeedRecoverStack) const {
+  if (!MF.getFunction().hasCangjieGC()) {
+    return InsertPos;
+  }
+
+  for (auto BBI = MF.front().begin(); BBI != MF.front().end(); BBI++) {
+    MachineInstr *MI = &*BBI;
+    if (MI->getOpcode() != TargetOpcode::STATEPOINT)
+      continue;
+
+    StatepointOpers SO(MI);
+    if (!SO.isCJStackCheck())
+      continue;
+
+    assert((Size >= 0) && "Size should not be less than 0!");
+    unsigned FrameSize = Size;
+    if (!NeedRecoverStack) {
+      // Use MSB(Most Significant Bit)to mark
+      // whether the stack needs to be recovered.
+      FrameSize = FrameSize | (1 << 31);
+    }
+
+    MachineBasicBlock *CurBB = BBI->getParent();
+    MI->setCJStackSize(FrameSize);
+    return InsertPos;
+  }
+  return InsertPos;
+}
+
 void ARMFrameLowering::emitPrologue(MachineFunction &MF,
                                     MachineBasicBlock &MBB) const {
   MachineBasicBlock::iterator MBBI = MBB.begin();
@@ -937,6 +969,8 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
       LastPush = MBBI++;
     }
   }
+
+  preCJStackCheck(MF, MBBI, NumBytes == 0 ? NumBytes : NumBytes - 16);
 
   // Move past the aligned DPRCS2 area.
   if (AFI->getNumAlignedDPRCS2Regs() > 0) {
