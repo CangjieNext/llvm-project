@@ -27,6 +27,8 @@ public:
 
   virtual ~StopInfo() = default;
 
+  virtual lldb::break_id_t GetBreakpointID() const { return LLDB_INVALID_BREAK_ID; };
+
   bool IsValid() const;
 
   void SetThread(const lldb::ThreadSP &thread_sp) { m_thread_wp = thread_sp; }

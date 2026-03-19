@@ -353,6 +353,19 @@ lldb::tid_t Breakpoint::GetThreadID() const {
     return m_options.GetThreadSpecNoCreate()->GetTID();
 }
 
+void Breakpoint::SetCJThreadID(lldb::tid_t thread_id) {
+  if (m_options.GetCJThreadID() == thread_id) {
+    return;
+  }
+
+  m_options.SetCJThreadID(thread_id);
+  SendBreakpointChangedEvent(eBreakpointEventTypeThreadChanged);
+}
+
+lldb::tid_t Breakpoint::GetCJThreadID() const {
+  return m_options.GetCJThreadID();
+}
+
 void Breakpoint::SetThreadIndex(uint32_t index) {
   if (m_options.GetThreadSpec()->GetIndex() == index)
     return;

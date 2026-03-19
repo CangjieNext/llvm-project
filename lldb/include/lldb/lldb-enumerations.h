@@ -1130,7 +1130,8 @@ FLAGS_ENUM(CommandFlags){
     ///
     /// Verifies that the process is being traced by a Trace plug-in, if it
     /// isn't the command will fail with an appropriate error message.
-    eCommandProcessMustBeTraced = (1u << 8)};
+    eCommandProcessMustBeTraced = (1u << 8),
+};
 
 /// Whether a summary should cap how much data it returns to users or not.
 enum TypeSummaryCapping {

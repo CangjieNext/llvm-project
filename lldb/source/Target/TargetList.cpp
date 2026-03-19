@@ -251,8 +251,6 @@ Status TargetList::CreateTargetInternal(Debugger &debugger,
                      user_exe_path.str().c_str(),
                      specified_arch.GetArchitectureName());
 
-  // We set this env to support CJDB coroutine
-  debugger.SetPropertyValue(NULL, eVarSetOperationAssign, "target.env-vars", "cjProcessorNum=1");
 #if defined(__APPLE__)
   debugger.SetPropertyValue(NULL, eVarSetOperationAssign, "target.env-vars",
                             "LLDB_DEBUGSERVER_EXTRA_ARG_1=--unmask-signals");
