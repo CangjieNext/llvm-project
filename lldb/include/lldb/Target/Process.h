@@ -2087,6 +2087,10 @@ public:
 
   ThreadList &GetThreadList() { return m_thread_list; }
 
+  ThreadList &GetCJThreadList() { return m_cjthread_list; }
+
+  bool RefreshCJThreadList(Status &error, bool forceRefresh = false);
+
   // When ExtendedBacktraces are requested, the HistoryThreads that are created
   // need an owner -- they're saved here in the Process.  The threads in this
   // list are not iterated over - driver programs need to request the extended
@@ -2094,6 +2098,7 @@ public:
   ThreadList &GetExtendedThreadList() { return m_extended_thread_list; }
 
   ThreadList::ThreadIterable Threads() { return m_thread_list.Threads(); }
+  ThreadList::ThreadIterable CJThreads() { return m_cjthread_list.Threads(); }
 
   uint32_t GetNextThreadIndexID(uint64_t thread_id);
 
@@ -2862,6 +2867,8 @@ protected:
                                  ///to the protocol we are debugging with
   ThreadList m_thread_list; ///< The threads for this process as the user will
                             ///see them. This is usually the same as
+  ThreadList m_cjthread_list; ///< The threads for this process as the user will
+                            ///see them. This is usually the same as
   ///< m_thread_list_real, but might be different if there is an OS plug-in
   ///creating memory threads
   ThreadPlanStackMap m_thread_plans; ///< This is the list of thread plans for
@@ -2970,6 +2977,8 @@ protected:
 
   void ResumePrivateStateThread();
 
+  lldb::CJThreadSP FindCJThreadByOSThreadID(lldb::tid_t tid, bool can_update = true);
+
 private:
   // The starts up the private state thread that will watch for events from the
   // debugee. Pass true for is_secondary_thread in the case where you have to
@@ -3050,6 +3059,12 @@ private:
   Process(const Process &) = delete;
   const Process &operator=(const Process &) = delete;
   std::map <lldb_private::ConstString, uint64_t> m_cjthreadRegCtx;
+
+  enum class CJThreadListState {
+    Uninitialized,
+    WaitRefresh,
+    HasBeenRefreshed,
+  } m_cjthreadlist_state = CJThreadListState::Uninitialized;
 };
 
 /// RAII guard that should be acquired when an utility function is called within
