@@ -162,6 +162,19 @@ load_exit:
   ret void
 }
 
+define void @test_func_6(i8 addrspace(1)* noalias %this, i8 addrspace(1)* noalias %0, i8 addrspace(1)* noalias %1, i8 addrspace(1)* noalias %2, i64 %offset1, i64 %offset2, %fake_typeinfo* %ti) {
+  %ti.size3 = getelementptr inbounds %fake_typeinfo, %fake_typeinfo* %ti, i64 0, i32 4
+  %size = load i32, i32* %ti.size3, align 4
+  %4 = getelementptr inbounds i8, i8 addrspace(1)* %this, i64 %offset1
+  call void @llvm.cj.gcread.generic(i8 addrspace(1)* %0, i8 addrspace(1)* %this, i8 addrspace(1)* %4, i32 %size)
+  %5 = getelementptr inbounds i8, i8 addrspace(1)* %1, i64 %offset2
+  call void @llvm.cj.gcwrite.generic(i8 addrspace(1)* %1, i8 addrspace(1)* %5, i8 addrspace(1)* %0, i32 %size)
+  ; CHECK: %7 = getelementptr i8, i8 addrspace(1)* %this, i64 %offset1
+  ; CHECK-NEXT: call void @llvm.cj.gcread.generic(i8 addrspace(1)* %2, i8 addrspace(1)* %this, i8 addrspace(1)* %7, i32 %size)
+  call void @llvm.cj.gcread.generic(i8 addrspace(1)* %2, i8 addrspace(1)* %1, i8 addrspace(1)* %5, i32 %size)
+  ret void
+}
+
 declare void @init_func(i8 addrspace(1)* noalias sret(i8))
 declare i64 @get_offsets(i8*) #1
 declare void @llvm.cj.assign.generic(i8 addrspace(1)* noalias nocapture writeonly %0, i8 addrspace(1)* noalias nocapture readonly %1, i8* noalias nocapture readonly %2) #0

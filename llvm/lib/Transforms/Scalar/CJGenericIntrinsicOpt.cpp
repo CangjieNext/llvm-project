@@ -605,6 +605,8 @@ struct GenericCopyOpt {
             break;
           }
           pushAndPopSameOffset(Offsets, TmpOffsets, true);
+          if (LastBase)
+            LastBase = false;
           Base = nullptr;
           TI = nullptr;
           Loc = MemoryLocation::getAfter(getSource(II));
