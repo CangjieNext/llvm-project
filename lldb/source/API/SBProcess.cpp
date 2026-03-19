@@ -1262,3 +1262,38 @@ lldb::SBError SBProcess::DeallocateMemory(lldb::addr_t ptr) {
   }
   return sb_error;
 }
+
+uint32_t SBProcess::GetNumCJThreads() {
+  LLDB_INSTRUMENT_VA(this);
+
+  uint32_t num_threads = 0;
+  ProcessSP process_sp(GetSP());
+  if (process_sp) {
+    Process::StopLocker stop_locker;
+
+    const bool can_update = stop_locker.TryLock(&process_sp->GetRunLock());
+    std::lock_guard<std::recursive_mutex> guard(
+        process_sp->GetTarget().GetAPIMutex());
+    num_threads = process_sp->GetCJThreadList().GetSize(can_update);
+  }
+
+  return num_threads;
+}
+
+SBCJThread SBProcess::GetThreadAtIndex(size_t index) {
+  LLDB_INSTRUMENT_VA(this, index);
+
+  SBThread sb_cjthread;
+  ThreadSP thread_sp;
+  ProcessSP process_sp(GetSP());
+  if (process_sp) {
+    Process::StopLocker stop_locker;
+    const bool can_update = stop_locker.TryLock(&process_sp->GetRunLock());
+    std::lock_guard<std::recursive_mutex> guard(
+        process_sp->GetTarget().GetAPIMutex());
+    thread_sp = process_sp->GetThreadList().GetCJThreadAtIndex(index, can_update);
+    sb_cjthread.SetCJThread(std::dynamic_pointer_cast<lldb_private::CJThread>(thread_sp));
+  }
+
+  return sb_cjthread;
+}

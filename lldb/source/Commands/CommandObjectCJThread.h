@@ -22,5 +22,12 @@ public:
   ~CommandObjectMultiwordCJThread() override;
 };
 
+class CommandObjectMultiwordCJThreadFrame : public CommandObjectMultiword {
+public:
+  CommandObjectMultiwordCJThreadFrame(CommandInterpreter &interpreter);
+
+  ~CommandObjectMultiwordCJThreadFrame() override;
+};
+
 } // namespace lldb_private
 #endif // LLDB_SOURCE_COMMANDS_COMMANDOBJECTCJTHREAD_H

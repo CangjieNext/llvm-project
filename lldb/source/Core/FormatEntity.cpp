@@ -59,6 +59,8 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/Support/Compiler.h"
 
+#include "lldb/Target/CJThread.h"
+
 #include <cctype>
 #include <cinttypes>
 #include <cstdio>
@@ -155,6 +157,8 @@ constexpr Definition g_thread_child_entries[] = {
                                   g_string_entry),
     Definition("queue", EntryType::ThreadQueue),
     Definition("name", EntryType::ThreadName),
+    Definition("state", EntryType::CJThreadState),
+    Definition("os-tid", EntryType::CJThreadOSTid),
     Definition("stop-reason", EntryType::ThreadStopReason),
     Definition("stop-reason-raw", EntryType::ThreadStopReasonRaw),
     Definition("return-value", EntryType::ThreadReturnValue),
@@ -325,6 +329,8 @@ const char *FormatEntity::Entry::TypeToCString(Type t) {
     ENUM_TO_CSTR(ThreadStopReasonRaw);
     ENUM_TO_CSTR(ThreadReturnValue);
     ENUM_TO_CSTR(ThreadCompletedExpression);
+    ENUM_TO_CSTR(CJThreadState);
+    ENUM_TO_CSTR(CJThreadOSTid);
     ENUM_TO_CSTR(ScriptThread);
     ENUM_TO_CSTR(ThreadInfo);
     ENUM_TO_CSTR(TargetArch);
@@ -1315,6 +1321,46 @@ bool FormatEntity::Format(const Entry &entry, Stream &s,
             return true;
           }
         }
+      }
+    }
+    return false;
+
+  case Entry::Type::CJThreadState:
+    if (exe_ctx) {
+      Thread *thread = exe_ctx->GetThreadPtr();
+      if (!thread) return false;
+      CJThread *cjthread = dynamic_cast<CJThread *>(thread);
+      if (cjthread) {
+        CJThreadState state = cjthread->GetCJThreadState();
+        llvm::StringRef state_format = FormatCJThreadState(state);
+        s << state_format;
+
+        lldb::user_id_t os_tid = thread->GetProtocolID();
+        if (state == CJThreadState::eRunning && os_tid != 0) {
+          const char *format = " (on OS thread %" PRIu64 ")";
+          if (!entry.printf_format.empty())
+            format = entry.printf_format.c_str();
+          s.Printf(format, os_tid);
+          return true;
+        }
+
+        return true;
+      }
+    }
+    return false;
+
+  case Entry::Type::CJThreadOSTid:
+    if (exe_ctx) {
+      Thread *thread = exe_ctx->GetThreadPtr();
+      if (!thread) return false;
+      CJThread *cjthread = dynamic_cast<CJThread *>(thread);
+      lldb::user_id_t os_tid = thread->GetProtocolID();
+      if (cjthread && os_tid != 0) {
+        const char *format = "%" PRIu64;
+        if (!entry.printf_format.empty())
+          format = entry.printf_format.c_str();
+        s.Printf(format, os_tid);
+        return true;
       }
     }
     return false;
