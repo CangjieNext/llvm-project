@@ -13,6 +13,7 @@
 
 #include "CommandObjectThreadUtil.h"
 #include "CommandObjectTrace.h"
+#include "CommandObjectThread.h"
 #include "lldb/Core/PluginManager.h"
 #include "lldb/Core/ValueObject.h"
 #include "lldb/Host/OptionParser.h"
@@ -44,199 +45,171 @@ using namespace lldb_private;
 #define LLDB_OPTIONS_thread_backtrace
 #include "CommandOptions.inc"
 
-class CommandObjectThreadBacktrace : public CommandObjectIterateOverThreads {
-public:
-  class CommandOptions : public Options {
-  public:
-    CommandOptions() {
-      // Keep default values of all options in one place: OptionParsingStarting
-      // ()
-      OptionParsingStarting(nullptr);
-    }
+Status CommandObjectThreadBacktrace::CommandOptions::SetOptionValue(uint32_t option_idx, llvm::StringRef option_arg,
+                      ExecutionContext *execution_context) {
+  Status error;
+  const int short_option = m_getopt_table[option_idx].val;
 
-    ~CommandOptions() override = default;
-
-    Status SetOptionValue(uint32_t option_idx, llvm::StringRef option_arg,
-                          ExecutionContext *execution_context) override {
-      Status error;
-      const int short_option = m_getopt_table[option_idx].val;
-
-      switch (short_option) {
-      case 'c': {
-        int32_t input_count = 0;
-        if (option_arg.getAsInteger(0, m_count)) {
-          m_count = UINT32_MAX;
-          error.SetErrorStringWithFormat(
-              "invalid integer value for option '%c'", short_option);
-        } else if (input_count < 0)
-          m_count = UINT32_MAX;
-      } break;
-      case 's':
-        if (option_arg.getAsInteger(0, m_start))
-          error.SetErrorStringWithFormat(
-              "invalid integer value for option '%c'", short_option);
-        break;
-      case 'e': {
-        bool success;
-        m_extended_backtrace =
-            OptionArgParser::ToBoolean(option_arg, false, &success);
-        if (!success)
-          error.SetErrorStringWithFormat(
-              "invalid boolean value for option '%c'", short_option);
-      } break;
-      default:
-        llvm_unreachable("Unimplemented option");
-      }
-      return error;
-    }
-
-    void OptionParsingStarting(ExecutionContext *execution_context) override {
+  switch (short_option) {
+  case 'c': {
+    int32_t input_count = 0;
+    if (option_arg.getAsInteger(0, m_count)) {
       m_count = UINT32_MAX;
-      m_start = 0;
-      m_extended_backtrace = false;
-    }
-
-    llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_thread_backtrace_options);
-    }
-
-    // Instance variables to hold the values for command options.
-    uint32_t m_count;
-    uint32_t m_start;
-    bool m_extended_backtrace;
-  };
-
-  CommandObjectThreadBacktrace(CommandInterpreter &interpreter)
-      : CommandObjectIterateOverThreads(
-            interpreter, "thread backtrace",
-            "Show thread call stacks.  Defaults to the current thread, thread "
-            "indexes can be specified as arguments.\n"
-            "Use the thread-index \"all\" to see all threads.\n"
-            "Use the thread-index \"unique\" to see threads grouped by unique "
-            "call stacks.\n"
-            "Use 'settings set frame-format' to customize the printing of "
-            "frames in the backtrace and 'settings set thread-format' to "
-            "customize the thread header.",
-            nullptr,
-            eCommandRequiresProcess | eCommandRequiresThread |
-                eCommandTryTargetAPILock | eCommandProcessMustBeLaunched |
-                eCommandProcessMustBePaused) {}
-
-  ~CommandObjectThreadBacktrace() override = default;
-
-  Options *GetOptions() override { return &m_options; }
-
-  llvm::Optional<std::string> GetRepeatCommand(Args &current_args,
-                                               uint32_t idx) override {
-    llvm::StringRef count_opt("--count");
-    llvm::StringRef start_opt("--start");
-
-    // If no "count" was provided, we are dumping the entire backtrace, so
-    // there isn't a repeat command.  So we search for the count option in
-    // the args, and if we find it, we make a copy and insert or modify the
-    // start option's value to start count indices greater.
-
-    Args copy_args(current_args);
-    size_t num_entries = copy_args.GetArgumentCount();
-    // These two point at the index of the option value if found.
-    size_t count_idx = 0;
-    size_t start_idx = 0;
-    size_t count_val = 0;
-    size_t start_val = 0;
-
-    for (size_t idx = 0; idx < num_entries; idx++) {
-      llvm::StringRef arg_string = copy_args[idx].ref();
-      if (arg_string.equals("-c") || count_opt.startswith(arg_string)) {
-        idx++;
-        if (idx == num_entries)
-          return llvm::None;
-        count_idx = idx;
-        if (copy_args[idx].ref().getAsInteger(0, count_val))
-          return llvm::None;
-      } else if (arg_string.equals("-s") || start_opt.startswith(arg_string)) {
-        idx++;
-        if (idx == num_entries)
-          return llvm::None;
-        start_idx = idx;
-        if (copy_args[idx].ref().getAsInteger(0, start_val))
-          return llvm::None;
-      }
-    }
-    if (count_idx == 0)
-      return llvm::None;
-
-    std::string new_start_val = llvm::formatv("{0}", start_val + count_val);
-    if (start_idx == 0) {
-      copy_args.AppendArgument(start_opt);
-      copy_args.AppendArgument(new_start_val);
-    } else {
-      copy_args.ReplaceArgumentAtIndex(start_idx, new_start_val);
-    }
-    std::string repeat_command;
-    if (!copy_args.GetQuotedCommandString(repeat_command))
-      return llvm::None;
-    return repeat_command;
+      error.SetErrorStringWithFormat(
+          "invalid integer value for option '%c'", short_option);
+    } else if (input_count < 0)
+      m_count = UINT32_MAX;
+  } break;
+  case 's':
+    if (option_arg.getAsInteger(0, m_start))
+      error.SetErrorStringWithFormat(
+          "invalid integer value for option '%c'", short_option);
+    break;
+  case 'e': {
+    bool success;
+    m_extended_backtrace =
+        OptionArgParser::ToBoolean(option_arg, false, &success);
+    if (!success)
+      error.SetErrorStringWithFormat(
+          "invalid boolean value for option '%c'", short_option);
+  } break;
+  default:
+    llvm_unreachable("Unimplemented option");
   }
+  return error;
+}
 
-protected:
-  void DoExtendedBacktrace(Thread *thread, CommandReturnObject &result) {
-    SystemRuntime *runtime = thread->GetProcess()->GetSystemRuntime();
-    if (runtime) {
-      Stream &strm = result.GetOutputStream();
-      const std::vector<ConstString> &types =
-          runtime->GetExtendedBacktraceTypes();
-      for (auto type : types) {
-        ThreadSP ext_thread_sp = runtime->GetExtendedBacktraceThread(
-            thread->shared_from_this(), type);
-        if (ext_thread_sp && ext_thread_sp->IsValid()) {
-          const uint32_t num_frames_with_source = 0;
-          const bool stop_format = false;
-          if (ext_thread_sp->GetStatus(strm, m_options.m_start,
-                                       m_options.m_count,
-                                       num_frames_with_source, stop_format)) {
-            DoExtendedBacktrace(ext_thread_sp.get(), result);
-          }
+llvm::ArrayRef<OptionDefinition> CommandObjectThreadBacktrace::CommandOptions::GetDefinitions() {
+  return llvm::makeArrayRef(g_thread_backtrace_options);
+}
+
+lldb_private::CommandObjectThreadBacktrace::CommandObjectThreadBacktrace(CommandInterpreter &interpreter)
+  : CommandObjectIterateOverThreads(
+        interpreter, "thread backtrace",
+        "Show thread call stacks.  Defaults to the current thread, thread "
+        "indexes can be specified as arguments.\n"
+        "Use the thread-index \"all\" to see all threads.\n"
+        "Use the thread-index \"unique\" to see threads grouped by unique "
+        "call stacks.\n"
+        "Use 'settings set frame-format' to customize the printing of "
+        "frames in the backtrace and 'settings set thread-format' to "
+        "customize the thread header.",
+        nullptr,
+        eCommandRequiresProcess | eCommandRequiresThread |
+            eCommandTryTargetAPILock | eCommandProcessMustBeLaunched |
+            eCommandProcessMustBePaused) {}
+
+lldb_private::CommandObjectThreadBacktrace::CommandObjectThreadBacktrace(CommandInterpreter &interpreter,
+    const char *name, const char *help,
+    const char *syntax, uint32_t flags, bool use_cjthread)
+  : CommandObjectIterateOverThreads(interpreter, name, help, syntax, flags, use_cjthread) {}
+
+llvm::Optional<std::string> CommandObjectThreadBacktrace::GetRepeatCommand(Args &current_args,
+                                              uint32_t idx) {
+  llvm::StringRef count_opt("--count");
+  llvm::StringRef start_opt("--start");
+
+  // If no "count" was provided, we are dumping the entire backtrace, so
+  // there isn't a repeat command.  So we search for the count option in
+  // the args, and if we find it, we make a copy and insert or modify the
+  // start option's value to start count indices greater.
+
+  Args copy_args(current_args);
+  size_t num_entries = copy_args.GetArgumentCount();
+  // These two point at the index of the option value if found.
+  size_t count_idx = 0;
+  size_t start_idx = 0;
+  size_t count_val = 0;
+  size_t start_val = 0;
+
+  for (size_t idx = 0; idx < num_entries; idx++) {
+    llvm::StringRef arg_string = copy_args[idx].ref();
+    if (arg_string.equals("-c") || count_opt.startswith(arg_string)) {
+      idx++;
+      if (idx == num_entries)
+        return llvm::None;
+      count_idx = idx;
+      if (copy_args[idx].ref().getAsInteger(0, count_val))
+        return llvm::None;
+    } else if (arg_string.equals("-s") || start_opt.startswith(arg_string)) {
+      idx++;
+      if (idx == num_entries)
+        return llvm::None;
+      start_idx = idx;
+      if (copy_args[idx].ref().getAsInteger(0, start_val))
+        return llvm::None;
+    }
+  }
+  if (count_idx == 0)
+    return llvm::None;
+
+  std::string new_start_val = llvm::formatv("{0}", start_val + count_val);
+  if (start_idx == 0) {
+    copy_args.AppendArgument(start_opt);
+    copy_args.AppendArgument(new_start_val);
+  } else {
+    copy_args.ReplaceArgumentAtIndex(start_idx, new_start_val);
+  }
+  std::string repeat_command;
+  if (!copy_args.GetQuotedCommandString(repeat_command))
+    return llvm::None;
+  return repeat_command;
+}
+
+void CommandObjectThreadBacktrace::DoExtendedBacktrace(Thread *thread, CommandReturnObject &result) {
+  SystemRuntime *runtime = thread->GetProcess()->GetSystemRuntime();
+  if (runtime) {
+    Stream &strm = result.GetOutputStream();
+    const std::vector<ConstString> &types =
+        runtime->GetExtendedBacktraceTypes();
+    for (auto type : types) {
+      ThreadSP ext_thread_sp = runtime->GetExtendedBacktraceThread(
+          thread->shared_from_this(), type);
+      if (ext_thread_sp && ext_thread_sp->IsValid()) {
+        const uint32_t num_frames_with_source = 0;
+        const bool stop_format = false;
+        if (ext_thread_sp->GetStatus(strm, m_options.m_start,
+                                      m_options.m_count,
+                                      num_frames_with_source, stop_format)) {
+          DoExtendedBacktrace(ext_thread_sp.get(), result);
         }
       }
     }
   }
+}
 
-  bool HandleOneThread(lldb::tid_t tid, CommandReturnObject &result) override {
-    ThreadSP thread_sp =
-        m_exe_ctx.GetProcessPtr()->GetThreadList().FindThreadByID(tid);
-    if (!thread_sp) {
-      result.AppendErrorWithFormat(
-          "thread disappeared while computing backtraces: 0x%" PRIx64 "\n",
-          tid);
-      return false;
-    }
-
-    Thread *thread = thread_sp.get();
-
-    Stream &strm = result.GetOutputStream();
-
-    // Only dump stack info if we processing unique stacks.
-    const bool only_stacks = m_unique_stacks;
-
-    // Don't show source context when doing backtraces.
-    const uint32_t num_frames_with_source = 0;
-    const bool stop_format = true;
-    if (!thread->GetStatus(strm, m_options.m_start, m_options.m_count,
-                           num_frames_with_source, stop_format, only_stacks)) {
-      result.AppendErrorWithFormat(
-          "error displaying backtrace for thread: \"0x%4.4x\"\n",
-          thread->GetIndexID());
-      return false;
-    }
-    if (m_options.m_extended_backtrace) {
-      DoExtendedBacktrace(thread, result);
-    }
-
-    return true;
+bool CommandObjectThreadBacktrace::HandleOneThread(lldb::tid_t tid, CommandReturnObject &result) {
+  ThreadSP thread_sp = getTargetThreadList().FindThreadByID(tid);
+  if (!thread_sp) {
+    result.AppendErrorWithFormat(
+        "thread disappeared while computing backtraces: 0x%" PRIx64 "\n",
+        tid);
+    return false;
   }
 
-  CommandOptions m_options;
-};
+  Thread *thread = thread_sp.get();
+
+  Stream &strm = result.GetOutputStream();
+
+  // Only dump stack info if we processing unique stacks.
+  const bool only_stacks = m_unique_stacks;
+
+  // Don't show source context when doing backtraces.
+  const uint32_t num_frames_with_source = 0;
+  const bool stop_format = true;
+  if (!thread->GetStatus(strm, m_options.m_start, m_options.m_count,
+                          num_frames_with_source, stop_format, only_stacks)) {
+    result.AppendErrorWithFormat(
+        "error displaying backtrace for thread: \"0x%4.4x\"\n",
+        thread->GetIndexID());
+    return false;
+  }
+  if (m_options.m_extended_backtrace) {
+    DoExtendedBacktrace(thread, result);
+  }
+
+  return true;
+}
 
 enum StepScope { eStepScopeSource, eStepScopeInstruction };
 
