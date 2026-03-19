@@ -938,6 +938,8 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
     }
   }
 
+  preCJStackCheck(MF, MBBI, NumBytes);
+
   // Move past the aligned DPRCS2 area.
   if (AFI->getNumAlignedDPRCS2Regs() > 0) {
     MBBI = skipAlignedDPRCS2Spills(MBBI, AFI->getNumAlignedDPRCS2Regs());
