@@ -1190,6 +1190,8 @@ public:
 
   lldb::ValueObjectSP GetSiginfoValue();
 
+  virtual bool IsSynthetic() const { return false; }
+
 protected:
   friend class ThreadPlan;
   friend class ThreadList;
