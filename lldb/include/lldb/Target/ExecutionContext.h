@@ -181,6 +181,21 @@ public:
   /// \see ExecutionContextRef::SetContext(const lldb::ThreadSP &)
   void SetThreadSP(const lldb::ThreadSP &thread_sp);
 
+  /// Set accessor that creates a weak reference to the thread referenced in
+  /// \a cjthread_sp.
+  ///
+  /// If \a cjthread_sp is valid this object will create a weak reference to
+  /// that object, otherwise any previous cjthread weak reference contained in
+  /// this object will be reset.
+  ///
+  /// Only the weak reference to the cjthread will be updated, no other weak
+  /// references will be modified. If you want this execution context to make
+  /// a weak reference to the cjthread's process and target, use the
+  /// ExecutionContextRef::SetContext() functions.
+  ///
+  /// \see ExecutionContextRef::SetContext(const lldb::CJThreadSP &)
+  void SetCJThreadSP(const lldb::CJThreadSP &cjthread_sp);
+
   /// Set accessor that creates a weak reference to the frame referenced in \a
   /// frame_sp.
   ///
@@ -201,6 +216,8 @@ public:
   void SetProcessPtr(Process *process);
 
   void SetThreadPtr(Thread *thread);
+
+  void SetCJThreadPtr(CJThread *thread);
 
   void SetFramePtr(StackFrame *frame);
 
@@ -225,6 +242,13 @@ public:
   ///     A shared pointer to a thread that is not guaranteed to be valid.
   lldb::ThreadSP GetThreadSP() const;
 
+  /// Get accessor that creates a strong reference from the weak cjthread
+  /// reference contained in this object.
+  ///
+  /// \returns
+  ///     A shared pointer to a cjthread that is not guaranteed to be valid.
+  lldb::CJThreadSP GetCJThreadSP() const;
+
   /// Get accessor that creates a strong reference from the weak frame
   /// reference contained in this object.
   ///
@@ -246,6 +270,11 @@ public:
   /// and does not indicate whether the weak reference is valid or not.
   bool HasThreadRef() const { return m_tid != LLDB_INVALID_THREAD_ID; }
 
+  /// Returns true if this object has a weak reference to a cjthread. The return
+  /// value is only an indication of whether this object has a weak reference
+  /// and does not indicate whether the weak reference is valid or not.
+  bool HasCJThreadRef() const { return m_cjtid != LLDB_INVALID_CJTHREAD_ID; }
+
   /// Returns true if this object has a weak reference to a frame. The return
   /// value is only an indication of whether this object has a weak reference
   /// and does not indicate whether the weak reference is valid or not.
@@ -256,6 +285,11 @@ public:
     m_tid = LLDB_INVALID_THREAD_ID;
   }
 
+  void ClearCJThread() {
+    m_cjthread_wp.reset();
+    m_cjtid = LLDB_INVALID_CJTHREAD_ID;
+  }
+
   void ClearFrame() { m_stack_id.Clear(); }
 
 protected:
@@ -263,7 +297,11 @@ protected:
   lldb::TargetWP m_target_wp;         ///< A weak reference to a target
   lldb::ProcessWP m_process_wp;       ///< A weak reference to a process
   mutable lldb::ThreadWP m_thread_wp; ///< A weak reference to a thread
+  mutable lldb::CJThreadWP m_cjthread_wp; ///< A weak reference to a thread
   lldb::tid_t m_tid = LLDB_INVALID_THREAD_ID; ///< The thread ID that this
+                                              ///< object refers to in case the
+                                              /// backing object changes
+  lldb::tid_t m_cjtid = LLDB_INVALID_CJTHREAD_ID; ///< The thread ID that this
                                               ///< object refers to in case the
                                               /// backing object changes
   StackID m_stack_id; ///< The stack ID that this object refers to in case the
@@ -304,12 +342,14 @@ public:
   ExecutionContext(const lldb::TargetSP &target_sp, bool get_process);
   ExecutionContext(const lldb::ProcessSP &process_sp);
   ExecutionContext(const lldb::ThreadSP &thread_sp);
+  ExecutionContext(const lldb::CJThreadSP &cjthread_sp);
   ExecutionContext(const lldb::StackFrameSP &frame_sp);
 
   // Create execution contexts from weak pointers
   ExecutionContext(const lldb::TargetWP &target_wp, bool get_process);
   ExecutionContext(const lldb::ProcessWP &process_wp);
   ExecutionContext(const lldb::ThreadWP &thread_wp);
+  ExecutionContext(const lldb::CJThreadWP &cjthread_wp);
   ExecutionContext(const lldb::StackFrameWP &frame_wp);
   ExecutionContext(const ExecutionContextRef &exe_ctx_ref);
   ExecutionContext(const ExecutionContextRef *exe_ctx_ref,
@@ -398,6 +438,17 @@ public:
   /// ExecutionContext::HasFrameScope() const
   Thread *GetThreadPtr() const { return m_thread_sp.get(); }
 
+  /// Returns a pointer to the thread object.
+  ///
+  /// The returned pointer might be nullptr. Calling HasCJThreadScope() or
+  /// HasFrameScope() can help to pre-validate this pointer so that this
+  /// accessor can freely be used without having to check for nullptr each
+  /// time.
+  ///
+  /// \see ExecutionContext::HasCJThreadScope() const @see
+  /// ExecutionContext::HasFrameScope() const
+  CJThread *GetCJThreadPtr() const { return m_cjthread_sp.get(); }
+
   /// Returns a pointer to the frame object.
   ///
   /// The returned pointer might be nullptr. Calling HasFrameScope(), can help
@@ -410,12 +461,13 @@ public:
   /// Returns a reference to the target object.
   ///
   /// Clients should call HasTargetScope(), HasProcessScope(),
-  /// HasThreadScope(), or HasFrameScope() prior to calling this function to
+  /// HasCJThreadScope(), or HasFrameScope() prior to calling this function to
   /// ensure that this ExecutionContext object contains a valid target.
   ///
   /// \see ExecutionContext::HasTargetScope() const @see
   /// ExecutionContext::HasProcessScope() const @see
   /// ExecutionContext::HasThreadScope() const @see
+  /// ExecutionContext::HasCJThreadScope() const @see
   /// ExecutionContext::HasFrameScope() const
   Target &GetTargetRef() const;
 
@@ -427,6 +479,7 @@ public:
   ///
   /// \see ExecutionContext::HasProcessScope() const @see
   /// ExecutionContext::HasThreadScope() const @see
+  /// ExecutionContext::HasCJThreadScope() const @see
   /// ExecutionContext::HasFrameScope() const
   Process &GetProcessRef() const;
 
@@ -439,6 +492,16 @@ public:
   /// \see ExecutionContext::HasThreadScope() const @see
   /// ExecutionContext::HasFrameScope() const
   Thread &GetThreadRef() const;
+
+  /// Returns a reference to the thread object.
+  ///
+  /// Clients should call HasCJThreadScope(), or  HasFrameScope() prior to
+  /// calling this  function to ensure that  this ExecutionContext object
+  /// contains a valid target.
+  ///
+  /// \see ExecutionContext::HasCJThreadScope() const @see
+  /// ExecutionContext::HasFrameScope() const
+  CJThread &GetCJThreadRef() const;
 
   /// Returns a reference to the thread object.
   ///
@@ -463,6 +526,11 @@ public:
   /// The returned shared pointer is not guaranteed to be valid.
   const lldb::ThreadSP &GetThreadSP() const { return m_thread_sp; }
 
+  /// Get accessor to get the thread shared pointer.
+  ///
+  /// The returned shared pointer is not guaranteed to be valid.
+  const lldb::CJThreadSP &GetCJThreadSP() const { return m_cjthread_sp; }
+
   /// Get accessor to get the frame shared pointer.
   ///
   /// The returned shared pointer is not guaranteed to be valid.
@@ -476,6 +544,9 @@ public:
 
   /// Set accessor to set only the thread shared pointer.
   void SetThreadSP(const lldb::ThreadSP &thread_sp);
+
+  /// Set accessor to set only the thread shared pointer.
+  void SetCJThreadSP(const lldb::CJThreadSP &cjthread_sp);
 
   /// Set accessor to set only the frame shared pointer.
   void SetFrameSP(const lldb::StackFrameSP &frame_sp);
@@ -491,6 +562,10 @@ public:
   /// Set accessor to set only the thread shared pointer from a thread
   /// pointer.
   void SetThreadPtr(Thread *thread);
+
+  /// Set accessor to set only the thread shared pointer from a thread
+  /// pointer.
+  void SetCJThreadPtr(CJThread *thread);
 
   /// Set accessor to set only the frame shared pointer from a frame pointer.
   void SetFramePtr(StackFrame *frame);
@@ -515,6 +590,8 @@ public:
   // context. The frame context will be cleared. If "thread_sp" is not valid,
   // all shared pointers are reset.
   void SetContext(const lldb::ThreadSP &thread_sp);
+
+  void SetContext(const lldb::CJThreadSP &cjthread_sp);
 
   // Set the execution context using a frame shared pointer.
   //
@@ -548,6 +625,15 @@ public:
   bool HasThreadScope() const;
 
   /// Returns true the ExecutionContext object contains a valid target,
+  /// process, and thread.
+  ///
+  /// This function can be called after initializing an ExecutionContext
+  /// object, and if it returns true, calls to GetTargetPtr(), GetTargetRef(),
+  /// GetProcessPtr(), GetProcessRef(), GetCJThreadPtr(), and GetCJThreadRef() do
+  /// not need to be checked for validity.
+  bool HasCJThreadScope() const;
+
+  /// Returns true the ExecutionContext object contains a valid target,
   /// process, thread and frame.
   ///
   /// This function can be called after initializing an ExecutionContext
@@ -561,6 +647,7 @@ protected:
   lldb::TargetSP m_target_sp; ///< The target that owns the process/thread/frame
   lldb::ProcessSP m_process_sp;  ///< The process that owns the thread/frame
   lldb::ThreadSP m_thread_sp;    ///< The thread that owns the frame
+  lldb::CJThreadSP m_cjthread_sp;    ///< The cjthread that owns the frame
   lldb::StackFrameSP m_frame_sp; ///< The stack frame in thread.
 };
 
