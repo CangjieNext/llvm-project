@@ -80,6 +80,10 @@ public:
   const SpillSlot *
   getCalleeSavedSpillSlots(unsigned &NumEntries) const override;
 
+  MachineBasicBlock::iterator
+  preCJStackCheck(MachineFunction &MF, MachineBasicBlock::iterator InsertPos,
+                  int32_t Size, bool NeedRecoverStack = true) const override;
+
 private:
   void emitPushInst(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
                     ArrayRef<CalleeSavedInfo> CSI, unsigned StmOpc,
