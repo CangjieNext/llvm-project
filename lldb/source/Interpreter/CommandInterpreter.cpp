@@ -507,6 +507,11 @@ void CommandInterpreter::Initialize() {
   if (cmd_obj_sp) {
     AddAlias("history", cmd_obj_sp);
   }
+
+  cmd_obj_sp = GetCommandSPExact("cjthread");
+  if (cmd_obj_sp) {
+    AddAlias("cjt", cmd_obj_sp);
+  }
 }
 
 void CommandInterpreter::Clear() {
