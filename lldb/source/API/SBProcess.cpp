@@ -25,6 +25,7 @@
 #include "lldb/Target/SystemRuntime.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Target/Thread.h"
+#include "lldb/Target/CJThread.h"
 #include "lldb/Utility/Args.h"
 #include "lldb/Utility/ProcessInfo.h"
 #include "lldb/Utility/State.h"
@@ -42,6 +43,7 @@
 #include "lldb/API/SBStringList.h"
 #include "lldb/API/SBStructuredData.h"
 #include "lldb/API/SBThread.h"
+#include "lldb/API/SBCJThread.h"
 #include "lldb/API/SBThreadCollection.h"
 #include "lldb/API/SBTrace.h"
 #include "lldb/API/SBUnixSignals.h"
@@ -1261,4 +1263,39 @@ lldb::SBError SBProcess::DeallocateMemory(lldb::addr_t ptr) {
     sb_error.SetErrorString("SBProcess is invalid");
   }
   return sb_error;
+}
+
+uint32_t SBProcess::GetNumCJThreads() {
+  LLDB_INSTRUMENT_VA(this);
+
+  uint32_t num_threads = 0;
+  ProcessSP process_sp(GetSP());
+  if (process_sp) {
+    Process::StopLocker stop_locker;
+
+    const bool can_update = stop_locker.TryLock(&process_sp->GetRunLock());
+    std::lock_guard<std::recursive_mutex> guard(
+        process_sp->GetTarget().GetAPIMutex());
+    num_threads = process_sp->GetCJThreadList().GetSize(can_update);
+  }
+
+  return num_threads;
+}
+
+SBCJThread SBProcess::GetCJThreadAtIndex(size_t index) {
+  LLDB_INSTRUMENT_VA(this, index);
+
+  SBCJThread sb_cjthread;
+  ThreadSP thread_sp;
+  ProcessSP process_sp(GetSP());
+  if (process_sp) {
+    Process::StopLocker stop_locker;
+    const bool can_update = stop_locker.TryLock(&process_sp->GetRunLock());
+    std::lock_guard<std::recursive_mutex> guard(
+        process_sp->GetTarget().GetAPIMutex());
+    thread_sp = process_sp->GetThreadList().GetThreadAtIndex(index, can_update);
+    sb_cjthread.SetCJThread(std::dynamic_pointer_cast<lldb_private::CJThread>(thread_sp));
+  }
+
+  return sb_cjthread;
 }
