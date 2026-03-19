@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "GDBRemoteCommunicationHistory.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteCommunicationHistory.h"
 
 // Other libraries and framework includes
 #include "lldb/Core/StreamFile.h"

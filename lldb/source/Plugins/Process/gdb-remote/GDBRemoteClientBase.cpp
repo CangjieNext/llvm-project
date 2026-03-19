@@ -6,14 +6,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "GDBRemoteClientBase.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteClientBase.h"
 
 #include "llvm/ADT/StringExtras.h"
 
 #include "lldb/Target/UnixSignals.h"
 #include "lldb/Utility/LLDBAssert.h"
 
-#include "ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
 
 using namespace lldb;
 using namespace lldb_private;
