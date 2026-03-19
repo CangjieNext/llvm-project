@@ -11,6 +11,7 @@
 #include "lldb/Interpreter/CommandReturnObject.h"
 #include "lldb/Target/Process.h"
 #include "lldb/Target/Thread.h"
+#include "lldb/Target/CJThread.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -18,20 +19,30 @@ using namespace llvm;
 
 CommandObjectIterateOverThreads::CommandObjectIterateOverThreads(
     CommandInterpreter &interpreter, const char *name, const char *help,
-    const char *syntax, uint32_t flags)
+    const char *syntax, uint32_t flags, bool use_cjthread)
     : CommandObjectParsed(interpreter, name, help, syntax, flags) {
   // These commands all take thread ID's as arguments.
   CommandArgumentData thread_arg{eArgTypeThreadIndex, eArgRepeatStar};
   m_arguments.push_back({thread_arg});
+  m_use_cjthread = use_cjthread;
 }
 
 CommandObjectMultipleThreads::CommandObjectMultipleThreads(
     CommandInterpreter &interpreter, const char *name, const char *help,
-    const char *syntax, uint32_t flags)
+    const char *syntax, uint32_t flags, bool use_cjthread)
     : CommandObjectParsed(interpreter, name, help, syntax, flags) {
   // These commands all take thread ID's as arguments.
   CommandArgumentData thread_arg{eArgTypeThreadIndex, eArgRepeatStar};
   m_arguments.push_back({thread_arg});
+  m_use_cjthread = use_cjthread;
+}
+
+ThreadList &CommandObjectIterateOverThreads::getTargetThreadList() {
+  Process *process = m_exe_ctx.GetProcessPtr();
+  if (m_use_cjthread)
+    return process->GetCJThreadList();
+  else
+    return process->GetThreadList();
 }
 
 bool CommandObjectIterateOverThreads::DoExecute(Args &command,
@@ -40,10 +51,19 @@ bool CommandObjectIterateOverThreads::DoExecute(Args &command,
 
   bool all_threads = false;
   if (command.GetArgumentCount() == 0) {
-    Thread *thread = m_exe_ctx.GetThreadPtr();
-    if (!thread || !HandleOneThread(thread->GetID(), result))
-      return false;
-    return result.Succeeded();
+    if (m_use_cjthread) {
+      // this should be optimized using m_exe_ctx, but currently
+      // 
+      ThreadSP thread = m_exe_ctx.GetProcessPtr()->GetCJThreadList().GetSelectedThread();
+      if (!thread || !HandleOneThread(thread->GetID(), result))
+        return false;
+      return result.Succeeded();
+    } else {
+      Thread *thread = m_exe_ctx.GetThreadPtr();
+      if (!thread || !HandleOneThread(thread->GetID(), result))
+        return false;
+      return result.Succeeded();
+    }
   } else if (command.GetArgumentCount() == 1) {
     all_threads = ::strcmp(command.GetArgumentAtIndex(0), "all") == 0;
     m_unique_stacks = ::strcmp(command.GetArgumentAtIndex(0), "unique") == 0;
@@ -57,14 +77,17 @@ bool CommandObjectIterateOverThreads::DoExecute(Args &command,
   if (all_threads || m_unique_stacks) {
     Process *process = m_exe_ctx.GetProcessPtr();
 
-    for (ThreadSP thread_sp : process->Threads())
-      tids.push_back(thread_sp->GetID());
+    if (m_use_cjthread)
+      for (ThreadSP thread_sp : process->CJThreads())
+        tids.push_back(thread_sp->GetID());
+    else
+      for (ThreadSP thread_sp : process->Threads())
+        tids.push_back(thread_sp->GetID());
   } else {
     const size_t num_args = command.GetArgumentCount();
-    Process *process = m_exe_ctx.GetProcessPtr();
 
     std::lock_guard<std::recursive_mutex> guard(
-        process->GetThreadList().GetMutex());
+        getTargetThreadList().GetMutex());
 
     for (size_t i = 0; i < num_args; i++) {
       uint32_t thread_idx;
@@ -74,8 +97,7 @@ bool CommandObjectIterateOverThreads::DoExecute(Args &command,
         return false;
       }
 
-      ThreadSP thread =
-          process->GetThreadList().FindThreadByIndexID(thread_idx);
+      ThreadSP thread = getTargetThreadList().FindThreadByIndexID(thread_idx);
 
       if (!thread) {
         result.AppendErrorWithFormat("no thread with index: \"%s\"\n",
@@ -98,12 +120,14 @@ bool CommandObjectIterateOverThreads::DoExecute(Args &command,
 
     // Write the thread id's and unique call stacks to the output stream
     Stream &strm = result.GetOutputStream();
-    Process *process = m_exe_ctx.GetProcessPtr();
     for (const UniqueStack &stack : unique_stacks) {
       // List the common thread ID's
       const std::vector<uint32_t> &thread_index_ids =
           stack.GetUniqueThreadIndexIDs();
-      strm.Format("{0} thread(s) ", thread_index_ids.size());
+      if (m_use_cjthread)
+        strm.Format("{0} cangjie thread(s) ", thread_index_ids.size());
+      else
+        strm.Format("{0} thread(s) ", thread_index_ids.size());
       for (const uint32_t &thread_index_id : thread_index_ids) {
         strm.Format("#{0} ", thread_index_id);
       }
@@ -111,8 +135,8 @@ bool CommandObjectIterateOverThreads::DoExecute(Args &command,
 
       // List the shared call stack for this set of threads
       uint32_t representative_thread_id = stack.GetRepresentativeThread();
-      ThreadSP thread = process->GetThreadList().FindThreadByIndexID(
-          representative_thread_id);
+      ThreadSP thread = getTargetThreadList().FindThreadByIndexID(
+            representative_thread_id);
       if (!HandleOneThread(thread->GetID(), result)) {
         return false;
       }
@@ -136,8 +160,7 @@ bool CommandObjectIterateOverThreads::BucketThread(
     lldb::tid_t tid, std::set<UniqueStack> &unique_stacks,
     CommandReturnObject &result) {
   // Grab the corresponding thread for the given thread id.
-  Process *process = m_exe_ctx.GetProcessPtr();
-  Thread *thread = process->GetThreadList().FindThreadByID(tid).get();
+  Thread *thread = getTargetThreadList().FindThreadByID(tid).get();
   if (thread == nullptr) {
     result.AppendErrorWithFormatv("Failed to process thread #{0}.\n", tid);
     return false;
@@ -167,6 +190,14 @@ bool CommandObjectIterateOverThreads::BucketThread(
   return true;
 }
 
+ThreadList &CommandObjectMultipleThreads::getTargetThreadList() {
+  Process *process = m_exe_ctx.GetProcessPtr();
+  if (m_use_cjthread)
+    return process->GetCJThreadList();
+  else
+    return process->GetThreadList();
+}
+
 bool CommandObjectMultipleThreads::DoExecute(Args &command,
                                              CommandReturnObject &result) {
   Process &process = m_exe_ctx.GetProcessRef();
@@ -175,11 +206,15 @@ bool CommandObjectMultipleThreads::DoExecute(Args &command,
   const size_t num_args = command.GetArgumentCount();
 
   std::lock_guard<std::recursive_mutex> guard(
-      process.GetThreadList().GetMutex());
+      getTargetThreadList().GetMutex());
 
   if (num_args > 0 && ::strcmp(command.GetArgumentAtIndex(0), "all") == 0) {
-    for (ThreadSP thread_sp : process.Threads())
-      tids.push_back(thread_sp->GetID());
+    if (m_use_cjthread)
+      for (ThreadSP thread_sp : process.CJThreads())
+        tids.push_back(thread_sp->GetID());
+    else
+      for (ThreadSP thread_sp : process.Threads())
+        tids.push_back(thread_sp->GetID());
   } else {
     if (num_args == 0) {
       Thread &thread = m_exe_ctx.GetThreadRef();
@@ -194,7 +229,7 @@ bool CommandObjectMultipleThreads::DoExecute(Args &command,
         return false;
       }
 
-      ThreadSP thread = process.GetThreadList().FindThreadByIndexID(thread_idx);
+      ThreadSP thread = getTargetThreadList().FindThreadByIndexID(thread_idx);
 
       if (!thread) {
         result.AppendErrorWithFormat("no thread with index: \"%s\"\n",
