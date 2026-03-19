@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "GDBRemoteCommunicationServerPlatform.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteCommunicationServerPlatform.h"
 
 #include <cerrno>
 

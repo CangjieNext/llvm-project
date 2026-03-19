@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "GDBRemoteCommunicationServerCommon.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteCommunicationServerCommon.h"
 
 #include <cerrno>
 
@@ -38,7 +38,7 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/Support/JSON.h"
 
-#include "ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
 #include "lldb/Utility/StringExtractorGDBRemote.h"
 
 #ifdef __ANDROID__

@@ -27,8 +27,8 @@
 
 #include "Acceptor.h"
 #include "LLDBServerUtilities.h"
-#include "Plugins/Process/gdb-remote/GDBRemoteCommunicationServerPlatform.h"
-#include "Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/GDBRemoteCommunicationServerPlatform.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
 #include "lldb/Host/ConnectionFileDescriptor.h"
 #include "lldb/Host/HostGetOpt.h"
 #include "lldb/Host/OptionParser.h"

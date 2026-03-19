@@ -223,6 +223,7 @@ class Target;
 class TargetList;
 class TargetProperties;
 class Thread;
+class CJThread;
 class ThreadCollection;
 class ThreadList;
 class ThreadPlan;
@@ -411,7 +412,9 @@ typedef std::shared_ptr<lldb_private::SyntheticChildrenFrontEnd>
 typedef std::shared_ptr<lldb_private::Target> TargetSP;
 typedef std::weak_ptr<lldb_private::Target> TargetWP;
 typedef std::shared_ptr<lldb_private::Thread> ThreadSP;
+typedef std::shared_ptr<lldb_private::CJThread> CJThreadSP;
 typedef std::weak_ptr<lldb_private::Thread> ThreadWP;
+typedef std::weak_ptr<lldb_private::CJThread> CJThreadWP;
 typedef std::shared_ptr<lldb_private::ThreadCollection> ThreadCollectionSP;
 typedef std::shared_ptr<lldb_private::ThreadPlan> ThreadPlanSP;
 typedef std::shared_ptr<lldb_private::ThreadPostMortemTrace>

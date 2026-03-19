@@ -31,7 +31,7 @@
 #include "lldb/Utility/UriParser.h"
 
 #include "Plugins/Process/Utility/GDBRemoteSignals.h"
-#include "Plugins/Process/gdb-remote/ProcessGDBRemote.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemote.h"
 
 using namespace lldb;
 using namespace lldb_private;

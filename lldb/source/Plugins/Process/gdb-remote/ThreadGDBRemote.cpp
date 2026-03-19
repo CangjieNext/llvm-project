@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ThreadGDBRemote.h"
+#include "lldb/Plugins/Process/gdb-remote/ThreadGDBRemote.h"
 
 #include "lldb/Breakpoint/Watchpoint.h"
 #include "lldb/Target/Platform.h"
@@ -22,8 +22,8 @@
 #include "lldb/Utility/StreamString.h"
 #include "lldb/Utility/StringExtractorGDBRemote.h"
 
-#include "ProcessGDBRemote.h"
-#include "ProcessGDBRemoteLog.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemote.h"
+#include "lldb/Plugins/Process/gdb-remote/ProcessGDBRemoteLog.h"
 
 #include <memory>
 
