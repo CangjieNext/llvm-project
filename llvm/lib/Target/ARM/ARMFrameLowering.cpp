@@ -954,6 +954,10 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
     DefCFAOffsetCandidates.addInst(LastPush, GPRCS2Size);
   }
 
+  if (NumBytes == 0) {
+    preCJStackCheck(MF, MBBI, 0);
+  }
+
   bool NeedsWinCFIStackAlloc = NeedsWinCFI;
   if (STI.splitFramePointerPush(MF) && HasFP)
     NeedsWinCFIStackAlloc = false;
@@ -1044,6 +1048,7 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
       // an inconsistent state (pointing to the middle of callee-saved area).
       // The interrupt handler can end up clobbering the registers.
       AFI->setShouldRestoreSPFromFP(true);
+    preCJStackCheck(MF, MBBI, NumBytes);
   }
 
   // Set FP to point to the stack slot that contains the previous FP.
