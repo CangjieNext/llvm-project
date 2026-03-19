@@ -71,6 +71,7 @@ protected:
   friend class SBStructuredData;
   friend class SBTarget;
   friend class SBThread;
+  friend class SBCJThread;
   friend class SBTrace;
   friend class SBValue;
   friend class SBWatchpoint;
