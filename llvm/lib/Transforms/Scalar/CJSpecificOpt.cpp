@@ -381,7 +381,7 @@ static bool runOnFunction(Function &F, unsigned OptLevel) {
   Changed |= deadAllocaElimination(F);
   Changed |= replaceInvalidAddrpaceCast(F);
   const Triple TT(F.getParent()->getTargetTriple());
-  if (!TT.isARM())
+  // if (!TT.isARM())
     Changed |= insertStackCheck(F);
   Changed |= insertResetFPState(F, OptLevel);
   return Changed;
