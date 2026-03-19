@@ -219,6 +219,8 @@ public:
 
   bool ValidForThisThread(Thread &thread);
 
+  bool ValidForThisThread(Thread &thread);
+
   /// Invoke the callback action when the breakpoint is hit.
   ///
   /// Meant to be used by the BreakpointLocation class.
