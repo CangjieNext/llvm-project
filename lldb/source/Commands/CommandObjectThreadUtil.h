@@ -50,7 +50,8 @@ class CommandObjectIterateOverThreads : public CommandObjectParsed {
 public:
   CommandObjectIterateOverThreads(CommandInterpreter &interpreter,
                                   const char *name, const char *help,
-                                  const char *syntax, uint32_t flags);
+                                  const char *syntax, uint32_t flags,
+                                  bool use_cjthread=false);
 
   ~CommandObjectIterateOverThreads() override = default;
 
@@ -71,7 +72,10 @@ protected:
   bool BucketThread(lldb::tid_t tid, std::set<UniqueStack> &unique_stacks,
                     CommandReturnObject &result);
 
+  ThreadList &getTargetThreadList();
+
   lldb::ReturnStatus m_success_return = lldb::eReturnStatusSuccessFinishResult;
+  bool m_use_cjthread = false;
   bool m_unique_stacks = false;
   bool m_add_return = true;
 };
@@ -82,11 +86,15 @@ class CommandObjectMultipleThreads : public CommandObjectParsed {
 public:
   CommandObjectMultipleThreads(CommandInterpreter &interpreter,
                                const char *name, const char *help,
-                               const char *syntax, uint32_t flags);
+                               const char *syntax, uint32_t flags,
+                               bool use_cjthread = false);
 
   bool DoExecute(Args &command, CommandReturnObject &result) override;
 
+
 protected:
+  bool m_use_cjthread;
+
   /// Method that handles the command after the main arguments have been parsed.
   ///
   /// \param[in] tids
@@ -96,6 +104,8 @@ protected:
   ///     A boolean result similar to the one expected from \a DoExecute.
   virtual bool DoExecuteOnThreads(Args &command, CommandReturnObject &result,
                                   llvm::ArrayRef<lldb::tid_t> tids) = 0;
+
+  ThreadList &getTargetThreadList();
 };
 
 } // namespace lldb_private
