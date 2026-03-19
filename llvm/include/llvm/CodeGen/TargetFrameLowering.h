@@ -128,7 +128,8 @@ public:
   // store the size.
   // For X86: the size is frame size
   // For aarch64: the size is addsize calculated for sp
-  MachineBasicBlock::iterator
+  // For arm: the size is addsize calculated for sp
+  virtual MachineBasicBlock::iterator
   preCJStackCheck(MachineFunction &MF, MachineBasicBlock::iterator InsertPos,
                   int32_t Size, bool NeedRecoverStack = true) const;
 
