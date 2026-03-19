@@ -954,6 +954,8 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
     DefCFAOffsetCandidates.addInst(LastPush, GPRCS2Size);
   }
 
+  preCJStackCheck(MF, MBBI, NumBytes);
+
   bool NeedsWinCFIStackAlloc = NeedsWinCFI;
   if (STI.splitFramePointerPush(MF) && HasFP)
     NeedsWinCFIStackAlloc = false;

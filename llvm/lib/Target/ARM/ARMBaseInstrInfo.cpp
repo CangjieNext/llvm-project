@@ -72,6 +72,10 @@ using namespace llvm;
 
 #define DEBUG_TYPE "arm-instrinfo"
 
+namespace llvm {
+extern cl::opt<bool> CJPipeline;
+}
+
 #define GET_INSTRINFO_CTOR_DTOR
 #include "ARMGenInstrInfo.inc"
 
@@ -812,6 +816,13 @@ unsigned ARMBaseInstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
     const StatepointOpers SO(&MI);
     auto NumBytes = SO.getNumPatchBytes();
     const MachineOperand &MO = SO.getCallTarget();
+    if (CJPipeline) {
+      uint64_t ID = SO.getID();
+      if (ID == Cangjie::CJStatepointID::StackCheck) {
+        NumBytes= 14 * 4;
+        return NumBytes;
+      }
+    }
     if (MO.isGlobal()){
       const auto *Callee = dyn_cast<const Function>(MO.getGlobal());
       if (Callee != nullptr) {
