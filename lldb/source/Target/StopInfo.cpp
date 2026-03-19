@@ -102,6 +102,10 @@ public:
 
   ~StopInfoBreakpoint() override = default;
 
+  lldb::break_id_t GetBreakpointID() const override {
+    return m_break_id;
+  }
+
   void StoreBPInfo() {
     ThreadSP thread_sp(m_thread_wp.lock());
     if (thread_sp) {

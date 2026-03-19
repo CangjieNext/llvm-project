@@ -65,6 +65,8 @@ public:
       ThreadStopReasonRaw,
       ThreadReturnValue,
       ThreadCompletedExpression,
+      CJThreadState,
+      CJThreadOSTid,
       ScriptThread,
       ThreadInfo,
       TargetArch,
