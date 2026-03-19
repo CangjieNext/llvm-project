@@ -25,6 +25,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/BinaryFormat/COFF.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineModuleInfoImpls.h"
 #include "llvm/CodeGen/StackMaps.h"
@@ -53,6 +54,11 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "asm-printer"
+
+namespace llvm {
+extern cl::opt<bool> CJPipeline;
+extern cl::opt<bool> EnableStackGrow;
+}
 
 ARMAsmPrinter::ARMAsmPrinter(TargetMachine &TM,
                              std::unique_ptr<MCStreamer> Streamer)
@@ -1506,6 +1512,231 @@ bool ARMAsmPrinter::tryEmitCangjieSpecificCallByMOSym(
 // instructions) auto-generated.
 #include "ARMGenMCPseudoLowering.inc"
 
+static unsigned calculateFrameSize(const MachineFunction *MF,
+                                   const MachineInstr &MI) {
+  const TargetFrameLowering *TFI = MF->getSubtarget().getFrameLowering();
+  const MachineFrameInfo &MFI = MF->getFrameInfo();
+  bool IsFunclet = MI.getParent()->isEHFuncletEntry();
+  unsigned FrameSize = 0;
+  if (IsFunclet) {
+    unsigned CSSize = 0;
+    assert(MFI.isCalleeSavedInfoValid() && "calculateFrameSize should have CalleeSavedInfo in IsFunclet branch");
+    // this blcok CSSize can be calculated in ARMFrameLowering::determineCalleeSaves first.
+    // but recalculation is ok.
+    // is there missing stack slot?
+    if (MFI.isCalleeSavedInfoValid()) {
+      int64_t MinOffset = std::numeric_limits<int64_t>::max();
+      int64_t MaxOffset = std::numeric_limits<int64_t>::min();
+      for (const auto &Info : MFI.getCalleeSavedInfo()) {
+        int FrameIdx = Info.getFrameIdx();
+        if (MFI.getStackID(FrameIdx) != TargetStackID::Default)
+          continue;
+        int64_t Offset = MFI.getObjectOffset(FrameIdx);
+        int64_t ObjSize = MFI.getObjectSize(FrameIdx);
+        MinOffset = std::min<int64_t>(Offset, MinOffset);
+        MaxOffset = std::max<int64_t>(Offset + ObjSize, MaxOffset);
+      }
+      if (MinOffset != std::numeric_limits<int64_t>::max()) {
+        CSSize = alignTo(MaxOffset - MinOffset, TFI->getStackAlign());
+      }
+    }
+    FrameSize = alignTo(CSSize + MFI.getMaxCallFrameSize(), TFI->getStackAlign());
+  } else {
+    FrameSize = MFI.getStackSize();
+  }
+  return FrameSize;
+}
+
+// Note: emit specific inst should update inst size info in
+// ARMInstrInfo::getInstSizeInBytes for ARM at the same time
+//  add sp, sp, #AddSize
+void ARMAsmPrinter::emitAddSP(unsigned AddSize) {
+  using namespace ARM;
+  if (AddSize == 0)
+    return;
+  // todo: we can use better add instr when handle AddSize < 4096
+  uint16_t Lower16 = AddSize & 0xFFFF;
+  uint16_t Upper16 = (AddSize >> 16) & 0xFFFF;
+
+  MCInst MovW = MCInstBuilder(ARM::MOVi16)
+      .addReg(LR)
+      .addImm(Lower16)
+      .addImm(0);
+  EmitToStreamer(*OutStreamer, MovW);
+
+  if (Upper16 != 0) {
+    MCInst MovT = MCInstBuilder(ARM::MOVTi16)
+        .addReg(LR)
+        .addImm(Upper16)
+        .addImm(0);
+    EmitToStreamer(*OutStreamer, MovT);
+  }
+
+  MCInst AddReg = MCInstBuilder(ARM::ADDrr)
+      .addReg(SP)
+      .addReg(SP)
+      .addReg(LR)
+      .addImm(0)
+      .addReg(0);
+  EmitToStreamer(*OutStreamer, AddReg);
+}
+
+// Note: emit specific inst should update inst size info in
+// ARMInstrInfo::getInstSizeInBytes for ARM at the same time
+// >>>>>>>>>>>>>>>>>>>>>>> disable stackgrow
+//  add sp, sp, #AddSize
+//  mov r0, #LeftSize_Low
+//  mov r0, #LeftSize_Up
+//  bl CJ_MCC_ThrowStackOverflowError
+// =======================
+int ARMAsmPrinter::emitStackOverflowCall(const MachineInstr &MI) {
+  using namespace ARM;
+  unsigned FrameSize = calculateFrameSize(MF, MI);
+  unsigned AddSize = MI.peekCJStackSize();
+  emitAddSP(AddSize);
+
+  MCContext &Ctx = MF->getContext();
+  unsigned LeftSize = FrameSize - AddSize;
+  if (!EnableStackGrow) { // stack overflow
+
+    uint16_t Lower16 = LeftSize & 0xFFFF;
+    uint16_t Upper16 = (LeftSize >> 16) & 0xFFFF;
+
+    MCInst MovW = MCInstBuilder(ARM::MOVi16).addReg(R0).addImm(Lower16).addImm(0);
+    EmitToStreamer(*OutStreamer, MovW);
+
+    if (Upper16 != 0) {
+      MCInst MovT =
+          MCInstBuilder(ARM::MOVTi16).addReg(R0).addImm(Upper16).addImm(0);
+      EmitToStreamer(*OutStreamer, MovT);
+    }
+
+    MCSymbol *Sym = nullptr;
+    if (MF->getTarget().getTargetTriple().isOSBinFormatMachO()) {
+      Sym = Ctx.getOrCreateSymbol("_CJ_MCC_ThrowStackOverflowError");
+    } else {
+      Sym = Ctx.getOrCreateSymbol("CJ_MCC_ThrowStackOverflowError");
+    }
+    MCInst BLToSOFE = MCInstBuilder(BL).addExpr(
+        MCSymbolRefExpr::create(Sym, MCSymbolRefExpr::VK_None, Ctx));
+    EmitToStreamer(*OutStreamer, BLToSOFE);
+    return 3; // 3: instruction nums.
+  }
+  llvm_unreachable("ARM32 doesn't support EnableStackGrow now.");
+  return -1;
+}
+
+// # emitCJStackCheck
+//     mov     LR, r0              @ 保存 r0 (可能被用作函数参数)
+//     bl      MRT_GetThreadLocalData  @ r0 = TLS 基址
+//     ldr     r0, [r0, #ProtectAddr]      @ r0= ProtectAddr
+//     cmp     sp, r0              @ 比较
+//     mov     r0, LR              @ 恢复 r0
+//     bgt     .Lstack.check.end   @ 跳过溢出处理
+void ARMAsmPrinter::emitCJStackCheck(const MachineInstr &MI) {
+  using namespace ARM;
+  MCContext &Ctx = MF->getContext();
+  MCSymbol *EndSym = Ctx.createTempSymbol("stack.check.end");
+
+  // mov LR, r0            @ 保存 r0 (可能被用作函数参数)
+  MCInst MovLR = MCInstBuilder(ARM::MOVr)
+      .addReg(LR)
+      .addReg(R0)
+      .addImm(0)
+      .addReg(0)
+      .addImm(ARMCC::AL);
+  EmitToStreamer(*OutStreamer, MovLR);
+
+  emitGetCJTLSData(getProtectAddrOffsetInCJTLS());
+
+  // cmp sp, r0
+  MCInst Cmp = MCInstBuilder(ARM::CMPri)
+      .addReg(SP)
+      .addReg(R0)
+      .addImm(0);
+  EmitToStreamer(*OutStreamer, Cmp);
+
+  // mov r0, LR            @ 恢复 r0
+  MCInst MovR0 = MCInstBuilder(ARM::MOVr)
+      .addReg(R0)
+      .addReg(LR)
+      .addImm(0)
+      .addReg(0)
+      .addImm(ARMCC::AL);
+  EmitToStreamer(*OutStreamer, MovR0);
+
+  // bgt .Lstack.check.end
+  auto BrExpr = MCSymbolRefExpr::create(EndSym, MCSymbolRefExpr::VK_None, Ctx);
+  MCInst BrInst = MCInstBuilder(ARM::Bcc)
+      .addImm(ARMCC::GT)
+      .addExpr(BrExpr);
+  EmitToStreamer(*OutStreamer, BrInst);
+
+  emitStackOverflowCall(MI);
+  OutStreamer->emitLabel(EndSym);
+}
+
+// bl MRT_GetThreadLocalData
+// ldr r0, [r0, #tlsOffset]
+void ARMAsmPrinter::emitGetCJTLSData(int64_t Offset) {
+  using namespace ARM;
+  auto &Ctx = OutStreamer->getContext();
+  MCSymbol *TLSFunc = nullptr;
+  if (MF->getTarget().getTargetTriple().isOSBinFormatMachO()) {
+    TLSFunc = Ctx.getOrCreateSymbol("_MRT_GetThreadLocalData");
+  } else {
+    TLSFunc = Ctx.getOrCreateSymbol("MRT_GetThreadLocalData");
+  }
+  MCInst BLGetTLS = MCInstBuilder(ARM::BL)
+      .addExpr(MCSymbolRefExpr::create(TLSFunc, MCSymbolRefExpr::VK_None, Ctx));
+  EmitToStreamer(*OutStreamer, BLGetTLS);
+
+  MCInst Ldr = MCInstBuilder(ARM::LDRi12)
+      .addReg(R0)
+      .addReg(R0)
+      .addImm(Offset);
+  EmitToStreamer(*OutStreamer, Ldr);
+}
+
+void ARMAsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
+                                        const MachineInstr &MI) {
+  StatepointOpers SOpers(&MI);
+  const MachineOperand &CallTarget = SOpers.getCallTarget();
+  if (CJPipeline) {
+    uint64_t ID = SOpers.getID();
+    if (ID == Cangjie::CJStatepointID::StackCheck) {
+      emitCangjieStackCheck(MI);
+      return;
+    }
+  }
+  MCOperand CallTargetMCOp;
+  unsigned CallOpcode;
+  switch (CallTarget.getType()) {
+  default:
+    llvm_unreachable("Unsupported operand type in statepoint call target");
+    break;
+  case MachineOperand::MO_GlobalAddress:
+  case MachineOperand::MO_ExternalSymbol:
+    CallOpcode = ARM::BL;
+    if (tryEmitCangjieSpecificCallByMOSym(&MI, CallTarget, CallOpcode)) {
+      return;
+    }
+    lowerOperand(CallTarget, CallTargetMCOp);
+    break;
+  case MachineOperand::MO_Immediate:
+    CallTargetMCOp = MCOperand::createImm(CallTarget.getImm());
+    CallOpcode = ARM::BL;
+    break;
+  case MachineOperand::MO_Register:
+    CallTargetMCOp = MCOperand::createReg(CallTarget.getReg());
+    CallOpcode = ARM::BLX;
+    break;
+  }
+  EmitToStreamer(OutStreamer, MCInstBuilder(CallOpcode).addOperand(CallTargetMCOp));
+  SM.recordCJStackMap(MI);
+  return;
+}
+
 void ARMAsmPrinter::emitInstruction(const MachineInstr *MI) {
   // TODOD FIXME: Enable feature predicate checks once all the test pass.
   // ARM_MC::verifyInstructionPredicates(MI->getOpcode(),
@@ -2493,36 +2724,8 @@ void ARMAsmPrinter::emitInstruction(const MachineInstr *MI) {
     ATS.emitARMWinCFIEpilogEnd();
     return;
 
-  case TargetOpcode::STATEPOINT: {
-    StatepointOpers SOpers(MI);
-    const MachineOperand &CallTarget = SOpers.getCallTarget();
-    MCOperand CallTargetMCOp;
-    unsigned CallOpcode;
-    switch (CallTarget.getType()) {
-    default:
-      llvm_unreachable("Unsupported operand type in statepoint call target");
-      break;
-    case MachineOperand::MO_GlobalAddress:
-    case MachineOperand::MO_ExternalSymbol:
-      CallOpcode = ARM::BL;
-      if (tryEmitCangjieSpecificCallByMOSym(MI, CallTarget, CallOpcode)) {
-        return;
-      }
-      lowerOperand(CallTarget, CallTargetMCOp);
-      break;
-    case MachineOperand::MO_Immediate:
-      CallTargetMCOp = MCOperand::createImm(CallTarget.getImm());
-      CallOpcode = ARM::BL;
-      break;
-    case MachineOperand::MO_Register:
-      CallTargetMCOp = MCOperand::createReg(CallTarget.getReg());
-      CallOpcode = ARM::BLX;
-      break;
-    }
-    EmitToStreamer(*OutStreamer, MCInstBuilder(CallOpcode).addOperand(CallTargetMCOp));
-    SM.recordCJStackMap(*MI);
-    return;
-  }
+  case TargetOpcode::STATEPOINT:
+    return LowerSTATEPOINT(*OutStreamer, SM, *MI);
   }
 
   MCInst TmpInst;
