@@ -464,6 +464,8 @@ struct GenericCopyOpt {
   findPotentialEqualMem(Instruction *Inst, MemoryAccess *End,
                         MemoryAccess *InitEnd, MemoryLocation Loc, Value *Base,
                         Value *TI, Value *Size, bool &Changed) {
+    if (Inst->getParent()->getParent()->getName() == "test_func_6")
+      dbgs() << "---------\n";
     // MemoryPhi may appear in gcread.ref
     if (isa<MemoryPhi>(End))
       return {nullptr, nullptr, nullptr};
@@ -605,6 +607,8 @@ struct GenericCopyOpt {
             break;
           }
           pushAndPopSameOffset(Offsets, TmpOffsets, true);
+          if (LastBase)
+            LastBase = false;
           Base = nullptr;
           TI = nullptr;
           Loc = MemoryLocation::getAfter(getSource(II));
