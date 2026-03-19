@@ -51,16 +51,16 @@ void CangjieCompilerInstance::AddTyOfRefType(AST::RefType& rt)
     if (rt.ref.identifier.Val().find(curpkgPre) == 0) {
       // Delete prefix "std.core::"/"std.collection::"
       rt.ref.identifier = rt.ref.identifier.Val().substr(curpkgPre.size());
-      decl = importManager.GetImportedDecl(pkg, rt.ref.identifier);
+      decl = importManager->GetImportedDecl(pkg, rt.ref.identifier);
       break;
     }
   }
   if (!decl) {
     // Check if it is in core package.
-    decl = importManager.GetCoreDecl(rt.ref.identifier);
+    decl = importManager->GetCoreDecl(rt.ref.identifier);
     if (!decl) {
       // Check if it is in collection package.
-      decl = importManager.GetImportedDecl(COLLECTION_PACKAGE_NAME, rt.ref.identifier);
+      decl = importManager->GetImportedDecl(COLLECTION_PACKAGE_NAME, rt.ref.identifier);
     }
   }
   std::vector<Ptr<Ty>> typeArgs;
@@ -220,7 +220,7 @@ void CangjieCompilerInstance::CreateInitFunc(AST::Decl& decl)
     refType->curFile = classDecl->curFile;
     refType->ref.identifier = OBJECT_NAME;
     refType->EnableAttr(Attribute::COMPILER_ADD);
-    refType->ref.target = importManager.GetCoreDecl(OBJECT_NAME);
+    refType->ref.target = importManager->GetCoreDecl(OBJECT_NAME);
     if (refType->ref.target) {
       refType->ty = refType->ref.target->ty;
     }
@@ -719,7 +719,7 @@ bool CangjieCompilerInstance::PerformImportPackageForCjdb() {
   // Add import to __lldb_expr_pkg.
   AddImportSpecToLLDBExprPackage();
   // Set fake package to importManager.
-  importManager.SetImportedPackageFromASTNode(m_fake_packages);
+  importManager->SetImportedPackageFromASTNode(m_fake_packages);
 
   PerformImportPackage();
   Log *log = GetLog(LLDBLog::Expressions);
@@ -1108,7 +1108,7 @@ OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateRangeInitializer(Ptr
   auto int64ty = typeManager->GetPrimitiveTy(AST::TypeKind::TYPE_INT64);
   rangeExpr->stepExpr = AST::CreateLitConstExpr(Cangjie::AST::LitConstKind::INTEGER, "1", int64ty);
   rangeExpr->ty = ty;
-  rangeExpr->decl = importManager.GetCoreDecl<Cangjie::AST::StructDecl>(RANGE_NAME);
+  rangeExpr->decl = importManager->GetCoreDecl<Cangjie::AST::StructDecl>(RANGE_NAME);
   return rangeExpr;
 }
 
