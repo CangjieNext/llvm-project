@@ -191,6 +191,7 @@ protected:
   friend class SBExecutionContext;
   friend class SBInstruction;
   friend class SBThread;
+  friend class SBCJThread;
   friend class SBValue;
 
   lldb::StackFrameSP GetFrameSP() const;

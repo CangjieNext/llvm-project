@@ -321,6 +321,10 @@ public:
 
   void SetThreadID(lldb::tid_t thread_id);
 
+  void SetCJThreadID(lldb::tid_t thread_id) { m_cjthreadID = thread_id; };
+
+  lldb::tid_t GetCJThreadID() const { return m_cjthreadID; };
+
   void GetDescription(Stream *s, lldb::DescriptionLevel level) const;
 
   /// Check if the breakpoint option has a callback set.
@@ -400,6 +404,8 @@ private:
   /// Which options are set at this level.
   /// Drawn from BreakpointOptions::SetOptionsFlags.
   Flags m_set_flags;
+  // Breakpoints are triggered only in this cjthread.
+  lldb::tid_t m_cjthreadID = UINT64_MAX;
 };
 
 } // namespace lldb_private
