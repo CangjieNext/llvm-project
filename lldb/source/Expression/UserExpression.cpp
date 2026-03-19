@@ -40,6 +40,7 @@
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/StreamString.h"
+#include "lldb/Target/CJThread.h"
 
 using namespace lldb_private;
 
@@ -204,7 +205,11 @@ UserExpression::Evaluate(ExecutionContext &exe_ctx,
       return execution_results;
     }
   }
-
+  auto thread = exe_ctx.GetThreadPtr();
+  auto cjthread = process->FindCJThreadByOSThreadID(thread->GetID(), true);
+  if (cjthread) {
+    cjthread->BindCJThreadToOSThread(*process);
+  }
   // Explicitly force the IR interpreter to evaluate the expression when the
   // there is no process that supports running the expression for us. Don't
   // change the execution policy if we have the special top-level policy that

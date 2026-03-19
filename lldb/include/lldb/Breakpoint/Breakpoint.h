@@ -352,6 +352,10 @@ public:
   ///    If this thread hits the breakpoint, we stop, otherwise not.
   void SetThreadID(lldb::tid_t thread_id);
 
+  void SetCJThreadID(lldb::tid_t thread_id);
+
+  lldb::tid_t GetCJThreadID() const;
+
   /// Return the current stop thread value.
   /// \return
   ///     The thread id for which the breakpoint hit will stop,
