@@ -69,6 +69,7 @@
 %include "./interface/SBSymbolContextList.i"
 %include "./interface/SBTarget.i"
 %include "./interface/SBThread.i"
+%include "./interface/SBCJThread.i"
 %include "./interface/SBThreadCollection.i"
 %include "./interface/SBThreadPlan.i"
 %include "./interface/SBTrace.i"
