@@ -29,6 +29,7 @@
 #include "lldb/Target/StopInfo.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Target/Thread.h"
+#include "lldb/Target/CJThread.h"
 #include "lldb/Utility/Args.h"
 
 #include <memory>
@@ -218,191 +219,133 @@ protected:
 #define LLDB_OPTIONS_frame_select
 #include "CommandOptions.inc"
 
-class CommandObjectFrameSelect : public CommandObjectParsed {
-public:
-  class CommandOptions : public Options {
-  public:
-    CommandOptions() { OptionParsingStarting(nullptr); }
+CommandObjectFrameSelect::CommandObjectFrameSelect(CommandInterpreter &interpreter,
+    const char *name, const char *help,
+    const char *syntax, uint32_t flags, bool use_cjthread)
+  : CommandObjectParsed(interpreter, name, help, syntax, flags), m_use_cjt(use_cjthread) {
+  InitOptions();
+}
 
-    ~CommandOptions() override = default;
+llvm::ArrayRef<OptionDefinition> CommandObjectFrameSelect::CommandOptions::GetDefinitions() {
+  return llvm::makeArrayRef(g_frame_select_options);
+}
 
-    Status SetOptionValue(uint32_t option_idx, llvm::StringRef option_arg,
-                          ExecutionContext *execution_context) override {
-      Status error;
-      const int short_option = m_getopt_table[option_idx].val;
-      switch (short_option) {
-      case 'r': {
-        int32_t offset = 0;
-        if (option_arg.getAsInteger(0, offset) || offset == INT32_MIN) {
-          error.SetErrorStringWithFormat("invalid frame offset argument '%s'",
-                                         option_arg.str().c_str());
+bool CommandObjectFrameSelect::DoExecute(Args &command, CommandReturnObject &result) {
+  // No need to check "thread" for validity as eCommandRequiresThread ensures
+  // it is valid
+  Thread *thread;
+  if (m_use_cjt) {
+    thread = m_exe_ctx.GetCJThreadPtr();
+  } else {
+    thread = m_exe_ctx.GetThreadPtr();
+  }
+
+  uint32_t frame_idx = UINT32_MAX;
+  if (m_options.relative_frame_offset) {
+    // The one and only argument is a signed relative frame index
+    frame_idx = thread->GetSelectedFrameIndex();
+    if (frame_idx == UINT32_MAX)
+      frame_idx = 0;
+
+    if (*m_options.relative_frame_offset < 0) {
+      if (static_cast<int32_t>(frame_idx) >=
+          -*m_options.relative_frame_offset)
+        frame_idx += *m_options.relative_frame_offset;
+      else {
+        if (frame_idx == 0) {
+          // If you are already at the bottom of the stack, then just warn
+          // and don't reset the frame.
+          result.AppendError("Already at the bottom of the stack.");
+          return false;
         } else
-          relative_frame_offset = offset;
-        break;
+          frame_idx = 0;
       }
-
-      default:
-        llvm_unreachable("Unimplemented option");
+    } else if (*m_options.relative_frame_offset > 0) {
+      // I don't want "up 20" where "20" takes you past the top of the stack
+      // to produce
+      // an error, but rather to just go to the top.  So I have to count the
+      // stack here...
+      const uint32_t num_frames = thread->GetStackFrameCount();
+      if (static_cast<int32_t>(num_frames - frame_idx) >
+          *m_options.relative_frame_offset)
+        frame_idx += *m_options.relative_frame_offset;
+      else {
+        if (frame_idx == num_frames - 1) {
+          // If we are already at the top of the stack, just warn and don't
+          // reset the frame.
+          result.AppendError("Already at the top of the stack.");
+          return false;
+        } else
+          frame_idx = num_frames - 1;
       }
-
-      return error;
+    }
+  } else {
+    if (command.GetArgumentCount() > 1) {
+      result.AppendErrorWithFormat(
+          "too many arguments; expected frame-index, saw '%s'.\n",
+          command[0].c_str());
+      m_options.GenerateOptionUsage(
+          result.GetErrorStream(), *this,
+          GetCommandInterpreter().GetDebugger().GetTerminalWidth());
+      return false;
     }
 
-    void OptionParsingStarting(ExecutionContext *execution_context) override {
-      relative_frame_offset.reset();
-    }
-
-    llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
-      return llvm::makeArrayRef(g_frame_select_options);
-    }
-
-    llvm::Optional<int32_t> relative_frame_offset;
-  };
-
-  CommandObjectFrameSelect(CommandInterpreter &interpreter)
-      : CommandObjectParsed(interpreter, "frame select",
-                            "Select the current stack frame by "
-                            "index from within the current thread "
-                            "(see 'thread backtrace'.)",
-                            nullptr,
-                            eCommandRequiresThread | eCommandTryTargetAPILock |
-                                eCommandProcessMustBeLaunched |
-                                eCommandProcessMustBePaused) {
-    CommandArgumentEntry arg;
-    CommandArgumentData index_arg;
-
-    // Define the first (and only) variant of this arg.
-    index_arg.arg_type = eArgTypeFrameIndex;
-    index_arg.arg_repetition = eArgRepeatOptional;
-
-    // There is only one variant this argument could be; put it into the
-    // argument entry.
-    arg.push_back(index_arg);
-
-    // Push the data for the first argument into the m_arguments vector.
-    m_arguments.push_back(arg);
-  }
-
-  ~CommandObjectFrameSelect() override = default;
-
-  void
-  HandleArgumentCompletion(CompletionRequest &request,
-                           OptionElementVector &opt_element_vector) override {
-    if (request.GetCursorIndex() != 0)
-      return;
-
-    CommandCompletions::InvokeCommonCompletionCallbacks(
-        GetCommandInterpreter(), CommandCompletions::eFrameIndexCompletion,
-        request, nullptr);
-  }
-
-  Options *GetOptions() override { return &m_options; }
-
-protected:
-  bool DoExecute(Args &command, CommandReturnObject &result) override {
-    // No need to check "thread" for validity as eCommandRequiresThread ensures
-    // it is valid
-    Thread *thread = m_exe_ctx.GetThreadPtr();
-
-    uint32_t frame_idx = UINT32_MAX;
-    if (m_options.relative_frame_offset) {
-      // The one and only argument is a signed relative frame index
-      frame_idx = thread->GetSelectedFrameIndex();
-      if (frame_idx == UINT32_MAX)
-        frame_idx = 0;
-
-      if (*m_options.relative_frame_offset < 0) {
-        if (static_cast<int32_t>(frame_idx) >=
-            -*m_options.relative_frame_offset)
-          frame_idx += *m_options.relative_frame_offset;
-        else {
-          if (frame_idx == 0) {
-            // If you are already at the bottom of the stack, then just warn
-            // and don't reset the frame.
-            result.AppendError("Already at the bottom of the stack.");
-            return false;
-          } else
-            frame_idx = 0;
-        }
-      } else if (*m_options.relative_frame_offset > 0) {
-        // I don't want "up 20" where "20" takes you past the top of the stack
-        // to produce
-        // an error, but rather to just go to the top.  So I have to count the
-        // stack here...
-        const uint32_t num_frames = thread->GetStackFrameCount();
-        if (static_cast<int32_t>(num_frames - frame_idx) >
-            *m_options.relative_frame_offset)
-          frame_idx += *m_options.relative_frame_offset;
-        else {
-          if (frame_idx == num_frames - 1) {
-            // If we are already at the top of the stack, just warn and don't
-            // reset the frame.
-            result.AppendError("Already at the top of the stack.");
-            return false;
-          } else
-            frame_idx = num_frames - 1;
-        }
-      }
-    } else {
-      if (command.GetArgumentCount() > 1) {
-        result.AppendErrorWithFormat(
-            "too many arguments; expected frame-index, saw '%s'.\n",
-            command[0].c_str());
-        m_options.GenerateOptionUsage(
-            result.GetErrorStream(), *this,
-            GetCommandInterpreter().GetDebugger().GetTerminalWidth());
+    if (command.GetArgumentCount() == 1) {
+      if (command[0].ref().getAsInteger(0, frame_idx)) {
+        result.AppendErrorWithFormat("invalid frame index argument '%s'.",
+                                      command[0].c_str());
         return false;
       }
-
-      if (command.GetArgumentCount() == 1) {
-        if (command[0].ref().getAsInteger(0, frame_idx)) {
-          result.AppendErrorWithFormat("invalid frame index argument '%s'.",
-                                       command[0].c_str());
-          return false;
-        }
-      } else if (command.GetArgumentCount() == 0) {
-        frame_idx = thread->GetSelectedFrameIndex();
-        if (frame_idx == UINT32_MAX) {
-          frame_idx = 0;
-        }
+    } else if (command.GetArgumentCount() == 0) {
+      frame_idx = thread->GetSelectedFrameIndex();
+      if (frame_idx == UINT32_MAX) {
+        frame_idx = 0;
       }
     }
-
-    bool success = thread->SetSelectedFrameByIndexNoisily(
-        frame_idx, result.GetOutputStream());
-    if (success) {
-      m_exe_ctx.SetFrameSP(thread->GetSelectedFrame());
-      result.SetStatus(eReturnStatusSuccessFinishResult);
-    } else {
-      result.AppendErrorWithFormat("Frame index (%u) out of range.\n",
-                                   frame_idx);
-    }
-
-    return result.Succeeded();
   }
 
-  CommandOptions m_options;
-};
+  bool success = thread->SetSelectedFrameByIndexNoisily(
+      frame_idx, result.GetOutputStream());
+  if (success) {
+    m_exe_ctx.SetFrameSP(thread->GetSelectedFrame());
+    result.SetStatus(eReturnStatusSuccessFinishResult);
+  } else {
+    result.AppendErrorWithFormat("Frame index (%u) out of range.\n",
+                                  frame_idx);
+  }
+
+  return result.Succeeded();
+}
 
 #pragma mark CommandObjectFrameVariable
 // List images with associated information
 
-class CommandObjectFrameVariable : public CommandObjectParsed {
-public:
-  CommandObjectFrameVariable(CommandInterpreter &interpreter)
-      : CommandObjectParsed(
-            interpreter, "frame variable",
-            "Show variables for the current stack frame. Defaults to all "
-            "arguments and local variables in scope. Names of argument, "
-            "local, file static and file global variables can be specified.",
-            nullptr,
-            eCommandRequiresFrame | eCommandTryTargetAPILock |
-                eCommandProcessMustBeLaunched | eCommandProcessMustBePaused |
-                eCommandRequiresProcess),
-        m_option_variable(
-            true), // Include the frame specific options by passing "true"
-        m_option_format(eFormatDefault) {
-    SetHelpLong(R"(
+CommandObjectFrameVariable::CommandObjectFrameVariable(CommandInterpreter &interpreter)
+    : CommandObjectParsed(
+          interpreter, "frame variable",
+          "Show variables for the current stack frame. Defaults to all "
+          "arguments and local variables in scope. Names of argument, "
+          "local, file static and file global variables can be specified.",
+          nullptr,
+          eCommandRequiresFrame | eCommandTryTargetAPILock |
+              eCommandProcessMustBeLaunched | eCommandProcessMustBePaused |
+              eCommandRequiresProcess),
+      m_option_variable(true), // Include the frame specific options by passing "true"
+      m_option_format(eFormatDefault) {
+  InitOptions();
+}
+
+CommandObjectFrameVariable::CommandObjectFrameVariable(CommandInterpreter &interpreter,
+    const char *name, const char *help,
+    const char *syntax, uint32_t flags, bool use_cjthread)
+  : CommandObjectParsed(interpreter, name, help, syntax, flags), m_use_cjt(use_cjthread),
+      m_option_variable(true), // Include the frame specific options by passing "true"
+      m_option_format(eFormatDefault) {
+  InitOptions();
+}
+
+void CommandObjectFrameVariable::InitOptions() {
+  SetHelpLong(R"(
 Children of aggregate variables can be specified such as 'var->child.x'.  In
 'frame variable', the operators -> and [] do not invoke operator overloads if
 they exist, but directly access the specified element.  If you want to trigger
@@ -414,180 +357,255 @@ However, 'frame variable' is more efficient, since it uses debug information and
 memory reads directly, rather than parsing and evaluating an expression, which
 may even involve JITing and running code in the target program.)");
 
-    CommandArgumentEntry arg;
-    CommandArgumentData var_name_arg;
+  CommandArgumentEntry arg;
+  CommandArgumentData var_name_arg;
 
-    // Define the first (and only) variant of this arg.
-    var_name_arg.arg_type = eArgTypeVarName;
-    var_name_arg.arg_repetition = eArgRepeatStar;
+  // Define the first (and only) variant of this arg.
+  var_name_arg.arg_type = eArgTypeVarName;
+  var_name_arg.arg_repetition = eArgRepeatStar;
 
-    // There is only one variant this argument could be; put it into the
-    // argument entry.
-    arg.push_back(var_name_arg);
+  // There is only one variant this argument could be; put it into the
+  // argument entry.
+  arg.push_back(var_name_arg);
 
-    // Push the data for the first argument into the m_arguments vector.
-    m_arguments.push_back(arg);
+  // Push the data for the first argument into the m_arguments vector.
+  m_arguments.push_back(arg);
 
-    m_option_group.Append(&m_option_variable, LLDB_OPT_SET_ALL, LLDB_OPT_SET_1);
-    m_option_group.Append(&m_option_format,
-                          OptionGroupFormat::OPTION_GROUP_FORMAT |
-                              OptionGroupFormat::OPTION_GROUP_GDB_FMT,
-                          LLDB_OPT_SET_1);
-    m_option_group.Append(&m_varobj_options, LLDB_OPT_SET_ALL, LLDB_OPT_SET_1);
-    m_option_group.Finalize();
+  m_option_group.Append(&m_option_variable, LLDB_OPT_SET_ALL, LLDB_OPT_SET_1);
+  m_option_group.Append(&m_option_format,
+                        OptionGroupFormat::OPTION_GROUP_FORMAT |
+                            OptionGroupFormat::OPTION_GROUP_GDB_FMT,
+                        LLDB_OPT_SET_1);
+  m_option_group.Append(&m_varobj_options, LLDB_OPT_SET_ALL, LLDB_OPT_SET_1);
+  m_option_group.Finalize();
+}
+
+llvm::StringRef CommandObjectFrameVariable::GetScopeString(lldb::VariableSP var_sp) {
+  if (!var_sp)
+    return llvm::StringRef();
+
+  switch (var_sp->GetScope()) {
+  case eValueTypeVariableGlobal:
+    return "GLOBAL: ";
+  case eValueTypeVariableStatic:
+    return "STATIC: ";
+  case eValueTypeVariableArgument:
+    return "ARG: ";
+  case eValueTypeVariableLocal:
+    return "LOCAL: ";
+  case eValueTypeVariableThreadLocal:
+    return "THREAD: ";
+  default:
+    break;
   }
 
-  ~CommandObjectFrameVariable() override = default;
+  return llvm::StringRef();
+}
 
-  Options *GetOptions() override { return &m_option_group; }
-
-  void
-  HandleArgumentCompletion(CompletionRequest &request,
-                           OptionElementVector &opt_element_vector) override {
-    // Arguments are the standard source file completer.
-    CommandCompletions::InvokeCommonCompletionCallbacks(
-        GetCommandInterpreter(), CommandCompletions::eVariablePathCompletion,
-        request, nullptr);
-  }
-
-protected:
-  llvm::StringRef GetScopeString(VariableSP var_sp) {
-    if (!var_sp)
-      return llvm::StringRef();
-
-    switch (var_sp->GetScope()) {
-    case eValueTypeVariableGlobal:
-      return "GLOBAL: ";
-    case eValueTypeVariableStatic:
-      return "STATIC: ";
-    case eValueTypeVariableArgument:
-      return "ARG: ";
-    case eValueTypeVariableLocal:
-      return "LOCAL: ";
-    case eValueTypeVariableThreadLocal:
-      return "THREAD: ";
-    default:
-      break;
+bool CommandObjectFrameVariable::DoExecute(Args &command, CommandReturnObject &result) {
+  // No need to check "frame" for validity as eCommandRequiresFrame ensures
+  // it is valid
+  StackFrame *frame;
+  if (m_use_cjt) {
+    ThreadList &cjthread_list= m_exe_ctx.GetProcessPtr()->GetCJThreadList();
+    ThreadSP selected_cjthread = cjthread_list.GetSelectedThread();
+    if (!selected_cjthread) {
+      result.AppendError("require a selected cjthread");
+      return false;
     }
 
-    return llvm::StringRef();
+    frame = selected_cjthread->GetSelectedFrame().get();
+    if (!frame) { frame = selected_cjthread->GetStackFrameAtIndex(0).get(); }
+    if (!frame) {
+      result.AppendError("require at least one live cjthread frame");
+      return false;
+    }
+  } else {
+    frame = m_exe_ctx.GetFramePtr();
   }
 
-  bool DoExecute(Args &command, CommandReturnObject &result) override {
-    // No need to check "frame" for validity as eCommandRequiresFrame ensures
-    // it is valid
-    StackFrame *frame = m_exe_ctx.GetFramePtr();
+  Stream &s = result.GetOutputStream();
 
-    Stream &s = result.GetOutputStream();
+  // Be careful about the stack frame, if any summary formatter runs code, it
+  // might clear the StackFrameList for the thread.  So hold onto a shared
+  // pointer to the frame so it stays alive.
 
-    // Be careful about the stack frame, if any summary formatter runs code, it
-    // might clear the StackFrameList for the thread.  So hold onto a shared
-    // pointer to the frame so it stays alive.
+  VariableList *variable_list =
+      frame->GetVariableList(m_option_variable.show_globals);
 
-    VariableList *variable_list =
-        frame->GetVariableList(m_option_variable.show_globals);
+  VariableSP var_sp;
+  ValueObjectSP valobj_sp;
 
-    VariableSP var_sp;
-    ValueObjectSP valobj_sp;
+  TypeSummaryImplSP summary_format_sp;
+  if (!m_option_variable.summary.IsCurrentValueEmpty())
+    DataVisualization::NamedSummaryFormats::GetSummaryFormat(
+        ConstString(m_option_variable.summary.GetCurrentValue()),
+        summary_format_sp);
+  else if (!m_option_variable.summary_string.IsCurrentValueEmpty())
+    summary_format_sp = std::make_shared<StringSummaryFormat>(
+        TypeSummaryImpl::Flags(),
+        m_option_variable.summary_string.GetCurrentValue());
 
-    TypeSummaryImplSP summary_format_sp;
-    if (!m_option_variable.summary.IsCurrentValueEmpty())
-      DataVisualization::NamedSummaryFormats::GetSummaryFormat(
-          ConstString(m_option_variable.summary.GetCurrentValue()),
-          summary_format_sp);
-    else if (!m_option_variable.summary_string.IsCurrentValueEmpty())
-      summary_format_sp = std::make_shared<StringSummaryFormat>(
-          TypeSummaryImpl::Flags(),
-          m_option_variable.summary_string.GetCurrentValue());
+  DumpValueObjectOptions options(m_varobj_options.GetAsDumpOptions(
+      eLanguageRuntimeDescriptionDisplayVerbosityFull, eFormatDefault,
+      summary_format_sp));
 
-    DumpValueObjectOptions options(m_varobj_options.GetAsDumpOptions(
-        eLanguageRuntimeDescriptionDisplayVerbosityFull, eFormatDefault,
-        summary_format_sp));
+  const SymbolContext &sym_ctx =
+      frame->GetSymbolContext(eSymbolContextFunction);
+  if (sym_ctx.function && sym_ctx.function->IsTopLevelFunction())
+    m_option_variable.show_globals = true;
 
-    const SymbolContext &sym_ctx =
-        frame->GetSymbolContext(eSymbolContextFunction);
-    if (sym_ctx.function && sym_ctx.function->IsTopLevelFunction())
-      m_option_variable.show_globals = true;
+  if (variable_list) {
+    const Format format = m_option_format.GetFormat();
+    options.SetFormat(format);
 
-    if (variable_list) {
-      const Format format = m_option_format.GetFormat();
-      options.SetFormat(format);
+    if (!command.empty()) {
+      VariableList regex_var_list;
 
-      if (!command.empty()) {
-        VariableList regex_var_list;
+      // If we have any args to the variable command, we will make variable
+      // objects from them...
+      for (auto &entry : command) {
+        if (m_option_variable.use_regex) {
+          const size_t regex_start_index = regex_var_list.GetSize();
+          llvm::StringRef name_str = entry.ref();
+          RegularExpression regex(name_str);
+          if (regex.IsValid()) {
+            size_t num_matches = 0;
+            const size_t num_new_regex_vars =
+                variable_list->AppendVariablesIfUnique(regex, regex_var_list,
+                                                        num_matches);
+            if (num_new_regex_vars > 0) {
+              for (size_t regex_idx = regex_start_index,
+                          end_index = regex_var_list.GetSize();
+                    regex_idx < end_index; ++regex_idx) {
+                var_sp = regex_var_list.GetVariableAtIndex(regex_idx);
+                if (var_sp) {
+                  valobj_sp = frame->GetValueObjectForFrameVariable(
+                      var_sp, m_varobj_options.use_dynamic);
+                  if (valobj_sp) {
+                    std::string scope_string;
+                    if (m_option_variable.show_scope)
+                      scope_string = GetScopeString(var_sp).str();
 
-        // If we have any args to the variable command, we will make variable
-        // objects from them...
-        for (auto &entry : command) {
-          if (m_option_variable.use_regex) {
-            const size_t regex_start_index = regex_var_list.GetSize();
-            llvm::StringRef name_str = entry.ref();
-            RegularExpression regex(name_str);
-            if (regex.IsValid()) {
-              size_t num_matches = 0;
-              const size_t num_new_regex_vars =
-                  variable_list->AppendVariablesIfUnique(regex, regex_var_list,
-                                                         num_matches);
-              if (num_new_regex_vars > 0) {
-                for (size_t regex_idx = regex_start_index,
-                            end_index = regex_var_list.GetSize();
-                     regex_idx < end_index; ++regex_idx) {
-                  var_sp = regex_var_list.GetVariableAtIndex(regex_idx);
-                  if (var_sp) {
-                    valobj_sp = frame->GetValueObjectForFrameVariable(
-                        var_sp, m_varobj_options.use_dynamic);
-                    if (valobj_sp) {
-                      std::string scope_string;
-                      if (m_option_variable.show_scope)
-                        scope_string = GetScopeString(var_sp).str();
+                    if (!scope_string.empty())
+                      s.PutCString(scope_string);
 
-                      if (!scope_string.empty())
-                        s.PutCString(scope_string);
-
-                      if (m_option_variable.show_decl &&
-                          var_sp->GetDeclaration().GetFile()) {
-                        bool show_fullpaths = false;
-                        bool show_module = true;
-                        if (var_sp->DumpDeclaration(&s, show_fullpaths,
-                                                    show_module))
-                          s.PutCString(": ");
-                      }
-                      valobj_sp->Dump(result.GetOutputStream(), options);
+                    if (m_option_variable.show_decl &&
+                        var_sp->GetDeclaration().GetFile()) {
+                      bool show_fullpaths = false;
+                      bool show_module = true;
+                      if (var_sp->DumpDeclaration(&s, show_fullpaths,
+                                                  show_module))
+                        s.PutCString(": ");
                     }
+                    valobj_sp->Dump(result.GetOutputStream(), options);
                   }
                 }
-              } else if (num_matches == 0) {
-                result.AppendErrorWithFormat(
-                    "no variables matched the regular expression '%s'.",
-                    entry.c_str());
               }
-            } else {
-              if (llvm::Error err = regex.GetError())
-                result.AppendError(llvm::toString(std::move(err)));
-              else
-                result.AppendErrorWithFormat(
-                    "unknown regex error when compiling '%s'", entry.c_str());
+            } else if (num_matches == 0) {
+              result.AppendErrorWithFormat(
+                  "no variables matched the regular expression '%s'.",
+                  entry.c_str());
             }
-          } else // No regex, either exact variable names or variable
-                 // expressions.
-          {
-            Status error;
-            uint32_t expr_path_options =
-                StackFrame::eExpressionPathOptionCheckPtrVsMember |
-                StackFrame::eExpressionPathOptionsAllowDirectIVarAccess |
-                StackFrame::eExpressionPathOptionsInspectAnonymousUnions;
-            lldb::VariableSP var_sp;
-            valobj_sp = frame->GetValueForVariableExpressionPath(
-                entry.ref(), m_varobj_options.use_dynamic, expr_path_options,
-                var_sp, error);
-            if (valobj_sp) {
-              std::string scope_string;
-              if (m_option_variable.show_scope)
-                scope_string = GetScopeString(var_sp).str();
+          } else {
+            if (llvm::Error err = regex.GetError())
+              result.AppendError(llvm::toString(std::move(err)));
+            else
+              result.AppendErrorWithFormat(
+                  "unknown regex error when compiling '%s'", entry.c_str());
+          }
+        } else // No regex, either exact variable names or variable
+                // expressions.
+        {
+          Status error;
+          uint32_t expr_path_options =
+              StackFrame::eExpressionPathOptionCheckPtrVsMember |
+              StackFrame::eExpressionPathOptionsAllowDirectIVarAccess |
+              StackFrame::eExpressionPathOptionsInspectAnonymousUnions;
+          lldb::VariableSP var_sp;
+          valobj_sp = frame->GetValueForVariableExpressionPath(
+              entry.ref(), m_varobj_options.use_dynamic, expr_path_options,
+              var_sp, error);
+          if (valobj_sp) {
+            std::string scope_string;
+            if (m_option_variable.show_scope)
+              scope_string = GetScopeString(var_sp).str();
+
+            if (!scope_string.empty())
+              s.PutCString(scope_string);
+            if (m_option_variable.show_decl && var_sp &&
+                var_sp->GetDeclaration().GetFile()) {
+              var_sp->GetDeclaration().DumpStopContext(&s, false);
+              s.PutCString(": ");
+            }
+
+            options.SetFormat(format);
+            options.SetVariableFormatDisplayLanguage(
+                valobj_sp->GetPreferredDisplayLanguage());
+
+            Stream &output_stream = result.GetOutputStream();
+            options.SetRootValueObjectName(
+                valobj_sp->GetParent() ? entry.c_str() : nullptr);
+            valobj_sp->Dump(output_stream, options);
+          } else {
+            if (auto error_cstr = error.AsCString(nullptr))
+              result.AppendError(error_cstr);
+            else
+              result.AppendErrorWithFormat(
+                  "unable to find any variable expression path that matches "
+                  "'%s'.",
+                  entry.c_str());
+          }
+        }
+      }
+    } else // No command arg specified.  Use variable_list, instead.
+    {
+      const size_t num_variables = variable_list->GetSize();
+      if (num_variables > 0) {
+        for (size_t i = 0; i < num_variables; i++) {
+          var_sp = variable_list->GetVariableAtIndex(i);
+          switch (var_sp->GetScope()) {
+          case eValueTypeVariableGlobal:
+            if (!m_option_variable.show_globals)
+              continue;
+            break;
+          case eValueTypeVariableStatic:
+            if (!m_option_variable.show_globals)
+              continue;
+            break;
+          case eValueTypeVariableArgument:
+            if (!m_option_variable.show_args)
+              continue;
+            break;
+          case eValueTypeVariableLocal:
+            if (!m_option_variable.show_locals)
+              continue;
+            break;
+          default:
+            continue;
+            break;
+          }
+          std::string scope_string;
+          if (m_option_variable.show_scope)
+            scope_string = GetScopeString(var_sp).str();
+
+          // Use the variable object code to make sure we are using the same
+          // APIs as the public API will be using...
+          valobj_sp = frame->GetValueObjectForFrameVariable(
+              var_sp, m_varobj_options.use_dynamic);
+          if (valobj_sp) {
+            // When dumping all variables, don't print any variables that are
+            // not in scope to avoid extra unneeded output
+            if (valobj_sp->IsInScope()) {
+              if (!valobj_sp->GetTargetSP()
+                        ->GetDisplayRuntimeSupportValues() &&
+                  valobj_sp->IsRuntimeSupportValue())
+                continue;
 
               if (!scope_string.empty())
                 s.PutCString(scope_string);
-              if (m_option_variable.show_decl && var_sp &&
+
+              if (m_option_variable.show_decl &&
                   var_sp->GetDeclaration().GetFile()) {
                 var_sp->GetDeclaration().DumpStopContext(&s, false);
                 s.PutCString(": ");
@@ -596,133 +614,56 @@ protected:
               options.SetFormat(format);
               options.SetVariableFormatDisplayLanguage(
                   valobj_sp->GetPreferredDisplayLanguage());
-
-              Stream &output_stream = result.GetOutputStream();
               options.SetRootValueObjectName(
-                  valobj_sp->GetParent() ? entry.c_str() : nullptr);
-              valobj_sp->Dump(output_stream, options);
-            } else {
-              if (auto error_cstr = error.AsCString(nullptr))
-                result.AppendError(error_cstr);
-              else
-                result.AppendErrorWithFormat(
-                    "unable to find any variable expression path that matches "
-                    "'%s'.",
-                    entry.c_str());
-            }
-          }
-        }
-      } else // No command arg specified.  Use variable_list, instead.
-      {
-        const size_t num_variables = variable_list->GetSize();
-        if (num_variables > 0) {
-          for (size_t i = 0; i < num_variables; i++) {
-            var_sp = variable_list->GetVariableAtIndex(i);
-            switch (var_sp->GetScope()) {
-            case eValueTypeVariableGlobal:
-              if (!m_option_variable.show_globals)
-                continue;
-              break;
-            case eValueTypeVariableStatic:
-              if (!m_option_variable.show_globals)
-                continue;
-              break;
-            case eValueTypeVariableArgument:
-              if (!m_option_variable.show_args)
-                continue;
-              break;
-            case eValueTypeVariableLocal:
-              if (!m_option_variable.show_locals)
-                continue;
-              break;
-            default:
-              continue;
-              break;
-            }
-            std::string scope_string;
-            if (m_option_variable.show_scope)
-              scope_string = GetScopeString(var_sp).str();
-
-            // Use the variable object code to make sure we are using the same
-            // APIs as the public API will be using...
-            valobj_sp = frame->GetValueObjectForFrameVariable(
-                var_sp, m_varobj_options.use_dynamic);
-            if (valobj_sp) {
-              // When dumping all variables, don't print any variables that are
-              // not in scope to avoid extra unneeded output
-              if (valobj_sp->IsInScope()) {
-                if (!valobj_sp->GetTargetSP()
-                         ->GetDisplayRuntimeSupportValues() &&
-                    valobj_sp->IsRuntimeSupportValue())
+                  var_sp ? var_sp->GetName().AsCString() : nullptr);
+              if (m_option_variable.show_values) {
+                if (valobj_sp->GetName() == "$CapturedVars") {
                   continue;
-
-                if (!scope_string.empty())
-                  s.PutCString(scope_string);
-
-                if (m_option_variable.show_decl &&
-                    var_sp->GetDeclaration().GetFile()) {
-                  var_sp->GetDeclaration().DumpStopContext(&s, false);
-                  s.PutCString(": ");
                 }
-
-                options.SetFormat(format);
-                options.SetVariableFormatDisplayLanguage(
-                    valobj_sp->GetPreferredDisplayLanguage());
-                options.SetRootValueObjectName(
-                    var_sp ? var_sp->GetName().AsCString() : nullptr);
-                if (m_option_variable.show_values) {
-                  if (valobj_sp->GetName() == "$CapturedVars") {
-                    continue;
-                  }
-                  valobj_sp->Dump(result.GetOutputStream(), options);
-                } else {
-                  result.GetOutputStream().Printf("(%s) %s =\n",
-                      valobj_sp->GetTypeName().AsCString(), valobj_sp->GetName().AsCString());
-                }
+                valobj_sp->Dump(result.GetOutputStream(), options);
+              } else {
+                result.GetOutputStream().Printf("(%s) %s =\n",
+                    valobj_sp->GetTypeName().AsCString(), valobj_sp->GetName().AsCString());
               }
             }
           }
         }
       }
-      if (result.GetStatus() != eReturnStatusFailed)
-        result.SetStatus(eReturnStatusSuccessFinishResult);
     }
+    if (result.GetStatus() != eReturnStatusFailed)
+      result.SetStatus(eReturnStatusSuccessFinishResult);
+  }
 
-    if (m_option_variable.show_recognized_args) {
-      auto recognized_frame = frame->GetRecognizedFrame();
-      if (recognized_frame) {
-        ValueObjectListSP recognized_arg_list =
-            recognized_frame->GetRecognizedArguments();
-        if (recognized_arg_list) {
-          for (auto &rec_value_sp : recognized_arg_list->GetObjects()) {
-            options.SetFormat(m_option_format.GetFormat());
-            options.SetVariableFormatDisplayLanguage(
-                rec_value_sp->GetPreferredDisplayLanguage());
-            options.SetRootValueObjectName(rec_value_sp->GetName().AsCString());
-            rec_value_sp->Dump(result.GetOutputStream(), options);
-          }
+  if (m_option_variable.show_recognized_args) {
+    auto recognized_frame = frame->GetRecognizedFrame();
+    if (recognized_frame) {
+      ValueObjectListSP recognized_arg_list =
+          recognized_frame->GetRecognizedArguments();
+      if (recognized_arg_list) {
+        for (auto &rec_value_sp : recognized_arg_list->GetObjects()) {
+          options.SetFormat(m_option_format.GetFormat());
+          options.SetVariableFormatDisplayLanguage(
+              rec_value_sp->GetPreferredDisplayLanguage());
+          options.SetRootValueObjectName(rec_value_sp->GetName().AsCString());
+          rec_value_sp->Dump(result.GetOutputStream(), options);
         }
       }
     }
-
-    m_interpreter.PrintWarningsIfNecessary(result.GetOutputStream(),
-                                           m_cmd_name);
-
-    // Increment statistics.
-    bool res = result.Succeeded();
-    TargetStats &target_stats = GetSelectedOrDummyTarget().GetStatistics();
-    if (res)
-      target_stats.GetFrameVariableStats().NotifySuccess();
-    else
-      target_stats.GetFrameVariableStats().NotifyFailure();
-    return res;
   }
 
-  OptionGroupOptions m_option_group;
-  OptionGroupVariable m_option_variable;
-  OptionGroupFormat m_option_format;
-  OptionGroupValueObjectDisplay m_varobj_options;
-};
+  m_interpreter.PrintWarningsIfNecessary(result.GetOutputStream(),
+                                          m_cmd_name);
+
+  // Increment statistics.
+  bool res = result.Succeeded();
+  TargetStats &target_stats = GetSelectedOrDummyTarget().GetStatistics();
+  if (res)
+    target_stats.GetFrameVariableStats().NotifySuccess();
+  else
+    target_stats.GetFrameVariableStats().NotifyFailure();
+  return res;
+}
+
 
 #pragma mark CommandObjectFrameRecognizer
 

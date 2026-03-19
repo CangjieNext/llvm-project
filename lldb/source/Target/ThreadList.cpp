@@ -13,6 +13,7 @@
 #include "lldb/Target/Process.h"
 #include "lldb/Target/RegisterContext.h"
 #include "lldb/Target/Thread.h"
+#include "lldb/Target/CJThread.h"
 #include "lldb/Target/ThreadList.h"
 #include "lldb/Target/ThreadPlan.h"
 #include "lldb/Utility/LLDBAssert.h"
@@ -661,6 +662,18 @@ ThreadSP ThreadList::GetSelectedThread() {
 bool ThreadList::SetSelectedThreadByID(lldb::tid_t tid, bool notify) {
   std::lock_guard<std::recursive_mutex> guard(GetMutex());
   ThreadSP selected_thread_sp(FindThreadByID(tid));
+  if (std::dynamic_pointer_cast<CJThread>(selected_thread_sp) == nullptr) {
+    auto unbind = m_process->GetCJThreadList().FindThreadByID(m_process->GetBindCJThreadID(), false);
+    auto cjthread = std::dynamic_pointer_cast<CJThread>(unbind);
+    if (cjthread) {
+      cjthread->UnBindCJThreadToOSThread(*m_process);
+    }
+    auto bind = m_process->FindCJThreadByOSThreadID(tid, false);
+    if (bind) {
+      bind->BindCJThreadToOSThread(*m_process);
+      m_process->GetCJThreadList().SetSelectedThreadByID(bind->GetID());
+    }
+  }
   if (selected_thread_sp) {
     m_selected_tid = tid;
     selected_thread_sp->SetDefaultFileAndLineToSelectedFrame();

@@ -88,6 +88,10 @@ public:
   // Thread related functions
   uint32_t GetNumThreads();
 
+  uint32_t GetNumCJThreads();
+
+  lldb::SBCJThread GetCJThreadAtIndex(size_t index);
+
   lldb::SBThread GetThreadAtIndex(size_t index);
 
   lldb::SBThread GetThreadByID(lldb::tid_t sb_thread_id);
