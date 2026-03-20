@@ -159,6 +159,40 @@ common.ret:
   ret void
 }
 
+define void @test_func_6(i8 addrspace(1)* noalias %base, i8 addrspace(1)* noalias %mid, i8 addrspace(1)* noalias %dst,
+                         %fake_typeinfo* %ti0, %fake_typeinfo* %ti1, i64 %offset, i1 %cond) {
+  %ti0.i8 = bitcast %fake_typeinfo* %ti0 to i8*
+  %ti.size0 = getelementptr inbounds i8, i8* %ti0.i8, i64 12
+  %ti.size0.ptr = bitcast i8* %ti.size0 to i32*
+  %size0 = load i32, i32* %ti.size0.ptr, align 4
+  %ti1.i8 = bitcast %fake_typeinfo* %ti1 to i8*
+  %ti.size1 = getelementptr inbounds i8, i8* %ti1.i8, i64 12
+  %ti.size1.ptr = bitcast i8* %ti.size1 to i32*
+  %size1 = load i32, i32* %ti.size1.ptr, align 4
+  br i1 %cond, label %left, label %right
+
+left:
+  %src.left = getelementptr inbounds i8, i8 addrspace(1)* %base, i64 8
+  br label %merge
+
+right:
+  %src.right = getelementptr inbounds i8, i8 addrspace(1)* %base, i64 8
+  br label %merge
+
+merge:
+  ; CHECK-LABEL: @test_func_6(
+  ; CHECK: [[SRC:%.*]] = phi i8 addrspace(1)* [ %src.left, %left ], [ %src.right, %right ]
+  ; CHECK-NEXT: call void @llvm.cj.gcread.generic(i8 addrspace(1)* %mid, i8 addrspace(1)* %base, i8 addrspace(1)* [[SRC]], i32 %size0)
+  ; CHECK-NOT: sub i64 %offset, 8
+  ; CHECK: [[FIELD:%.*]] = getelementptr i8, i8 addrspace(1)* %base, i64 %offset
+  ; CHECK-NEXT: call void @llvm.cj.gcread.generic(i8 addrspace(1)* %dst, i8 addrspace(1)* %base, i8 addrspace(1)* [[FIELD]], i32 %size1)
+  %src = phi i8 addrspace(1)* [ %src.left, %left ], [ %src.right, %right ]
+  call void @llvm.cj.gcread.generic(i8 addrspace(1)* %mid, i8 addrspace(1)* %base, i8 addrspace(1)* %src, i32 %size0)
+  %field = getelementptr inbounds i8, i8 addrspace(1)* %mid, i64 %offset
+  call void @llvm.cj.gcread.generic(i8 addrspace(1)* %dst, i8 addrspace(1)* %mid, i8 addrspace(1)* %field, i32 %size1)
+  ret void
+}
+
 declare void @clobber(i8 addrspace(1)*)
 declare i64 @get_offsets(i8*) #1
 declare void @llvm.cj.assign.generic(i8 addrspace(1)* noalias nocapture writeonly %0, i8 addrspace(1)* noalias nocapture readonly %1, i8* noalias nocapture readonly %2) #0
