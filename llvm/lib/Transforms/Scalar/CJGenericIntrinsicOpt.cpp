@@ -412,26 +412,64 @@ struct GenericCopyOpt {
     return {AB, AV, AS};
   }
 
-  // Return the Value after strip.
-  Value *getDerivedOffset(Value *Ptr,
-                          SmallVector<std::pair<Value *, bool>, 4> &Offsets) {
-    Ptr = Ptr->stripPointerCasts();
-    GetElementPtrInst *GEP = nullptr;
-    while ((GEP = dyn_cast<GetElementPtrInst>(Ptr))) {
-      if (GEP->getNumIndices() == 1) {
-        Offsets.push_back({GEP->getOperand(1), true});
-        Ptr = GEP->getPointerOperand();
-      }
-      break;
-    }
-    return GEP ? GEP->getPointerOperand() : nullptr;
-  }
-
   bool isConstantEqual(Value *LHS, Value *RHS) {
     if (!isa<ConstantInt>(LHS) || !isa<ConstantInt>(RHS))
       return false;
     return cast<ConstantInt>(LHS)->getSExtValue() ==
            cast<ConstantInt>(RHS)->getSExtValue();
+  }
+
+  bool hasSameOffsetValue(Value *LHS, Value *RHS) {
+    return LHS == RHS || isConstantEqual(LHS, RHS);
+  }
+
+  bool hasSameOffsets(const ArrayRef<std::pair<Value *, bool>> LHS,
+                      const ArrayRef<std::pair<Value *, bool>> RHS) {
+    if (LHS.size() != RHS.size())
+      return false;
+    for (unsigned I = 0, E = LHS.size(); I != E; ++I) {
+      if (LHS[I].second != RHS[I].second ||
+          !hasSameOffsetValue(LHS[I].first, RHS[I].first))
+        return false;
+    }
+    return true;
+  }
+
+  // Return the Value after strip.
+  Value *getDerivedOffset(Value *Ptr,
+                          SmallVector<std::pair<Value *, bool>, 4> &Offsets) {
+    Ptr = Ptr->stripPointerCasts();
+    if (auto *PN = dyn_cast<PHINode>(Ptr)) {
+      SmallVector<std::pair<Value *, bool>, 4> PhiOffsets;
+      SmallVector<std::pair<Value *, bool>, 4> IncomingOffsets;
+      Value *Base = nullptr;
+      for (unsigned I = 0, E = PN->getNumIncomingValues(); I != E; ++I) {
+        Value *Incoming = PN->getIncomingValue(I)->stripPointerCasts();
+        if (isa<PHINode>(Incoming))
+          return nullptr;
+        IncomingOffsets.clear();
+        Value *IncomingBase = getDerivedOffset(Incoming, IncomingOffsets);
+        if (!IncomingBase)
+          return nullptr;
+        IncomingBase = IncomingBase->stripPointerCasts();
+        if (!Base) {
+          Base = IncomingBase;
+          PhiOffsets.append(IncomingOffsets.begin(), IncomingOffsets.end());
+          continue;
+        }
+        if (Base != IncomingBase || !hasSameOffsets(PhiOffsets, IncomingOffsets))
+          return nullptr;
+      }
+      Offsets.append(PhiOffsets.begin(), PhiOffsets.end());
+      return Base;
+    }
+
+    auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
+    if (!GEP || GEP->getNumIndices() != 1)
+      return nullptr;
+
+    Offsets.push_back({GEP->getOperand(1), true});
+    return GEP->getPointerOperand();
   }
 
   // IsWrite: offset should be logical negation
@@ -547,7 +585,9 @@ struct GenericCopyOpt {
         else {
           SmallVector<std::pair<Value *, bool>, 4> TmpOffsets;
           auto *BV = getDerivedOffset(getSource(II), TmpOffsets);
-          if (BV && BV != getBaseObj(II)) {
+          // TmpOffsets is empty means we cannot get the offset from source,
+          // which is not expected, so conservatively break.
+          if ((BV && BV != getBaseObj(II)) || TmpOffsets.empty()) {
             Stop = true;
             break;
           }
