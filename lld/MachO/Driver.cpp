@@ -273,6 +273,7 @@ static InputFile *addFile(StringRef path, LoadType loadType,
     return nullptr;
   MemoryBufferRef mbref = *buffer;
   InputFile *newFile = nullptr;
+  bool forceHidden = isForceHidden || config->compileAsExe;
 
   file_magic magic = identify_magic(mbref.getBuffer());
   switch (magic) {
@@ -294,7 +295,7 @@ static InputFile *addFile(StringRef path, LoadType loadType,
 
       if (!archive->isEmpty() && !archive->hasSymbolTable())
         error(path + ": archive has no index; run ranlib to add one");
-      file = make<ArchiveFile>(std::move(archive), isForceHidden);
+      file = make<ArchiveFile>(std::move(archive), forceHidden);
     } else {
       file = entry->second.file;
       // Command-line loads take precedence. If file is previously loaded via
@@ -361,7 +362,7 @@ static InputFile *addFile(StringRef path, LoadType loadType,
     break;
   }
   case file_magic::macho_object:
-    newFile = make<ObjFile>(mbref, getModTime(path), "", isLazy);
+    newFile = make<ObjFile>(mbref, getModTime(path), "", isLazy, forceHidden);
     break;
   case file_magic::macho_dynamically_linked_shared_lib:
   case file_magic::macho_dynamically_linked_shared_lib_stub:
@@ -371,7 +372,7 @@ static InputFile *addFile(StringRef path, LoadType loadType,
       newFile = dylibFile;
     break;
   case file_magic::bitcode:
-    newFile = make<BitcodeFile>(mbref, "", 0, isLazy);
+    newFile = make<BitcodeFile>(mbref, "", 0, isLazy, forceHidden);
     break;
   case file_magic::macho_executable:
   case file_magic::macho_bundle:
@@ -1327,6 +1328,7 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
   config->runtimePaths = args::getStrings(args, OPT_rpath);
   config->allLoad = args.hasFlag(OPT_all_load, OPT_noall_load, false);
   config->archMultiple = args.hasArg(OPT_arch_multiple);
+  config->compileAsExe = args.hasArg(OPT_compile_as_exe);
   config->applicationExtension = args.hasFlag(
       OPT_application_extension, OPT_no_application_extension, false);
   config->exportDynamic = args.hasArg(OPT_export_dynamic);

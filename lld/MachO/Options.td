@@ -71,6 +71,10 @@ def lto_O: Joined<["--"], "lto-O">,
 def thinlto_cache_policy: Joined<["--"], "thinlto-cache-policy=">,
     HelpText<"Pruning policy for the ThinLTO cache">,
     Group<grp_lld>;
+def compile_as_exe: Flag<["--"], "compile-as-exe">,
+    HelpText<"Hide all archive/object/bitcode symbols as if linking an executable">,
+    Flags<[HelpHidden]>,
+    Group<grp_lld>;
 def O : JoinedOrSeparate<["-"], "O">,
     HelpText<"Optimize output file size">;
 def start_lib: Flag<["--"], "start-lib">,

@@ -107,6 +107,7 @@ struct Configuration {
   bool allLoad = false;
   bool applicationExtension = false;
   bool archMultiple = false;
+  bool compileAsExe = false;
   bool exportDynamic = false;
   bool forceLoadObjC = false;
   bool forceLoadSwift = false; // Only applies to LC_LINKER_OPTIONs.
