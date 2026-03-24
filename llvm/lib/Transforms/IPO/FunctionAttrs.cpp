@@ -70,6 +70,7 @@ using namespace llvm;
 
 namespace llvm {
 extern cl::opt<bool> CJPipeline;
+extern cl::opt<bool> EnableCJGCInstrTransform;
 } // namespace llvm
 
 #define DEBUG_TYPE "function-attrs"
@@ -794,9 +795,16 @@ determinePointerAccessAttrs(Argument *A,
     return Attribute::None;
   else if (IsRead)
     return Attribute::ReadOnly;
-  else if (IsWrite)
+  else if (IsWrite) {
+    // In the Cangjie pipeline, CJGCInstrReplace can lower gcwrite barriers into
+    // raw stores before function-attrs runs. Suppress writeonly inference for
+    // managed i8 addrspace(1)* parameters so later GC liveness does not treat
+    // them as dead-at-call purely based on this transient lowering.
+    if (CJPipeline && EnableCJGCInstrTransform &&
+        A->getType() == Type::getInt8PtrTy(A->getContext(), 1))
+      return Attribute::None;
     return Attribute::WriteOnly;
-  else {
+  } else {
     if (CJPipeline && isGCPointerType(A->getType()))
       return Attribute::None;
     return Attribute::ReadNone;
