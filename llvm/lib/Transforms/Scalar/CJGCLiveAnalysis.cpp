@@ -1216,14 +1216,14 @@ void StructLiveAnalysis::visitMemoryCallBase(
   for (unsigned ArgIdx = 0; ArgIdx < ArgNum; ++ArgIdx) {
     Function *Callee = CB->getCalledFunction();
     // If the SSA value is not used in the callee, no need to record it.
+    Value *Arg = CB->getArgOperand(ArgIdx);
     if (Callee &&
-        (Callee->hasParamAttribute(ArgIdx, Attribute::ReadNone) ||
-         Callee->hasParamAttribute(ArgIdx, Attribute::WriteOnly)) &&
-        Callee->hasParamAttribute(ArgIdx, Attribute::NoCapture))
+        Callee->hasParamAttribute(ArgIdx, Attribute::ReadNone) &&
+        Callee->hasParamAttribute(ArgIdx, Attribute::NoCapture)) {
       continue;
+    }
 
     unsigned Size = 0;
-    Value *Arg = CB->getArgOperand(ArgIdx);
     Type *Ty = Arg->getType();
     if (Ty->isPointerTy() && !Ty->isOpaquePointerTy()) {
       auto *Pointee = Ty->getNonOpaquePointerElementType();
