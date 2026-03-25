@@ -42,7 +42,7 @@ static cl::opt<bool>
                 cl::desc("Enable virtual function elimination"));
 
 static cl::opt<bool>
-    ClEnableCJVFE("enable-cangjie-vfe", cl::Hidden, cl::init(true),
+    ClEnableCJVFE("enable-cangjie-vfe", cl::Hidden, cl::init(false),
                 cl::desc("Enable cangjie virtual function elimination"));
 
 static cl::opt<bool>
