@@ -615,6 +615,14 @@ def int_cj_get_method_outertype     : Intrinsic<[llvm_ptr_ty],
                                                 [IntrNoMem, IntrWillReturn, IntrSpeculatable]>;
 def int_cj_get_vtable_func          : Intrinsic<[llvm_ptr_ty],
                                                 [llvm_ptr_ty, llvm_i64_ty, llvm_i64_ty, llvm_ptr_ty]>;
+// Binds a virtual/interface function pointer with its VFE metadata (objType
+// and FuncTable offset) as explicit intrinsic arguments, so that the metadata
+// survives optimization passes.
+def int_cj_vfe_info                 : Intrinsic<[llvm_ptr_ty],
+                                                [llvm_ptr_ty, llvm_metadata_ty,
+                                                 llvm_i64_ty],
+                                                [IntrNoMem, IntrWillReturn,
+                                                 IntrSpeculatable]>;
 def int_cj_assign_generic           : Intrinsic<[],
                                                 [llvm_gcptr_ty, llvm_gcptr_ty, llvm_ptr_ty],
                                                 [IntrArgMemOnly, IntrWillReturn,

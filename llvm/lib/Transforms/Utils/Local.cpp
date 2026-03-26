@@ -2601,10 +2601,7 @@ void llvm::combineMetadata(Instruction *K, const Instruction *J,
       case LLVMContext::MD_cj_agg:
         K->setMetadata(Kind, JMD);
         break;
-      case LLVMContext::MD_obj_type:
       case LLVMContext::MD_func_table:
-        // Handled after the loop - these two must be kept in sync.
-        break;
       case LLVMContext::MD_intro_type:
         // Only set the !IntroType if it is same in both instructions.
         if (K->getMetadata(Kind) != JMD)
@@ -2621,62 +2618,6 @@ void llvm::combineMetadata(Instruction *K, const Instruction *J,
   if (auto *JMD = J->getMetadata(LLVMContext::MD_invariant_group))
     if (isa<LoadInst>(K) || isa<StoreInst>(K))
       K->setMetadata(LLVMContext::MD_invariant_group, JMD);
-
-  // MD_obj_type and MD_func_table are CangjieVFE (virtual function elimination)
-  // metadata that must coexist and be kept in sync. GlobalDCE uses them to
-  // mark virtual function dependencies; dropping them causes functions to be
-  // incorrectly eliminated. When merging two instructions with different
-  // values, we produce a merged representation where each operand is a
-  // sub-MDNode, preserving the union of dependency information.
-  //   Original format:  !{!"A.tt"}          / !{i64 0}
-  //   Merged format:    !{!{!"A.tt"}, ...}  / !{!{i64 0}, ...}
-  if (J->getFunction()->hasCangjieGC()) {
-    auto &Ctx = K->getContext();
-    MDNode *KObj = K->getMetadata(LLVMContext::MD_obj_type);
-    MDNode *JObj = J->getMetadata(LLVMContext::MD_obj_type);
-    MDNode *KFT = K->getMetadata(LLVMContext::MD_func_table);
-    MDNode *JFT = J->getMetadata(LLVMContext::MD_func_table);
-
-    if (!KObj && JObj) {
-      // K didn't have VFE metadata but J did — preserve J's.
-      if (!JFT)
-          report_fatal_error("MD_obj_type present without MD_func_table");
-      K->setMetadata(LLVMContext::MD_obj_type, JObj);
-      K->setMetadata(LLVMContext::MD_func_table, JFT);
-    } else if (KObj && JObj && (KObj != JObj || KFT != JFT)) {
-      // Both have VFE metadata with different values: merge into wrapped
-      // format.
-      SmallSet<std::pair<llvm::Metadata *, llvm::Metadata *>, 4> Visited;
-      auto Expand = [&Visited](MDNode *Obj, MDNode *FT,
-                       SmallVectorImpl<llvm::Metadata *> &ObjEntries,
-                       SmallVectorImpl<llvm::Metadata *> &FTEntries) {
-        if (!FT || Obj->getNumOperands() != FT->getNumOperands())
-          report_fatal_error("objType present without FuncTable or objType and "
-                             "FuncTable have different operand counts");
-        if (Obj->getNumOperands() > 0 && isa<MDNode>(Obj->getOperand(0))) {
-          // Already in merged format — expand existing entries.
-          for (unsigned i = 0; i < Obj->getNumOperands(); i++) {
-            if (!Visited.insert({Obj->getOperand(i), FT->getOperand(i)}).second)
-              continue;
-            ObjEntries.push_back(Obj->getOperand(i));
-            FTEntries.push_back(FT->getOperand(i));
-          }
-        } else {
-          if (!Visited.insert({Obj, FT}).second)
-            return;
-          // Single-entry format.
-          ObjEntries.push_back(Obj);
-          FTEntries.push_back(FT);
-        }
-      };
-      SmallVector<llvm::Metadata *, 4> ObjEntries, FTEntries;
-      Expand(KObj, KFT, ObjEntries, FTEntries);
-      Expand(JObj, JFT, ObjEntries, FTEntries);
-      K->setMetadata(LLVMContext::MD_obj_type, MDNode::get(Ctx, ObjEntries));
-      K->setMetadata(LLVMContext::MD_func_table, MDNode::get(Ctx, FTEntries));
-    }
-    // else: only K has metadata, or both are identical — K is already correct.
-  }
 }
 
 void llvm::combineMetadataForCSE(Instruction *K, const Instruction *J,
@@ -2689,8 +2630,7 @@ void llvm::combineMetadataForCSE(Instruction *K, const Instruction *J,
       LLVMContext::MD_dereferenceable, LLVMContext::MD_cj_agg,
       LLVMContext::MD_dereferenceable_or_null,
       LLVMContext::MD_access_group,    LLVMContext::MD_preserve_access_index,
-      LLVMContext::MD_obj_type,        LLVMContext::MD_func_table,
-      LLVMContext::MD_intro_type,};
+      LLVMContext::MD_func_table,      LLVMContext::MD_intro_type,};
   combineMetadata(K, J, KnownIDs, KDominatesJ);
 }
 
@@ -2779,8 +2719,8 @@ void llvm::patchReplacementInstruction(Instruction *I, Value *Repl) {
       LLVMContext::MD_fpmath,          LLVMContext::MD_invariant_load,
       LLVMContext::MD_invariant_group, LLVMContext::MD_nonnull,
       LLVMContext::MD_access_group,    LLVMContext::MD_preserve_access_index,
-      LLVMContext::MD_cj_agg,          LLVMContext::MD_obj_type,
-      LLVMContext::MD_func_table,      LLVMContext::MD_intro_type,};
+      LLVMContext::MD_cj_agg,          LLVMContext::MD_func_table,
+      LLVMContext::MD_intro_type,};
   combineMetadata(ReplInst, I, KnownIDs, false);
 }
 

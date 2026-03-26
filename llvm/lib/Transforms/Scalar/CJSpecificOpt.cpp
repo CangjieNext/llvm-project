@@ -435,6 +435,23 @@ static bool generateAliasForStaticGI(Module &M) {
 static bool processCangjieIR(Module &M, unsigned OptLevel) {
   bool Changed = false;
 
+  // Lower @llvm.cj.vfe.info intrinsic calls to their first argument (identity).
+  // This intrinsic is used to carry VFE metadata through optimization passes
+  // and must be removed before codegen.
+  if (Function *VFEInfoFn = M.getFunction("llvm.cj.vfe.info")) {
+    SmallVector<CallInst *, 16> ToRemove;
+    for (User *U : VFEInfoFn->users()) {
+      if (auto *CI = dyn_cast<CallInst>(U))
+        ToRemove.push_back(CI);
+    }
+    for (auto *CI : ToRemove) {
+      CI->replaceAllUsesWith(CI->getArgOperand(0));
+      CI->eraseFromParent();
+    }
+    if (!ToRemove.empty())
+      Changed = true;
+  }
+
   llvm::Triple T(M.getTargetTriple());
   if (!T.isOSWindows()) {
     Changed |= generateAliasForStaticGI(M);

@@ -1558,7 +1558,6 @@ bool SimplifyCFGOpt::HoistThenElseCodeToIf(BranchInst *BI,
                              LLVMContext::MD_access_group,
                              LLVMContext::MD_preserve_access_index,
                              LLVMContext::MD_cj_agg,
-                             LLVMContext::MD_obj_type,
                              LLVMContext::MD_func_table,
                              LLVMContext::MD_intro_type};
       combineMetadata(I1, I2, KnownIDs, true);
