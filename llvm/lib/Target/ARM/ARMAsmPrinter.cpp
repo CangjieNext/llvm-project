@@ -1444,7 +1444,7 @@ void ARMAsmPrinter::emitCangjieCallStubInstImpl(const MachineInstr *MI,
                                      .addReg(0));
   } else {
     assert((Opcode != ARM::TCRETURNri) && (Opcode != ARM::TCRETURNdi) &&
-           (Opcode != ARM::TAILJPr) &&
+           (Opcode != ARM::TAILJMPr) &&
            "Do not support TCRETURNdi/TCRETURNri/TAILJMPr.");
     EmitToStreamer(*OutStreamer,
                    MCInstBuilder(ARM::BL).addOperand(MCOperand::createExpr(

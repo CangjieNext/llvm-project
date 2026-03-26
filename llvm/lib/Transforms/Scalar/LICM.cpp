@@ -1785,9 +1785,7 @@ static void hoist(Instruction &I, const DominatorTree *DT, const Loop *CurLoop,
       !SafetyInfo->isGuaranteedToExecute(I, DT, CurLoop)) {
     if (CJPipeline) {
       I.dropUndefImplyingAttrsAndUnknownMetadata(
-          {LLVMContext::MD_tbaa, LLVMContext::MD_untrusted_ref,
-           LLVMContext::MD_obj_type, LLVMContext::MD_intro_type,
-           LLVMContext::MD_func_table});
+          {LLVMContext::MD_tbaa, LLVMContext::MD_untrusted_ref});
     } else {
       I.dropUndefImplyingAttrsAndUnknownMetadata();
     }

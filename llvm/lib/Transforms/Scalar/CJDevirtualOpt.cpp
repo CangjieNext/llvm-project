@@ -17,6 +17,7 @@
 
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Transforms/IPO/CJPartialEscapeAnalysis.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Utils/CallGraphUpdater.h"
@@ -64,8 +65,7 @@ struct DevirtualCallData {
         break;
       }
       case Instruction::Load: {
-        if (I->hasMetadata(LLVMContext::MD_func_table) &&
-            I->hasMetadata(LLVMContext::MD_intro_type)) {
+        if (I->hasMetadata(LLVMContext::MD_func_table)) {
           FTLIS.push_back(cast<LoadInst>(I));
           break;
         }
@@ -346,9 +346,18 @@ static void replaceIVCall(Instruction *I, ExtensionDefData &Data,
   Function *TableFunc = Data.getFuncByIndex(FuncIdx);
   IRBuilder<> IRB(I);
   auto *BI = IRB.CreateBitCast(TableFunc, I->getType());
+  SmallVector<Instruction *, 4> DeadInsts = {I};
+  for (auto *U : I->users()) {
+    if (auto *II = dyn_cast<IntrinsicInst>(U);
+        II && II->getIntrinsicID() == Intrinsic::cj_vfe_info) {
+      II->replaceAllUsesWith(BI);
+      DeadInsts.push_back(II);
+    }
+  }
   I->replaceAllUsesWith(BI);
   assert(I->use_empty() && "CJ_MCC_GetMTable user is not empty");
-  I->eraseFromParent();
+  for (auto *II : DeadInsts)
+    II->eraseFromParent();
 }
 
 static bool devirtual(DevirtualCallData &CallData) {
@@ -374,13 +383,6 @@ static bool devirtual(DevirtualCallData &CallData) {
     for (auto *FTLI : FTLIS) {
       MDNode *MDFT = FTLI->getMetadata(LLVMContext::MD_func_table);
       assert(MDFT != nullptr && "metadata IntroType must have value");
-      // Skip merged metadata format (produced when instructions with different
-      // VFE metadata are combined). Merged format has MDNode operands instead
-      // of ConstantAsMetadata.
-      if (isa<MDNode>(MDFT->getOperand(0))) {
-        UnresolvedLoad.push_back(FTLI);
-        continue;
-      }
       uint64_t FuncIndex =
           mdconst::extract<ConstantInt>(MDFT->getOperand(0))->getZExtValue();
       bool Resolved = DevirtualImpl(Klass0, GetKlass1(FTLI), FTLI, FuncIndex);
@@ -436,11 +438,12 @@ static bool devirtual(DevirtualCallData &CallData) {
       // Klass0 is get from TILI (the first load).
       GlobalVariable *Klass0 = findTypeInfoGV(TI);
       SmallVector<LoadInst *, 4> UnresolvedLoad;
-      OnceResolved |=
-          ResolveFTLI(FTLIS, Klass0, UnresolvedLoad, [](LoadInst *FTLI) {
+      OnceResolved |= ResolveFTLI(
+          FTLIS, Klass0, UnresolvedLoad,
+          [](LoadInst *FTLI) -> GlobalVariable * {
             MDNode *MDTI = FTLI->getMetadata(LLVMContext::MD_intro_type);
             if (MDTI == nullptr)
-              report_fatal_error("metadata IntroType must have value");
+              return nullptr;
             assert(MDTI != nullptr && "");
             const Twine &GVName =
                 dyn_cast<MDString>(MDTI->getOperand(0))->getString() +

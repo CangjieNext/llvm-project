@@ -33,13 +33,13 @@ define internal void @callee(i8 addrspace(1)* %ptr) {
   %1 = bitcast i8 addrspace(1)* %ptr to %TypeInfo* addrspace(1)*
   %2 = load %TypeInfo*, %TypeInfo* addrspace(1)* %1, align 8
   %3 = bitcast %TypeInfo* %2 to i8*
-  %4 = call i8* @llvm.cj.get.vtable.func(i8* %3, i64 0, i64 0, i8* bitcast (%TypeInfo* @"default:A1.ti" to i8*)), !IntroType !0
+  %4 = call i8* @llvm.cj.get.vtable.func(i8* %3, i64 0, i64 0, i8* bitcast (%TypeInfo* @"default:A1.ti" to i8*)), !IntroType !0, !objType !2
   %5 = bitcast i8* %4 to i64 (i8 addrspace(1)*, %TypeInfo*)*
   %6 = call i64 %5(i8 addrspace(1)* %ptr, %TypeInfo* %2)
-  %7 = call i8* @llvm.cj.get.vtable.func(i8* %3, i64 0, i64 0, i8* bitcast (%TypeInfo* @"default:A1.ti" to i8*)), !IntroType !0
+  %7 = call i8* @llvm.cj.get.vtable.func(i8* %3, i64 0, i64 0, i8* bitcast (%TypeInfo* @"default:A1.ti" to i8*)), !IntroType !0, !objType !2
   %8 = bitcast i8* %7 to i64 (i8 addrspace(1)*, %TypeInfo*)*
   %9 = call i64 %8(i8 addrspace(1)* %ptr, %TypeInfo* %2)
-  %10 = call i8* @llvm.cj.get.vtable.func(i8* %3, i64 1, i64 0, i8* bitcast (%TypeInfo* @"default:A2.ti" to i8*)), !IntroType !1
+  %10 = call i8* @llvm.cj.get.vtable.func(i8* %3, i64 1, i64 0, i8* bitcast (%TypeInfo* @"default:A2.ti" to i8*)), !IntroType !1, !objType !3
   %11 = bitcast i8* %10 to i64 (i8 addrspace(1)*, %TypeInfo*)*
   %12 = call i64 %11(i8 addrspace(1)* %ptr, %TypeInfo* %2)
   ret void
@@ -71,3 +71,5 @@ attributes #0 = { "CFileKlass" }
 
 !0 = !{!"default:A1"}
 !1 = !{!"default:A2"}
+!2 = !{!"default:A1.ti"}
+!3 = !{!"default:A2.ti"}

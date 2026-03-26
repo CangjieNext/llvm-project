@@ -677,45 +677,29 @@ void CangjieDCE::addCangjieVirtualFunctionDependencies(Module &M) {
     // Value: offsets
     DenseMap<GenericFuncInfo *, SmallSet<uint64_t, 4>> RelatedGV;
     for (auto &I : instructions(F)) {
-      // There is an overlap between MD_obj_type and MD_intro_type, which needs
-      // to be considered for merging in the future.
-      auto *TypeMD = I.getMetadata(LLVMContext::MD_obj_type);
-      if (!TypeMD)
+      // Look for @llvm.cj.vfe.info calls which carry VFE metadata as explicit
+      // intrinsic arguments (objType as metadata arg, offset as i64 arg).
+      auto *CI = dyn_cast<CallInst>(&I);
+      if (!CI)
         continue;
-      assert(isa<LoadInst>(&I));
-      auto *OffsetMD = I.getMetadata(LLVMContext::MD_func_table);
-      if (!OffsetMD)
-        report_fatal_error("objType present without FuncTable");
+      Function *Callee = CI->getCalledFunction();
+      if (!Callee || Callee->getIntrinsicID() != Intrinsic::cj_vfe_info)
+        continue;
 
-      // Merged format: operand(0) is MDNode (vs MDString for single-entry).
-      // Each operand pair (TypeMD[i], OffsetMD[i]) represents one (obj_type, offset).
-      if (TypeMD->getNumOperands() > 0 && isa<MDNode>(TypeMD->getOperand(0))) {
-        if (TypeMD->getNumOperands() != OffsetMD->getNumOperands())
-          report_fatal_error(
-              "Merged objType and FuncTable have different operand counts");
-        for (unsigned i = 0; i < TypeMD->getNumOperands(); i++) {
-          auto *SubType = dyn_cast<MDNode>(TypeMD->getOperand(i));
-          auto *SubOff = dyn_cast<MDNode>(OffsetMD->getOperand(i));
-          if (!SubType || !SubOff || SubOff->getNumOperands() == 0)
-            report_fatal_error("Malformed merged objType or FuncTable");
-          auto *GFI = resolveVFEMeta(SubType, M);
-          if (!GFI)
-            continue;
-          auto Offset =
-              mdconst::extract<ConstantInt>(SubOff->getOperand(0))
-                  ->getZExtValue();
-          RelatedGV[GFI].insert(Offset);
-        }
-      } else {
-        // Single-entry format.
-        auto *GFI = resolveVFEMeta(TypeMD, M);
-        if (!GFI)
-          continue;
-        auto Offset =
-            mdconst::extract<ConstantInt>(OffsetMD->getOperand(0))
-                ->getZExtValue();
-        RelatedGV[GFI].insert(Offset);
-      }
+      auto *MAV = dyn_cast<MetadataAsValue>(CI->getArgOperand(1));
+      if (!MAV)
+        report_fatal_error("objType is missing in llvm.cj.vfe.info");
+      Metadata *TypeMD = MAV->getMetadata();
+      // Arg 2: i64 FuncTable offset.
+      auto *OffsetCI = dyn_cast<ConstantInt>(CI->getArgOperand(2));
+      if (!OffsetCI)
+        report_fatal_error("FuncTable offset is missing in llvm.cj.vfe.info");
+
+      auto *GFI = resolveVFEMeta(TypeMD, M);
+      if (!GFI)
+        continue;
+      uint64_t Offset = OffsetCI->getZExtValue();
+      RelatedGV[GFI].insert(Offset);
     }
     updateDependencies(&F, RelatedGV);
   }

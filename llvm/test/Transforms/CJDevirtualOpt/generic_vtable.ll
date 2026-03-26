@@ -16,12 +16,12 @@
 @NonExternalExtensionDefs = internal global [3 x %ExtensionDef*] [%ExtensionDef* @"default:B<T>_ed_default:A", %ExtensionDef* @"default:A_ed_default:A", %ExtensionDef* null]
 
 ; CHECK: [[TMP0:%.*]] = bitcast i8* bitcast (i64 (i8 addrspace(1)*, %TypeInfo*)* @test_func_B to i8*) to i64 (i8 addrspace(1)*, %TypeInfo*)*
-; CHECK-NEXT: call i64 [[TMP0]](i8 addrspace(1)* [[TMP1:%.*]], %TypeInfo* [[TMP2:%.*]])
+; CHECK-NEXT: [[TMP3:%.*]] = call i64 [[TMP0]](i8 addrspace(1)* [[TMP1:%.*]], %TypeInfo* [[TMP2:%.*]])
 define internal i64 @callee(i8 addrspace(1)* %ptr) {
   %1 = bitcast i8 addrspace(1)* %ptr to %TypeInfo* addrspace(1)*
   %2 = load %TypeInfo*, %TypeInfo* addrspace(1)* %1, align 8
   %3 = bitcast %TypeInfo* %2 to i8*
-  %4 = call i8* @llvm.cj.get.vtable.func(i8* %3, i64 0, i64 0, i8* bitcast (%TypeInfo* @"default:A.ti" to i8*)), !IntroType !0
+  %4 = call i8* @llvm.cj.get.vtable.func(i8* %3, i64 0, i64 0, i8* bitcast (%TypeInfo* @"default:A.ti" to i8*)), !IntroType !0, !objType !1
   %5 = bitcast i8* %4 to i64 (i8 addrspace(1)*, %TypeInfo*)*
   %6 = call i64 %5(i8 addrspace(1)* %ptr, %TypeInfo* %2)
   ret i64 %6
@@ -46,3 +46,4 @@ declare i8* @llvm.cj.get.vtable.func(i8*, i64, i64, i8*)
 attributes #0 = { "CFileKlass" }
 
 !0 = !{!"default:A"}
+!1 = !{!"default:A.ti"}

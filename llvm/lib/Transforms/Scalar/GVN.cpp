@@ -1404,12 +1404,6 @@ void GVNPass::eliminatePartiallyRedundantLoad(
       if (LI &&
           LI->getLoopFor(Load->getParent()) == LI->getLoopFor(UnavailableBlock))
         NewLoad->setMetadata(LLVMContext::MD_access_group, AccessMD);
-    if (auto *ObjTypeMD = Load->getMetadata(LLVMContext::MD_obj_type))
-      NewLoad->setMetadata(LLVMContext::MD_obj_type, ObjTypeMD);
-    if (auto *FuncTableMD = Load->getMetadata(LLVMContext::MD_func_table))
-      NewLoad->setMetadata(LLVMContext::MD_func_table, FuncTableMD);
-    if (auto *IntroTypeMD = Load->getMetadata(LLVMContext::MD_intro_type))
-      NewLoad->setMetadata(LLVMContext::MD_intro_type, IntroTypeMD);
 
     // We do not propagate the old load's debug location, because the new
     // load now lives in a different BB, and we want to avoid a jumpy line

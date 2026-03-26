@@ -588,9 +588,19 @@ public:
                                      CB->getArgOperand(2)))}));
     LI3->setMetadata(LLVMContext::MD_invariant_load,
                      MDNode::get(CB->getContext(), {}));
-    LI3->setMetadata(LLVMContext::MD_obj_type,
-                     CB->getMetadata(LLVMContext::MD_obj_type));
-    CB->replaceAllUsesWith(LI3);
+    // Wrap with @llvm.cj.vfe.info to preserve VFE metadata as intrinsic args.
+    auto *ObjTypeMD = CB->getMetadata(LLVMContext::MD_obj_type);
+    auto *FuncOffset = cast<ConstantInt>(CB->getArgOperand(2));
+    Value *Result = LI3;
+    if (ObjTypeMD) {
+      auto *VFEInfoFn = Intrinsic::getDeclaration(
+          CB->getModule(), Intrinsic::cj_vfe_info);
+      Result = IRB.CreateCall(VFEInfoFn,
+                              {LI3, MetadataAsValue::get(CB->getContext(),
+                                                         ObjTypeMD),
+                               FuncOffset});
+    }
+    CB->replaceAllUsesWith(Result);
     CB->eraseFromParent();
   }
 
@@ -614,9 +624,18 @@ public:
     LI->setMetadata(LLVMContext::MD_func_table,
                     MDNode::get(C, {ConstantAsMetadata::get(cast<ConstantInt>(
                                        CB->getArgOperand(2)))}));
-    LI->setMetadata(LLVMContext::MD_obj_type,
-                    CB->getMetadata(LLVMContext::MD_obj_type));
-    CB->replaceAllUsesWith(LI);
+    // Wrap with @llvm.cj.vfe.info to preserve VFE metadata as intrinsic args.
+    auto *ObjTypeMD = CB->getMetadata(LLVMContext::MD_obj_type);
+    auto *FuncOffset = cast<ConstantInt>(CB->getArgOperand(2));
+    Value *Result = LI;
+    if (ObjTypeMD) {
+      auto *VFEInfoFn = Intrinsic::getDeclaration(
+          CB->getModule(), Intrinsic::cj_vfe_info);
+      Result = IRB.CreateCall(VFEInfoFn,
+                              {LI, MetadataAsValue::get(C, ObjTypeMD),
+                               FuncOffset});
+    }
+    CB->replaceAllUsesWith(Result);
     CB->eraseFromParent();
   }
 
