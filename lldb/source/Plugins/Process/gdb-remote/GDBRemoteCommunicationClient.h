@@ -564,6 +564,7 @@ protected:
   LazyBool m_supports_memory_tagging = eLazyBoolCalculate;
   LazyBool m_supports_qSaveCore = eLazyBoolCalculate;
   LazyBool m_uses_native_signals = eLazyBoolCalculate;
+  LazyBool m_supports_jGetDyldProcessState = eLazyBoolCalculate;
 
   bool m_supports_qProcessInfoPID : 1, m_supports_qfProcessInfo : 1,
       m_supports_qUserName : 1, m_supports_qGroupName : 1,
@@ -643,6 +644,8 @@ protected:
                                      MemoryRegionInfo &region);
 
   LazyBool GetThreadPacketSupported(lldb::tid_t tid, llvm::StringRef packetStr);
+
+  bool GetDynamicLoaderProcessStateSupported();
 
 private:
   GDBRemoteCommunicationClient(const GDBRemoteCommunicationClient &) = delete;

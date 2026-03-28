@@ -225,7 +225,9 @@ public:
   StructuredData::ObjectSP GetSharedCacheInfo() override;
 
   std::string HarmonizeThreadIdsForProfileData(
-      StringExtractorGDBRemote &inputStringExtractor);
+      StringExtractorGDBRemote &inputStringExtractor);、
+
+  StructuredData::ObjectSP GetDynamicLoaderProcessState() override;
 
   void DidFork(lldb::pid_t child_pid, lldb::tid_t child_tid) override;
   void DidVFork(lldb::pid_t child_pid, lldb::tid_t child_tid) override;
