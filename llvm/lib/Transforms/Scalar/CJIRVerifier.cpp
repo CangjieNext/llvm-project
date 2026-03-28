@@ -285,6 +285,7 @@ public:
         break;
       case Intrinsic::cj_gc_statepoint:
       case Intrinsic::cj_malloc_object:
+      case Intrinsic::cj_malloc_local_object:
       case Intrinsic::cj_malloc_array:
       case Intrinsic::cj_malloc_array_generic:
       case Intrinsic::cj_division_check_sdiv:
@@ -293,6 +294,7 @@ public:
       case Intrinsic::cj_division_check_urem:
       case Intrinsic::cj_throw_exception:
       case Intrinsic::cj_alloca_generic:
+      case Intrinsic::cj_alloca_local_generic:
         break;
       }
     }
