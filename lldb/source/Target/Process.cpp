@@ -6141,3 +6141,9 @@ Status Process::WriteMemoryTags(lldb::addr_t addr, size_t len,
   return DoWriteMemoryTags(addr, len, tag_manager->GetAllocationTagType(),
                            *packed_tags);
 }
+
+addr_t Process::FixCodeAddress(addr_t addr) {
+  if (ABISP abi_sp = GetABI())
+    addr = abi_sp->FixCodeAddress(addr);
+  return addr;
+}
