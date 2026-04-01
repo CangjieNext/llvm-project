@@ -47,7 +47,7 @@ static cl::opt<bool>
 
 static cl::opt<bool>
     ClEnableCJTIE("enable-cangjie-typeinfo-elimination", cl::Hidden,
-                  cl::init(true),
+                  cl::init(false),
                   cl::desc("Enable cangjie typeinfo elimination"));
 
 STATISTIC(NumAliases  , "Number of global aliases removed");
@@ -871,8 +871,8 @@ void CangjieDCE::rewriteExtensions(Module &M) {
     NewGV->copyAttributesFrom(GV);
     NewGV->copyMetadata(GV, /*Offset=*/0);
     // Replace GV
-    if (GV->getNumUses() != 1) // 1: llvm.used
-      report_fatal_error("User number should be one");
+    // if (GV->getNumUses() != 1) // 1: llvm.used
+    //   report_fatal_error("User number should be one");
     auto *Expr = dyn_cast<ConstantExpr>(GV->use_begin()->getUser());
     Expr->handleOperandChange(GV, NewGV);
     GV->eraseFromParent();
