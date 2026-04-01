@@ -47,7 +47,7 @@ static cl::opt<bool>
 
 static cl::opt<bool>
     ClEnableCJTIE("enable-cangjie-typeinfo-elimination", cl::Hidden,
-                  cl::init(true),
+                  cl::init(false),
                   cl::desc("Enable cangjie typeinfo elimination"));
 
 STATISTIC(NumAliases  , "Number of global aliases removed");
@@ -492,9 +492,11 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
 
   if (CJPipeline && ClEnableCJTIE) {
     CJDCE.rewriteExtensions(M);
+
+  }
+  if (CJPipeline) {
     CJDCE.rewriteLLVMUsed(M);
   }
-
   // Make sure that all memory is released
   AliveGlobals.clear();
   ConstantDependenciesCache.clear();
