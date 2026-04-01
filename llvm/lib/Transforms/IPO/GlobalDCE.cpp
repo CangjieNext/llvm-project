@@ -47,7 +47,7 @@ static cl::opt<bool>
 
 static cl::opt<bool>
     ClEnableCJTIE("enable-cangjie-typeinfo-elimination", cl::Hidden,
-                  cl::init(true),
+                  cl::init(false),
                   cl::desc("Enable cangjie typeinfo elimination"));
 
 STATISTIC(NumAliases  , "Number of global aliases removed");
