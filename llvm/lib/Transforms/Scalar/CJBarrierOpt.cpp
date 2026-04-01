@@ -625,9 +625,7 @@ private:
                           uint64_t CurPos) {
     bool Result = false;
     Type *ElementTy = AT->getElementType();
-    if (isa<PointerType>(ElementTy)) {
-      assert(isGCPointerType(ElementTy) &&
-             "The elements of array can only be gc pointers.");
+    if (isGCPointerType(ElementTy)) {
       return true;
     } else if (auto AST = dyn_cast<StructType>(ElementTy)) {
       for (unsigned Idx = 0; Idx < AT->getNumElements(); Idx++) {
