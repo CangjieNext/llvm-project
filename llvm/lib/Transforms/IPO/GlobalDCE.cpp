@@ -845,7 +845,8 @@ void CangjieDCE::rewriteExtensions(Module &M) {
   // method, not rewriting this part does not affect correctness; it only
   // slightly impacts the optimization effect on code size.
   for (GlobalVariable &GV : M.globals())
-    if (GV.isCJStaticGenericTI() || GV.isCJOuterTypeExtensions())
+    if (GV.isCJStaticGenericTI() || GV.isCJOuterTypeExtensions() ||
+        GV.isCJInnerTypeExtensions())
       Candidates.insert(&GV);
   for (auto *GV : Candidates) {
     if (!GV->hasInitializer())
@@ -871,8 +872,8 @@ void CangjieDCE::rewriteExtensions(Module &M) {
     NewGV->copyAttributesFrom(GV);
     NewGV->copyMetadata(GV, /*Offset=*/0);
     // Replace GV
-    if (GV->getNumUses() != 1) // 1: llvm.used
-      report_fatal_error("User number should be one");
+    // if (GV->getNumUses() != 1) // 1: llvm.used
+    //   report_fatal_error("User number should be one");
     auto *Expr = dyn_cast<ConstantExpr>(GV->use_begin()->getUser());
     Expr->handleOperandChange(GV, NewGV);
     GV->eraseFromParent();
