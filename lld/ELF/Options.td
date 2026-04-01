@@ -192,6 +192,10 @@ defm execute_only: BB<"execute-only",
 
 defm export_bc_only: Eq<"export-bc", "export bc symbols only">, MetaVarName<"file">;
 
+defm visible_pkgs: Eq<"visible-pkgs",
+    "Keep symbols visible for the specified Cangjie packages in FullLTO">,
+    MetaVarName<"<pkg[,pkg...]>">;
+
 def compile_as_exe: Flag<["--"], "compile-as-exe">, HelpText<"hidden all symbol">;
 
 defm export_dynamic: B<"export-dynamic",

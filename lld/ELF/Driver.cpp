@@ -46,6 +46,7 @@
 #include "lld/Common/Version.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/LTO/LTO.h"
@@ -79,6 +80,43 @@ std::unique_ptr<LinkerDriver> elf::driver;
 
 static void setConfigs(opt::InputArgList &args);
 static void readConfigs(opt::InputArgList &args);
+
+static bool collectVisiblePkgs(opt::InputArgList &args, StringSet<> &visiblePkgs,
+                               bool &hideAllVisiblePkgs) {
+  for (auto *arg : args.filtered(OPT_visible_pkgs)) {
+    StringRef rawValue = arg->getValue();
+    if (rawValue.empty()) {
+      hideAllVisiblePkgs = true;
+      continue;
+    }
+
+    SmallVector<StringRef, 4> pkgNames;
+    rawValue.split(pkgNames, ',', /*MaxSplit=*/-1, /*KeepEmpty=*/true);
+    for (StringRef pkgName : pkgNames) {
+      pkgName = pkgName.trim();
+      if (pkgName.empty()) {
+        error("empty package name in --visible-pkgs");
+        return false;
+      }
+      visiblePkgs.insert(pkgName);
+    }
+  }
+  return true;
+}
+
+static Optional<StringRef> getBitcodePackageName(const BitcodeFile &file) {
+  if (!file.obj)
+    return None;
+
+  // For Cangjie bitcode, the module identifier is:
+  //   <subCHIRPackageIdx>-<pkgName>
+  StringRef pkgName = file.obj->getName();
+  unsigned subCHIRPackageIdx = 0;
+  if (pkgName.consumeInteger(10, subCHIRPackageIdx) ||
+      !pkgName.consume_front("-") || pkgName.empty())
+    return None;
+  return pkgName;
+}
 
 void elf::errorOrWarn(const Twine &msg) {
   if (config->noinhibitExec)
@@ -1672,8 +1710,30 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
     }
   }
 
+  bool hasVisiblePkgs = args.hasArg(OPT_visible_pkgs);
+  bool hideAllVisiblePkgs = false;
+  StringSet<> visiblePkgs;
+  if (hasVisiblePkgs &&
+      !collectVisiblePkgs(args, visiblePkgs, hideAllVisiblePkgs))
+    return;
+
   if (files.empty() && !hasInput && errorCount() == 0)
     error("no input files");
+
+  if (compileAsEXE && hasVisiblePkgs) {
+    error("cannot use --compile-as-exe with --visible-pkgs");
+    return;
+  }
+
+  if (hideAllVisiblePkgs && !visiblePkgs.empty()) {
+    error("cannot combine --visible-pkgs=\"\" with non-empty --visible-pkgs");
+    return;
+  }
+
+  if (addExportBCOnly && hasVisiblePkgs) {
+    error("cannot use --export-bc with --visible-pkgs");
+    return;
+  }
 
   if (compileAsEXE) {
     if (addExportBCOnly)
@@ -1681,6 +1741,25 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
     for (InputFile *file : files)
       if (auto bitcodeFile = dyn_cast<BitcodeFile>(file))
         bitcodeFile->ExportSymbols = false;
+  } else if (hideAllVisiblePkgs) {
+    for (InputFile *file : files)
+      if (auto bitcodeFile = dyn_cast<BitcodeFile>(file))
+        bitcodeFile->ExportSymbols = false;
+  } else if (hasVisiblePkgs) {
+    for (InputFile *file : files) {
+      auto *bitcodeFile = dyn_cast<BitcodeFile>(file);
+      if (!bitcodeFile)
+        continue;
+
+      Optional<StringRef> pkgName = getBitcodePackageName(*bitcodeFile);
+      if (!pkgName) {
+        error("invalid Cangjie bitcode module identifier '" +
+              bitcodeFile->obj->getName() +
+              "' for --visible-pkgs, expected <split-index>-<package-name>");
+        return;
+      }
+      bitcodeFile->ExportSymbols = visiblePkgs.count(*pkgName) != 0;
+    }
   } else if (!addExportBCOnly) {
     for (InputFile *file : files)
       if (auto bitcodeFile = dyn_cast<BitcodeFile>(file))
