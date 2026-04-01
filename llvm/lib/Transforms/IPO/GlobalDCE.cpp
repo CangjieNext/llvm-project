@@ -845,7 +845,8 @@ void CangjieDCE::rewriteExtensions(Module &M) {
   // method, not rewriting this part does not affect correctness; it only
   // slightly impacts the optimization effect on code size.
   for (GlobalVariable &GV : M.globals())
-    if (GV.isCJStaticGenericTI() || GV.isCJOuterTypeExtensions())
+    if (GV.isCJStaticGenericTI() || GV.isCJOuterTypeExtensions() ||
+        GV.isCJInnerTypeExtensions())
       Candidates.insert(&GV);
   for (auto *GV : Candidates) {
     if (!GV->hasInitializer())
