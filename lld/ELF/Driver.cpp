@@ -46,6 +46,7 @@
 #include "lld/Common/Version.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/LTO/LTO.h"
@@ -64,6 +65,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <cstdlib>
 #include <utility>
+#include <vector>
 
 using namespace llvm;
 using namespace llvm::ELF;
@@ -79,6 +81,44 @@ std::unique_ptr<LinkerDriver> elf::driver;
 
 static void setConfigs(opt::InputArgList &args);
 static void readConfigs(opt::InputArgList &args);
+
+static bool collectVisiblePkgs(opt::InputArgList &args, StringSet<> &visiblePkgs,
+                               bool &hideAllVisiblePkgs) {
+  for (auto *arg : args.filtered(OPT_visible_pkgs)) {
+    StringRef rawValue = arg->getValue();
+    if (rawValue.empty()) {
+      hideAllVisiblePkgs = true;
+      continue;
+    }
+
+    SmallVector<StringRef, 4> pkgNames;
+    rawValue.split(pkgNames, ',', /*MaxSplit=*/-1, /*KeepEmpty=*/true);
+    for (StringRef pkgName : pkgNames) {
+      pkgName = pkgName.trim();
+      if (pkgName.empty()) {
+        error("empty package name in --visible-pkgs");
+        return false;
+      }
+      visiblePkgs.insert(pkgName);
+    }
+  }
+  return true;
+}
+
+static Optional<StringRef> getBitcodePackageName(const BitcodeFile &file) {
+  if (!file.obj)
+    return None;
+
+  // For Cangjie bitcode, the module identifier is:
+  //   <subCHIRPackageIdx>-<pkgName>
+  StringRef pkgName = file.obj->getSourceFileName();
+  unsigned subCHIRPackageIdx = 0;
+  unsigned Radix = 10;
+  if (pkgName.consumeInteger(Radix, subCHIRPackageIdx) ||
+      !pkgName.consume_front("-") || pkgName.empty())
+    return None;
+  return pkgName;
+}
 
 void elf::errorOrWarn(const Twine &msg) {
   if (config->noinhibitExec)
@@ -1567,15 +1607,11 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
   InputFile::isInGroup = false;
   bool hasInput = false;
   bool addExportBCOnly = false;
-  bool compileAsEXE = false;
   for (auto *arg : args) {
     switch (arg->getOption().getID()) {
     case OPT_library:
       addLibrary(arg->getValue());
       hasInput = true;
-      break;
-    case OPT_compile_as_exe:
-      compileAsEXE = true;
       break;
     case OPT_export_bc_only:
       addFile(arg->getValue(), false, true);
@@ -1672,15 +1708,49 @@ void LinkerDriver::createFiles(opt::InputArgList &args) {
     }
   }
 
+  bool hasVisiblePkgs = args.hasArg(OPT_visible_pkgs);
+
+  if (addExportBCOnly && hasVisiblePkgs) {
+    error("cannot use --export-bc with --visible-pkgs");
+    return;
+  }
+
+  bool hideAllVisiblePkgs = false;
+  StringSet<> visiblePkgs;
+  if (hasVisiblePkgs &&
+      !collectVisiblePkgs(args, visiblePkgs, hideAllVisiblePkgs))
+    return;
+
   if (files.empty() && !hasInput && errorCount() == 0)
     error("no input files");
 
-  if (compileAsEXE) {
-    if (addExportBCOnly)
-      error("use compile-as-exe && export-bc-only. Hidden all sym is needed.");
-    for (InputFile *file : files)
-      if (auto bitcodeFile = dyn_cast<BitcodeFile>(file))
-        bitcodeFile->ExportSymbols = false;
+  if (hasVisiblePkgs) {
+    bool validFlag=false;
+    std::vector<BitcodeFile*> hBitcodeFiles;
+    for (InputFile *file : files) {
+      auto *bitcodeFile = dyn_cast<BitcodeFile>(file);
+      if (!bitcodeFile)
+        continue;
+
+      Optional<StringRef> pkgName = getBitcodePackageName(*bitcodeFile);
+      if (!pkgName) {
+        error("invalid Cangjie bitcode module identifier '" +
+              bitcodeFile->obj->getName() +
+              "' for --visible-pkgs, expected <split-index>-<package-name>");
+        return;
+      }
+      bool isVisible = visiblePkgs.count(*pkgName) != 0;
+      bitcodeFile->ExportSymbols = isVisible;
+      validFlag = validFlag || isVisible;
+      if (!isVisible) {
+        hBitcodeFiles.push_back(bitcodeFile);
+      }
+    }
+    if (!validFlag) {
+      for (auto &bitcodeFile : hBitcodeFiles) {
+        bitcodeFile->ExportSymbols = true;
+      }
+    }
   } else if (!addExportBCOnly) {
     for (InputFile *file : files)
       if (auto bitcodeFile = dyn_cast<BitcodeFile>(file))
