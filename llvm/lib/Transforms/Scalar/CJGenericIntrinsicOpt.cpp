@@ -708,6 +708,23 @@ struct GenericCopyOpt {
     }
   }
 
+  MemoryAccess *findPreviousMemoryPhiOrDef(MemoryUseOrDef *MUD) {
+    if (!isa<MemoryUse>(MUD))
+      return MUD;
+    auto *BB = MUD->getMemoryInst()->getParent();
+    auto *DefLists = MSSA.getBlockDefs(BB);
+    while (!DefLists) {
+      if (!BB->getUniquePredecessor())
+        return nullptr;
+      BB = BB->getUniquePredecessor();
+      DefLists = MSSA.getBlockDefs(BB);
+    }
+    for (auto I = DefLists->rbegin(), E = DefLists->rend(); I != E; ++I)
+      if (MSSA.dominates(&*I, MUD))
+        return &const_cast<MemoryAccess &>(*I);
+    return nullptr;
+  }
+
   bool processGenericCopy(CallInst *CI) {
     // Base: It is valid at gcread/gcwrite.
     // Size: Also valid at gcread/gcwrite.
@@ -719,8 +736,7 @@ struct GenericCopyOpt {
     MemoryLocation Loc = MemoryLocation::getAfter(FPtr);
     bool Changed = false;
     MemoryAccess *MA = IID == Intrinsic::cj_gcread_ref
-                           ? cast<MemoryUseOrDef>(MSSA.getMemoryAccess(CI))
-                                 ->getDefiningAccess()
+                           ? findPreviousMemoryPhiOrDef(MSSA.getMemoryAccess(CI))
                            : MSSA.getMemoryAccess(CI);
     // 0: base ptr, 1: derived ptr, 2: size
     auto [RB, RP, RS] =
