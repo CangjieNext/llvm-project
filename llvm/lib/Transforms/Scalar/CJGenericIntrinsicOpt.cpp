@@ -718,10 +718,7 @@ struct GenericCopyOpt {
       return false;
     MemoryLocation Loc = MemoryLocation::getAfter(FPtr);
     bool Changed = false;
-    MemoryAccess *MA = IID == Intrinsic::cj_gcread_ref
-                           ? cast<MemoryUseOrDef>(MSSA.getMemoryAccess(CI))
-                                 ->getDefiningAccess()
-                           : MSSA.getMemoryAccess(CI);
+    MemoryAccess *MA = MSSA.getMemoryAccess(CI);
     // 0: base ptr, 1: derived ptr, 2: size
     auto [RB, RP, RS] =
         findPotentialEqualMem(CI, MA, MA, Loc, Base, TI, Size, Changed);
