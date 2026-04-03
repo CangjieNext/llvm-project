@@ -25,6 +25,7 @@
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Utils/CtorUtils.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
@@ -389,8 +390,10 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
       MarkLive(*GVD, &NewLiveGVs);
   }
 
-  if (CJPipeline && ClEnableCJTIE)
+  if (CJPipeline && ClEnableCJTIE) {
     CJDCE.updateLiveExtensions();
+    CJDCE.updateNonExternalExtensionDefs(M);
+  }
 
   // Now that all globals which are needed are in the AliveGlobals set, we loop
   // through the program, deleting those which are not alive.
@@ -820,6 +823,84 @@ void CangjieDCE::updateLiveExtensions() {
       continue;
     assert(ReverseDeps.count(Ty));
     MarkRelatedMeta(ReverseDeps[Ty], LiveTypes);
+  }
+}
+
+void CangjieDCE::updateNonExternalExtensionDefs(Module &M) {
+  for (auto &GV : M.globals()) {
+    if (!GV.isCJInnerTypeExtensions())
+      continue;
+    auto *C = GV.getInitializer();
+    ArrayType *ATy = cast<ArrayType>(GV.getValueType());
+    unsigned NumElements = C->getNumOperands(), NextLiveIndex = 0,
+             NextDeadIndex = NumElements - 1;
+    if (NumElements == 0)
+      continue;
+    std::vector<unsigned> OldToNew(NumElements);
+    std::vector<Constant *> NewElements(
+        NumElements,
+        ConstantPointerNull::get(cast<PointerType>(ATy->getElementType())));
+    DenseMap<unsigned, unsigned> DeadGVIndex;
+    // Move dead GV to the back.
+    SmallSet<GlobalVariable *, 8> RewriteTypeInfos;
+    for (unsigned I = 0; I < NumElements; ++I) {
+      auto *Ext = cast<Constant>(C->getOperand(I)->stripPointerCasts());
+      auto *ExtGV = dyn_cast_or_null<GlobalVariable>(Ext);
+      if (ExtGV)
+        if (auto *TI = dyn_cast_or_null<GlobalVariable>(
+                cast<GlobalVariable>(Ext)
+                    ->getInitializer()
+                    ->getOperand(ExtensionDefFieldType::ET_TARGET_TYPE)
+                    ->stripPointerCasts());
+            TI && TI->isCJTypeInfo() && TI->hasInitializer())
+          RewriteTypeInfos.insert(TI);
+      if (isa<ConstantPointerNull>(Ext) ||
+          !DCE.AliveGlobals.count(cast<GlobalVariable>(Ext))) {
+        NewElements[NextDeadIndex] = Ext;
+        DeadGVIndex[NextDeadIndex] = I;
+        OldToNew[I] = NextDeadIndex--;
+        continue;
+      }
+      NewElements[NextLiveIndex] = Ext;
+      OldToNew[I] = NextLiveIndex++;
+    }
+    if (NextDeadIndex + 1 != NextLiveIndex ||
+        !(isa<ConstantPointerNull>(NewElements[NextLiveIndex]) ||
+         !DCE.AliveGlobals.count(
+             cast<GlobalVariable>(NewElements[NextLiveIndex]))))
+      report_fatal_error("error");
+    NextDeadIndex = NumElements - 1;
+    while (NextLiveIndex < NextDeadIndex) {
+      OldToNew[DeadGVIndex[NextLiveIndex]] = NextDeadIndex;
+      OldToNew[DeadGVIndex[NextDeadIndex]] = NextLiveIndex;
+      std::swap(NewElements[NextLiveIndex++], NewElements[NextDeadIndex--]);
+    }
+    GV.setInitializer(ConstantArray::get(dyn_cast<ArrayType>(GV.getValueType()),
+                                         NewElements));
+    SmallVector<ConstantExpr *, 8> GEPUsers;
+    for (auto *U : GV.users()) {
+      auto *Expr = dyn_cast<ConstantExpr>(U);
+      if (Expr && Expr->getOpcode() == Instruction::GetElementPtr)
+        GEPUsers.push_back(Expr);
+    }
+    // Modify typeinfo and typetemplate using GV.
+    for (auto *Expr : GEPUsers) {
+      unsigned Op = Expr->getNumOperands() - 1;
+      auto *OldIndex = cast<ConstantInt>(Expr->getOperand(Op));
+      SmallVector<Constant *, 4> Operands;
+      Operands.reserve(Expr->getNumOperands());
+      for (Value *Operand : Expr->operands())
+        Operands.push_back(cast<Constant>(Operand));
+      Operands[Op] = ConstantInt::get(OldIndex->getType(),
+                                      OldToNew[OldIndex->getZExtValue()]);
+      Constant *NewExpr = Expr->getWithOperands(Operands);
+      if (NewExpr != Expr)
+        Expr->replaceAllUsesWith(NewExpr);
+    }
+    // Delete dead users and constant.
+    GV.removeDeadConstantUsers();
+    if (isSafeToDestroyConstant(C))
+      C->destroyConstant();
   }
 }
 
