@@ -389,8 +389,10 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
       MarkLive(*GVD, &NewLiveGVs);
   }
 
-  if (CJPipeline && ClEnableCJTIE)
+  if (CJPipeline && ClEnableCJTIE) {
     CJDCE.updateLiveExtensions();
+    CJDCE.updateNonExternalExtensionDefs(M);
+  }
 
   // Now that all globals which are needed are in the AliveGlobals set, we loop
   // through the program, deleting those which are not alive.
@@ -820,6 +822,94 @@ void CangjieDCE::updateLiveExtensions() {
       continue;
     assert(ReverseDeps.count(Ty));
     MarkRelatedMeta(ReverseDeps[Ty], LiveTypes);
+  }
+}
+
+void CangjieDCE::updateNonExternalExtensionDefs(Module &M) {
+  for (auto &GV : M.globals()) {
+    if (!GV.isCJInnerTypeExtensions())
+      continue;
+    auto *C = GV.getInitializer();
+    ArrayType *ATy = cast<ArrayType>(GV.getValueType());
+    unsigned NumElements = C->getNumOperands(), NextLiveIndex = 0,
+             NextDeadIndex = NumElements - 1;
+    std::vector<unsigned> OldToNew(NumElements);
+    std::vector<Constant *> NewElements(
+        NumElements,
+        ConstantPointerNull::get(cast<PointerType>(ATy->getElementType())));
+    DenseMap<unsigned, unsigned> DeadGVIndex;
+    // Move dead GV to the back.
+    SmallVector<GlobalVariable *, 8> RewriteTypeInfos;
+    for (unsigned I = 0; I < NumElements; ++I) {
+      auto *Ext = cast<Constant>(C->getOperand(I)->stripPointerCasts());
+      auto *ExtGV = dyn_cast_or_null<GlobalVariable>(Ext);
+      if (ExtGV)
+        if (auto *TI = dyn_cast_or_null<GlobalVariable>(
+                cast<GlobalVariable>(Ext)
+                    ->getInitializer()
+                    ->getOperand(ExtensionDefFieldType::ET_TARGET_TYPE)
+                    ->stripPointerCasts());
+            TI && TI->isCJTypeInfo() && TI->hasInitializer())
+          RewriteTypeInfos.push_back(TI);
+      if (isa<ConstantPointerNull>(Ext) ||
+          !DCE.AliveGlobals.count(cast<GlobalVariable>(Ext))) {
+        NewElements[NextDeadIndex] = Ext;
+        DeadGVIndex[NextDeadIndex] = I;
+        OldToNew[I] = NextDeadIndex--;
+        continue;
+      }
+      NewElements[NextLiveIndex] = Ext;
+      OldToNew[I] = NextLiveIndex++;
+    }
+    NextDeadIndex = NumElements - 1;
+    while (NextLiveIndex < NextDeadIndex) {
+      OldToNew[DeadGVIndex[NextLiveIndex]] = NextDeadIndex;
+      OldToNew[DeadGVIndex[NextDeadIndex]] = NextLiveIndex;
+      std::swap(NewElements[NextLiveIndex++], NewElements[NextDeadIndex--]);
+    }
+    GV.setInitializer(ConstantArray::get(dyn_cast<ArrayType>(GV.getValueType()),
+                                         NewElements));
+    SmallVector<ConstantExpr *, 8> GEPUsers;
+    for (auto *U : GV.users()) {
+      auto *Expr = dyn_cast<ConstantExpr>(U);
+      if (Expr && Expr->getOpcode() == Instruction::GetElementPtr)
+        GEPUsers.push_back(Expr);
+    }
+    // Modify typeinfo and typetemplate using GV.
+    for (auto *Expr : GEPUsers) {
+      unsigned Op = Expr->getNumOperands() - 1;
+      auto *OldIndex = cast<ConstantInt>(Expr->getOperand(Op));
+      SmallVector<Constant *, 4> Operands;
+      Operands.reserve(Expr->getNumOperands());
+      for (Value *Operand : Expr->operands())
+        Operands.push_back(cast<Constant>(Operand));
+      Operands[Op] = ConstantInt::get(OldIndex->getType(),
+                                      OldToNew[OldIndex->getZExtValue()]);
+      Constant *NewExpr = Expr->getWithOperands(Operands);
+      if (NewExpr != Expr)
+        Expr->replaceAllUsesWith(NewExpr);
+    }
+    // Reset bitmap in typeinfo.
+    for (auto *TI : RewriteTypeInfos) {
+      auto *TIC = TI->getInitializer();
+      auto *StructInit = dyn_cast<ConstantStruct>(TIC);
+      SmallVector<Constant *, 8> Operands;
+      Operands.reserve(TIC->getNumOperands());
+      for (Value *Operand : TIC->operands())
+        Operands.push_back(cast<Constant>(Operand));
+      Operands[ClassInfoFieldType::CIT_ITABLE] = Constant::getNullValue(
+          Operands[ClassInfoFieldType::CIT_ITABLE]->getType());
+      Constant *New = ConstantStruct::get(
+          cast<StructType>(StructInit->getType()), Operands);
+      if (New != TIC)
+        TI->setInitializer(New);
+      if (isSafeToDestroyConstant(TIC))
+        TIC->destroyConstant();
+    }
+    // Delete dead users and constant.
+    GV.removeDeadConstantUsers();
+    if (isSafeToDestroyConstant(C))
+      C->destroyConstant();
   }
 }
 
