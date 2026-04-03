@@ -47,7 +47,7 @@ static cl::opt<bool>
 
 static cl::opt<bool>
     ClEnableCJTIE("enable-cangjie-typeinfo-elimination", cl::Hidden,
-                  cl::init(true),
+                  cl::init(false),
                   cl::desc("Enable cangjie typeinfo elimination"));
 
 STATISTIC(NumAliases  , "Number of global aliases removed");
@@ -152,7 +152,7 @@ void GlobalDCEPass::UpdateGVDependencies(GlobalValue &GV) {
                         << GV.getName() << "\n");
       continue;
     }
-    if (CJPipeline) {
+    if (CJPipeline && ClEnableCJTIE) {
       auto *Usee = dyn_cast<GlobalVariable>(&GV);
       auto *User = dyn_cast<GlobalVariable>(GVU);
       if (VFESafeVTables.count(User) && Usee && Usee->isCJTypeInfo())
