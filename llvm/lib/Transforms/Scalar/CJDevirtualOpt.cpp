@@ -467,6 +467,7 @@ PreservedAnalyses CJDevirtualOpt::run(LazyCallGraph::SCC &C,
                                       CGSCCAnalysisManager &AM,
                                       LazyCallGraph &CG,
                                       CGSCCUpdateResult &UR) const {
+  return PreservedAnalyses::all();
   FunctionAnalysisManager &FAM =
       AM.getResult<FunctionAnalysisManagerCGSCCProxy>(C, CG).getManager();
   auto LookupLoopInfo = [&FAM](Function &F) -> LoopInfo & {

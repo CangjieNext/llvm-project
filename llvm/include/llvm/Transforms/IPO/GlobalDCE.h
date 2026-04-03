@@ -140,6 +140,7 @@ struct CangjieDCE {
 
   void initTIE(Module &);
   void updateLiveExtensions();
+  void updateNonExternalExtensionDefs(Module &M);
   void rewriteExtensions(Module &);
   void rewriteLLVMUsed(Module &);
 };

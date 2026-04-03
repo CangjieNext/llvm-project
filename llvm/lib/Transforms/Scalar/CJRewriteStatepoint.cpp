@@ -84,7 +84,7 @@ static cl::opt<bool> PrintBasePointers("cj-spp-print-base-pointers", cl::Hidden,
                                        cl::init(false));
 
 static cl::opt<bool>
-    DisableCJRewrite("disable-cj-rewrite-statepoint", cl::init(false),
+    DisableCJRewrite("disable-cj-rewrite-statepoint", cl::init(true),
                      cl::desc("Do not run CJRewriteStatepoint"));
 // Cost threshold measuring when it is profitable to rematerialize value instead
 // of relocating it
