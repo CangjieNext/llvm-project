@@ -46,6 +46,7 @@ static lto::Config createConfig() {
   c.TimeTraceGranularity = config->timeTraceGranularity;
   c.OptLevel = config->ltoo;
   c.CGOptLevel = args::getCGOptLevel(config->ltoo);
+  c.OpaquePointers =false;
   if (config->saveTemps)
     checkError(c.addSaveTemps(config->outputFile.str() + ".",
                               /*UseInputModulePath=*/true));
