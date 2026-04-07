@@ -1481,6 +1481,9 @@ std::vector<OwnedPtr<AST::Package>> CangjieDeclMap::CreateFakePackage() {
     auto file = MakeOwned<AST::File>();
     file->fileName = std::string("$CapturedVars.cj");
     file->decls = std::move(m_captured_vars);
+    for (auto& decl : file->decls) {
+      decl->EnableAttr(Attribute::IMPORTED);
+    }
     auto package = MakeOwned<AST::Package>(LOCAL_FUNC_CAPTUREDVAR);
     package->EnableAttr(Attribute::IMPORTED);
     package->files.emplace_back(std::move(file));
@@ -1491,6 +1494,9 @@ std::vector<OwnedPtr<AST::Package>> CangjieDeclMap::CreateFakePackage() {
     file->fileName = std::string("locals.cj");
     AddImportSpec(file, LOCAL_PACKAGE_NAME);
     file->decls = std::move(m_local_decls);
+    for (auto& decl : file->decls) {
+      decl->EnableAttr(Attribute::IMPORTED);
+    }
     auto package = MakeOwned<AST::Package>(LOCAL_PACKAGE_NAME);
     package->EnableAttr(Attribute::IMPORTED);
     package->files.emplace_back(std::move(file));
@@ -1504,6 +1510,7 @@ std::vector<OwnedPtr<AST::Package>> CangjieDeclMap::CreateFakePackage() {
       file->begin = tmpDecl->begin;
       tmpDecl->curFile = file.get();
     }
+    tmpDecl->EnableAttr(Attribute::IMPORTED);
   }
   file->decls = std::move(m_global_decls);
   auto package = MakeOwned<AST::Package>(!m_current_pkgname.empty() ? m_current_pkgname : "default");
