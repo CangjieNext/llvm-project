@@ -60,6 +60,7 @@ static constexpr Log::Category g_categories[] = {
     {{"types"}, {"log type system related activities"}, LLDBLog::Types},
     {{"unwind"}, {"log stack unwind activities"}, LLDBLog::Unwind},
     {{"watch"}, {"log watchpoint related activities"}, LLDBLog::Watchpoints},
+    {{"cjthread"}, {"log CJThread related activities"}, LLDBLog::CJThread},
     {{"on-demand"},
      {"log symbol on-demand related activities"},
      LLDBLog::OnDemand},
@@ -71,7 +72,8 @@ static Log::Channel g_log_channel(g_categories,
                                       LLDBLog::Breakpoints |
                                       LLDBLog::Watchpoints | LLDBLog::Step |
                                       LLDBLog::State | LLDBLog::Symbols |
-                                      LLDBLog::Target | LLDBLog::Commands);
+                                      LLDBLog::Target | LLDBLog::Commands |
+                                      LLDBLog::CJThread);
 
 template <> Log::Channel &lldb_private::LogChannelFor<LLDBLog>() {
   return g_log_channel;
