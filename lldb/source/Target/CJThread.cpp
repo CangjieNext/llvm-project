@@ -273,16 +273,70 @@ void DumpValueObjectRecursive(ValueObject *valobj, int indent = 0) {
  * - On macOS, tid_t is 8 bytes
  * - On other platforms, tid_t is 4 bytes
  */
-constexpr int offset_of_ScheduleManager_dot_allCJThreadList = 128;
-constexpr int offset_of_CJThread_dot_allCJThreadDulink = 120;
-constexpr int offset_of_CJThread_dot_context = 24;
-constexpr int offset_of_CJThread_dot_thread = 16;
-constexpr int offset_of_CJThread_dot_state = 96;
-constexpr int offset_of_CJThread_dot_id = 336;
-constexpr int offset_of_CJThread_dot_name = 344;
-constexpr int offset_of_Thread_dot_tid = 104;
-constexpr int offset_of_boundThread = 0x138;
-constexpr int offset_of_boundCJThread = 0xc8;
+struct CJThreadLayoutOffsets {
+    int offset_of_ScheduleManager_dot_allCJThreadList;
+    int offset_of_CJThread_dot_allCJThreadDulink;
+    int offset_of_CJThread_dot_context;
+    int offset_of_CJThread_dot_thread;
+    int offset_of_CJThread_dot_state;
+    int offset_of_CJThread_dot_id;
+    int offset_of_CJThread_dot_name;
+    int offset_of_Thread_dot_tid;
+    int offset_of_boundThread;
+    int offset_of_boundCJThread;
+};
+
+constexpr CJThreadLayoutOffsets offsets_x86_linux = {
+    .offset_of_ScheduleManager_dot_allCJThreadList = 128,
+    .offset_of_CJThread_dot_allCJThreadDulink = 120,
+    .offset_of_CJThread_dot_context = 24,
+    .offset_of_CJThread_dot_thread = 16,
+    .offset_of_CJThread_dot_state = 96,
+    .offset_of_CJThread_dot_id = 336,
+    .offset_of_CJThread_dot_name = 344,
+    .offset_of_Thread_dot_tid = 104,
+    .offset_of_boundThread = 0x138,
+    .offset_of_boundCJThread = 0xc8
+};
+
+constexpr CJThreadLayoutOffsets offsets_x86_windows = {
+    .offset_of_ScheduleManager_dot_allCJThreadList = 64,
+    .offset_of_CJThread_dot_allCJThreadDulink = 320,
+    .offset_of_CJThread_dot_context = 24,
+    .offset_of_CJThread_dot_thread = 16,
+    .offset_of_CJThread_dot_state = 296,
+    .offset_of_CJThread_dot_id = 536,
+    .offset_of_CJThread_dot_name = 544,
+    .offset_of_Thread_dot_tid = 80,
+    .offset_of_boundThread = 376,
+    .offset_of_boundCJThread = 512
+};
+
+constexpr CJThreadLayoutOffsets offsets_aarch64_linux = {
+    .offset_of_ScheduleManager_dot_allCJThreadList = 144,
+    .offset_of_CJThread_dot_allCJThreadDulink = 320,
+    .offset_of_CJThread_dot_context = 24,
+    .offset_of_CJThread_dot_thread = 16,
+    .offset_of_CJThread_dot_state = 296,
+    .offset_of_CJThread_dot_id = 536,
+    .offset_of_CJThread_dot_name = 544,
+    .offset_of_Thread_dot_tid = 80,
+    .offset_of_boundThread = 376,
+    .offset_of_boundCJThread = 512
+};
+
+constexpr CJThreadLayoutOffsets offsets_aarch64_darwin = {
+    .offset_of_ScheduleManager_dot_allCJThreadList = 176,
+    .offset_of_CJThread_dot_allCJThreadDulink = 240,
+    .offset_of_CJThread_dot_context = 24,
+    .offset_of_CJThread_dot_thread = 16,
+    .offset_of_CJThread_dot_state = 216,
+    .offset_of_CJThread_dot_id = 456,
+    .offset_of_CJThread_dot_name = 464,
+    .offset_of_Thread_dot_tid = 80,
+    .offset_of_boundThread = 432,
+    .offset_of_boundCJThread = 296
+};
 
 static bool ReadMemoryChecked(Process &process, lldb::addr_t addr, void *dst,
                               size_t size, Status &status) {
@@ -378,9 +432,35 @@ std::vector<CJThreadInfoOverview> CollectAllCJThreads(Process &process,
     return results;
   }
 
+  llvm::Triple triple = process.GetSystemArchitecture().GetTriple();
+  CJThreadLayoutOffsets offsets;
+
+  if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
+    if (triple.getOS() == llvm::Triple::OSType::Win32) {
+      offsets = offsets_x86_windows;
+    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
+      offsets = offsets_x86_linux;
+    } else {
+      status.SetErrorString("Unsupported OS for x86_64");
+      return results;
+    }
+  } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
+    if (triple.getOS() == llvm::Triple::OSType::Darwin) {
+      offsets = offsets_aarch64_darwin;
+    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
+      offsets = offsets_aarch64_linux;
+    } else {
+      status.SetErrorString("Unsupported OS for aarch64");
+      return results;
+    }
+  } else {
+    status.SetErrorString("Unsupported architecture");
+    return results;
+  }
+
   // allCJThreadList is a dulink list head inside ScheduleManager
   lldb::addr_t list_head =
-      base_addr + offset_of_ScheduleManager_dot_allCJThreadList;
+      base_addr + offsets.offset_of_ScheduleManager_dot_allCJThreadList;
 
   // First dulink entry (head->next)
   lldb::addr_t dulink_entry = 0;
@@ -391,33 +471,33 @@ std::vector<CJThreadInfoOverview> CollectAllCJThreads(Process &process,
   // Traverse the circular doubly linked list
   while (dulink_entry != list_head && dulink_entry != 0) {
     lldb::addr_t cjthread_addr =
-        dulink_entry - offset_of_CJThread_dot_allCJThreadDulink;
+        dulink_entry - offsets.offset_of_CJThread_dot_allCJThreadDulink;
 
     CJThreadInfoOverview overview{};
     overview.cjthread_ptr = cjthread_addr;
 
     // CJThread::state
     if (!ReadMemoryChecked(
-            process, cjthread_addr + offset_of_CJThread_dot_state,
+            process, cjthread_addr + offsets.offset_of_CJThread_dot_state,
             &overview.state, sizeof(overview.state), status))
       break;
 
     if (!ReadMemoryChecked(
-            process, cjthread_addr + offset_of_CJThread_dot_name,
+            process, cjthread_addr + offsets.offset_of_CJThread_dot_name,
             &overview.name, 32, status))
       break;
 
     // CJThread::thread
     if (!ReadMemoryChecked(
-            process, cjthread_addr + offset_of_CJThread_dot_thread,
+            process, cjthread_addr + offsets.offset_of_CJThread_dot_thread,
             &overview.thread_ptr, sizeof(overview.thread_ptr), status))
       break;
 
     // CJThread::context
-    overview.context_ptr = cjthread_addr + offset_of_CJThread_dot_context;
+    overview.context_ptr = cjthread_addr + offsets.offset_of_CJThread_dot_context;
 
     // CJThread::id
-    if (!ReadMemoryChecked(process, cjthread_addr + offset_of_CJThread_dot_id,
+    if (!ReadMemoryChecked(process, cjthread_addr + offsets.offset_of_CJThread_dot_id,
                            &overview.id, sizeof(overview.id), status))
       break;
 
@@ -426,7 +506,7 @@ std::vector<CJThreadInfoOverview> CollectAllCJThreads(Process &process,
     if (overview.thread_ptr != 0) {
       uint64_t tid_val = 0;
       if (!ReadMemoryChecked(process,
-                             overview.thread_ptr + offset_of_Thread_dot_tid,
+                             overview.thread_ptr + offsets.offset_of_Thread_dot_tid,
                              &tid_val, sizeof(tid_val), status))
         break;
       overview.tid = tid_val;
@@ -648,14 +728,38 @@ bool CJThread::BindCJThreadToOSThread(Process &process) {
   if (m_cjthread_info.state != CJThreadState::eRunning) {
     return false;
   }
+
+  llvm::Triple triple = process.GetSystemArchitecture().GetTriple();
+  CJThreadLayoutOffsets offsets;
+
+  if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
+    if (triple.getOS() == llvm::Triple::OSType::Win32) {
+      offsets = offsets_x86_windows;
+    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
+      offsets = offsets_x86_linux;
+    } else {
+      return false;
+    }
+  } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
+    if (triple.getOS() == llvm::Triple::OSType::Darwin) {
+      offsets = offsets_aarch64_darwin;
+    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
+      offsets = offsets_aarch64_linux;
+    } else {
+      return false;
+    }
+  } else {
+    return false;
+  }
+
   Status error;
   lldb::addr_t addr = 0;
-  process.WriteMemory(m_cjthread_info.cjthread_ptr + offset_of_boundThread,
+  process.WriteMemory(m_cjthread_info.cjthread_ptr + offsets.offset_of_boundThread,
                       &m_cjthread_info.thread_ptr, sizeof(lldb::addr_t), error);
-  process.WriteMemory(m_cjthread_info.thread_ptr + offset_of_boundCJThread,
+  process.WriteMemory(m_cjthread_info.thread_ptr + offsets.offset_of_boundCJThread,
                       &m_cjthread_info.cjthread_ptr, sizeof(lldb::addr_t), error);
   process.SetBindCJThreadID(GetCJThreadID());
-  Log *log = GetLog(LLDBLog::step);
+  Log *log = GetLog(LLDBLog::Step);
   if (log) {
     LLDB_LOGF(log, "bind cjthread %lld to os thread %lld", GetCJThreadID(), GetHostThreadID());
   }
@@ -663,14 +767,37 @@ bool CJThread::BindCJThreadToOSThread(Process &process) {
 }
 
 bool CJThread::UnBindCJThreadToOSThread(Process &process) {
+  llvm::Triple triple = process.GetSystemArchitecture().GetTriple();
+  CJThreadLayoutOffsets offsets;
+
+  if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
+    if (triple.getOS() == llvm::Triple::OSType::Win32) {
+      offsets = offsets_x86_windows;
+    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
+      offsets = offsets_x86_linux;
+    } else {
+      return false;
+    }
+  } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
+    if (triple.getOS() == llvm::Triple::OSType::Darwin) {
+      offsets = offsets_aarch64_darwin;
+    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
+      offsets = offsets_aarch64_linux;
+    } else {
+      return false;
+    }
+  } else {
+    return false;
+  }
+
   Status error;
   lldb::addr_t addr = 0;
-  process.WriteMemory(m_cjthread_info.cjthread_ptr + offset_of_boundThread,
+  process.WriteMemory(m_cjthread_info.cjthread_ptr + offsets.offset_of_boundThread,
                       &addr, sizeof(lldb::addr_t), error);
-  process.WriteMemory(m_cjthread_info.thread_ptr + offset_of_boundCJThread,
+  process.WriteMemory(m_cjthread_info.thread_ptr + offsets.offset_of_boundCJThread,
                       &addr, sizeof(lldb::addr_t), error);
   process.SetBindCJThreadID(UINT64_MAX);
-  Log *log = GetLog(LLDBLog::step);
+  Log *log = GetLog(LLDBLog::Step);
   if (log) {
     LLDB_LOGF(log, "Unbind cjthread %lld", GetCJThreadID());
   }
@@ -678,13 +805,12 @@ bool CJThread::UnBindCJThreadToOSThread(Process &process) {
 }
 
 class ContinueUntil {
-  Target &m_target;
+  Target &target;
   lldb::break_id_t m_until_bp_id;
   std::vector<lldb::break_id_t> m_disabled_points;
 public:
-  ContinueUntil(Target &target, lldb::CJThreadSP cjthread, lldb::addr_t pc)
-  : m_target(target), m_until_bp_id(LLDB_INVALID_BREAK_ID) {
-    // TODO: disable all other breakpoints which are enabled
+  ContinueUntil(Target &target, lldb::CJThreadSP cjthread)
+  : target(target), m_until_bp_id(LLDB_INVALID_BREAK_ID) {
     size_t num_bps = target.GetBreakpointList().GetSize();
     for (size_t i = 0; i < num_bps; ++i) {
         lldb::BreakpointSP bp = target.GetBreakpointList().GetBreakpointAtIndex(i);
@@ -694,11 +820,28 @@ public:
         }
     }
 
-    lldb::BreakpointSP until_bp = target.CreateBreakpoint(pc, true, false);
-    if (until_bp != nullptr) {
-      m_until_bp_id = until_bp->GetID();
-      until_bp->SetCJThreadID(cjthread->GetID());
-      until_bp->SetBreakpointKind("continue-until-target");
+    lldb::addr_t break_addr = LLDB_INVALID_ADDRESS;
+    uint32_t num_frames = cjthread->GetStackFrameCount();
+    for (uint32_t i = 0; i < num_frames; ++i) {
+      lldb::StackFrameSP frame = cjthread->GetStackFrameAtIndex(i);
+      if (!frame) continue;
+      lldb::SymbolContext sc = frame->GetSymbolContext(lldb::eSymbolContextModule);
+      if (sc.module) {
+        const char *module_name = sc.module->GetFileSpec().GetFilename().GetCString();
+        if (module_name && llvm::StringRef(module_name).contains("runtime")) {
+          continue;
+        }
+      }
+      break_addr = frame->GetPC();
+      break;
+    }
+    if (break_addr != LLDB_INVALID_ADDRESS) {
+      lldb::BreakpointSP until_bp = target.CreateBreakpoint(break_addr, true, false);
+      if (until_bp != nullptr) {
+        m_until_bp_id = until_bp->GetID();
+        until_bp->SetCJThreadID(cjthread->GetID());
+        until_bp->SetBreakpointKind("continue-until-target");
+      }
     }
   }
 
@@ -707,9 +850,9 @@ public:
   }
 
   ~ContinueUntil() {
-    m_target.RemoveBreakpointByID(m_until_bp_id);
+    m.RemoveBreakpointByID(m_until_bp_id);
     for (lldb::break_id_t bid : m_disabled_points) {
-      lldb::BreakpointSP bp = m_target.GetBreakpointByID(bid);
+      lldb::BreakpointSP bp = m.GetBreakpointByID(bid);
       if (bp) bp->SetEnabled(true);
     }
   }
@@ -717,14 +860,13 @@ public:
 
 bool CJThread::WaitUntilCJThreadScheduled(Target &target, lldb::CJThreadSP selected_thread, Status error) {
   unsigned saved_cjt_id = selected_thread->GetID();
-  uint64_t pc = selected_thread->GetRegisterContext()->GetPC();
   lldb::ProcessSP process_sp = selected_thread->GetProcess();
   ThreadList &cjtlist = process_sp->GetCJThreadList();
-  ContinueUntil cont_until(target, selected_thread, pc);
+  ContinueUntil cont_until(target, selected_thread);
 
-  Log *log = GetLog(LLDBLog::step);
+  Log *log = GetLog(LLDBLog::Step);
   if (log) {
-    LLDB_LOGF(log, "WaitUntilCJThreadScheduled for %lld", GetCJThreadID());
+    LLDB_LOGF(log, "WaitUntilCJThreadScheduled for %lld", selected_thread->GetCJThreadID());
   }
   do {
     StreamString stream_after_resume;
