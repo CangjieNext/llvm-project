@@ -42,6 +42,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/IPO/WholeProgramDevirt.h"
+#include "llvm/Transforms/Scalar/CJAnnotationOutline.h"
 #include "llvm/Transforms/Scalar/CJBarrierOpt.h"
 #include "llvm/Transforms/Scalar/CJBarrierSplit.h"
 #include "llvm/Transforms/Scalar/CJRewriteStatepoint.h"
@@ -356,6 +357,7 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   auto addCangjiePasses = [&]() {
     if (CJPipeline) {
       MPM.addPass(CJSpecificOpt(OptLevel));
+      MPM.addPass(CJAnnotationOutline());
       MPM.addPass(PlaceSafepoints());
       MPM.addPass(CJBarrierOpt());
       MPM.addPass(CJRewriteStatepoint(OptLevel));

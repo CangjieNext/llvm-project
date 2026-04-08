@@ -153,6 +153,7 @@
 #include "llvm/Transforms/Scalar/AlignmentFromAssumptions.h"
 #include "llvm/Transforms/Scalar/AnnotationRemarks.h"
 #include "llvm/Transforms/Scalar/BDCE.h"
+#include "llvm/Transforms/Scalar/CJAnnotationOutline.h"
 #include "llvm/Transforms/Scalar/CJBarrierOpt.h"
 #include "llvm/Transforms/Scalar/CJBarrierSplit.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
@@ -1277,6 +1278,7 @@ Error PassBuilder::parseModulePass(ModulePassManager &MPM,
       }
       if (CJPipeline && !CangjieLTOPreOpt) {
         MPM.addPass(CJSpecificOpt(L.getSpeedupLevel()));
+        MPM.addPass(CJAnnotationOutline());
         MPM.addPass(PlaceSafepoints());
         MPM.addPass(CJBarrierOpt());
         MPM.addPass(CJRewriteStatepoint(L.getSpeedupLevel()));
