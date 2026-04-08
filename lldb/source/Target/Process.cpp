@@ -4093,7 +4093,7 @@ void Process::ProcessEventData::DoOnRemoval(Event *event_ptr) {
       cjthread->UnBindCJThreadToOSThread(*process_sp);
     }
   }
-  auto cjthread = std::dynamic_pointer_cast<CJThread>(process_sp->GetCJThreadList().GetSelectedThread());
+  auto cjthread = process_sp->FindCJThreadByOSThreadID(process_sp->GetThreadList().GetSelectedThread()->GetID());
   if (cjthread) {
     cjthread->BindCJThreadToOSThread(*process_sp);
   }
