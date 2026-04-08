@@ -3,6 +3,7 @@ add_llvm_component_library(LLVMScalarOpts
   AlignmentFromAssumptions.cpp
   AnnotationRemarks.cpp
   BDCE.cpp
+  CJAnnotationInitDedup.cpp
   CJIRVerifier.cpp
   CJBarrierSplit.cpp
   CJDevirtualOpt.cpp
