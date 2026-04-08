@@ -327,6 +327,9 @@ bool lldb_private::formatters::EnumOptionSummaryProvider(
     }
 
     auto id = type->GetValueAsUnsigned(0);
+    if (id >= valueSP->GetNumChildren()) {
+      continue;
+    }
     auto real_ctor = valueSP->GetChildAtIndex(id, true);
     if (!real_ctor) {
       continue;
@@ -520,6 +523,9 @@ public:
           stringArrBound++;
           rem = stringArr[stringArrBound - 1] / anyBase;
           stringArr[stringArrBound - 1] %= anyBase;
+          if (stringArrBound >= stringArr.size()) {
+            break;
+          }
       }
       return stringArrBound;
     }
@@ -627,6 +633,9 @@ public:
       decimalStrArr = _bigInt + decimalStrArr;
       return decimalStrArr;
     }
+    if (_scale > INT32_MAX) {
+      return "";
+    }
     std::string unscaleValStrArr = _bigInt;
     // scale value bigger than 0, need insert decimal point to corresponding position.
     // precision is bigger than 0 and scale range [0, Int32.Max]
@@ -649,7 +658,7 @@ public:
     } else {
       // decimalPointIndex less than 0, decimal point in the left of bigint value.
       // when decimalPointIndex less than 0, it's range [-Int32.Max, 0], abs will nerver overflow.
-      std::string temp(unscaleValStrArr.size() + abs(decimalPointIndex) + 2, '0');
+      std::string temp(unscaleValStrArr.size() + abs(decimalPointIndex) + 3, '0');
       decimalStrArr = temp;
       if (unscaleValStrArr[0] == '-') {
         decimalStrArr[0] = '-';

@@ -288,12 +288,13 @@ bool CommandObjCJThreadCommon::GetCJThreadStatus(ThreadSP thread, CommandReturnO
   Status error;
   Stream &stream = result.GetOutputStream();
   if (!cjthread_context) {
-     result.AppendErrorWithFormat("invalid cjthread context");
+    result.AppendErrorWithFormat("invalid cjthread context");
+    return false;
   }
   GetDescription(stream, error, cjthread_context);
   if (error.Fail()) {
     result.AppendErrorWithFormat("%s", error.AsCString());
-     return false;
+    return false;
   }
   HandOneCJThread(thread, cjthread_context, error);
   if (error.Fail()) {
