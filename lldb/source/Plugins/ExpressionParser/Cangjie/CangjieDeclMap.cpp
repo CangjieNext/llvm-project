@@ -722,6 +722,9 @@ void CangjieDeclMap::SetGenericDeclBySubclass(Ptr<AST::RefType> refType, std::st
     name = DeletePrefixOfType(name);
   }
   auto idLen = refType->ref.identifier.Val().size();
+  if (name.size() < idLen + 2) {  // 2 is size of string "<>"
+    return;
+  }
   auto args = name.substr(idLen + 1, name.size() - idLen - 2);
   auto elements = builder.SplitTypeName(args);
   // The generic type parameter of the superclass comes from the subclass or instancetiated.
@@ -845,7 +848,11 @@ OwnedPtr<GenericConstraint> CangjieDeclMap::CreateGenericConstraintsDecl(Ptr<AST
   auto gc = MakeOwned<GenericConstraint>();
   OwnedPtr<RefType> t = MakeOwned<RefType>();
   std::string gn = type.GetTypeName().AsCString();
-  t->ref.identifier = gn.substr(GENERIC_TYPE_PREFIX_NAME.size(), gn.size());
+  if (GENERIC_TYPE_PREFIX_NAME.size() > gn.size()) {
+    t->ref.identifier = gn;
+  } else {
+    t->ref.identifier = gn.substr(GENERIC_TYPE_PREFIX_NAME.size(), gn.size());
+  }
   for (auto& gen:decl->generic->typeParameters) {
     if (gen->identifier.Val() == t->ref.identifier.Val()) {
       t->ref.target = gen;
@@ -2029,10 +2036,12 @@ CompilerType CangjieDeclMap::GetDynamicEnumType(Ptr<AST::Ty>& ty, std::string ty
     return enum_type;
   }
   // case: enum with args , compilerType is struct type with ctor.
-  auto pos = typeName.find(PACKAGE_SUFFIX) + PACKAGE_SUFFIX.size();
-  CJC_ASSERT(pos != std::string::npos);
-  auto enumPrefix = GetEnumPrefix(genericName);
-  typeName = typeName.substr(0, pos) + enumPrefix + typeName.substr(pos);
+  auto pos = typeName.find(PACKAGE_SUFFIX);
+  if (pos != std::string::npos) {
+    pos = pos + PACKAGE_SUFFIX.size();
+    auto enumPrefix = GetEnumPrefix(genericName);
+    typeName = typeName.substr(0, pos) + enumPrefix + typeName.substr(pos);
+  }
 
   TypeSystemClang* ast = this->GetTypeSystem();
   CompilerType dynamic_type = ast->CreateRecordType(nullptr, OptionalClangModuleID(), lldb::eAccessPublic,
