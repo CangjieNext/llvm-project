@@ -15,10 +15,10 @@ source_filename = "core"
 
 ; CHECK: @res.reflectStr = internal global [4 x i8] c"res\00", align 1 #1
 ; CHECK: @DefaultHasher.ti.fieldNames = internal global %DefaultHasher.ti.fieldNamesType { i8* getelementptr inbounds ([4 x i8], [4 x i8]* @res.reflectStr, i32 0, i32 0) } #1
-; CHECK: @DefaultHasher.ti.reflect = internal global %DefaultHasher.ti.reflectType { i8* bitcast (%DefaultHasher.ti.fieldNamesType* @DefaultHasher.ti.fieldNames to i8*) } #1
+; CHECK: @DefaultHasher.ti.reflect = internal unnamed_addr global %DefaultHasher.ti.reflectType { i8* bitcast (%DefaultHasher.ti.fieldNamesType* @DefaultHasher.ti.fieldNames to i8*) } #1
 ; CHECK: @SeqCst.reflectStr = internal global [7 x i8] c"SeqCst\00", align 1 #1
 ; CHECK: @"std.core:MemoryOrder.ti.enumctors" = internal global %"std.core:MemoryOrder.ti.enumctorsType" { [7 x i8]* @SeqCst.reflectStr, i8* null } #1
-; CHECK: @"std.core:MemoryOrder.ti.reflect" = internal global %"std.core:MemoryOrder.ti.reflectType" { i8* bitcast (%"std.core:MemoryOrder.ti.enumctorsType"* @"std.core:MemoryOrder.ti.enumctors" to i8*), i32 8192, i32 1 } #1
+; CHECK: @"std.core:MemoryOrder.ti.reflect" = internal unnamed_addr global %"std.core:MemoryOrder.ti.reflectType" { i8* bitcast (%"std.core:MemoryOrder.ti.enumctorsType"* @"std.core:MemoryOrder.ti.enumctors" to i8*), i32 8192, i32 1 } #1
 ; CHECK: attributes #1 = { "CFileReflect" }
 
 

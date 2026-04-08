@@ -650,6 +650,9 @@ static Constant *createReflectGV(Module &M, std::string &Str, StructType *ST,
   GlobalVariable *GV = dyn_cast<GlobalVariable>(M.getOrInsertGlobal(Str, ST));
   GV->setInitializer(ConstantStruct::get(ST, BodyVec));
   GV->setLinkage(GlobalValue::InternalLinkage);
+  if (StringRef(Str).endswith(".reflect")) {
+    GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+  }
   GV->addAttribute("CFileReflect");
   return GV;
 }

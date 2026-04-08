@@ -4,6 +4,7 @@ add_llvm_component_library(LLVMScalarOpts
   AnnotationRemarks.cpp
   BDCE.cpp
   CJAllocationSizeCheck.cpp
+  CJAnnotationInitDedup.cpp
   CJIRVerifier.cpp
   CJBarrierSplit.cpp
   CJDevirtualOpt.cpp
