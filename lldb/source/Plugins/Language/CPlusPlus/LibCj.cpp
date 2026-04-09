@@ -218,6 +218,7 @@ bool CjOptionSyntheticFrontEnd::Update() {
   ValueObjectSP non_synth_valobj = m_backend.GetNonSyntheticValue();
   if (!non_synth_valobj) {
     m_some = nullptr;
+    return false;
   }
 
   if (non_synth_valobj->IsPointerType()) {
@@ -241,13 +242,13 @@ bool CjOptionSyntheticFrontEnd::Update() {
     Status err;
     value = value->Dereference(err);
   }
-
-  if (value != nullptr) {
-    auto dynamic = value->GetDynamicValue(eDynamicDontRunTarget);
-    if (dynamic != nullptr) {
-      m_dynamic = true;
-      value = dynamic;
-    }
+  if (!value) {
+    return false;
+  }
+  auto dynamic = value->GetDynamicValue(eDynamicDontRunTarget);
+  if (dynamic != nullptr) {
+    m_dynamic = true;
+    value = dynamic;
   }
 
   if (value->HasSyntheticValue()) {
