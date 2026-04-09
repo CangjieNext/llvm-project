@@ -59,6 +59,8 @@ const seconds kReadTimeout(20);
 const char *kSocketNamespaceAbstract = "localabstract";
 const char *kSocketNamespaceFileSystem = "localfilesystem";
 
+#define MAX_PACKET_SIZE   67108864U  // 64MB
+
 Status ReadAllBytes(Connection &conn, void *buffer, size_t size) {
   Status error;
   ConnectionStatus status;
@@ -541,6 +543,9 @@ Status HdcClient::PullFileChunk(std::vector<char> &buffer) {
     return Status("Compression is not supported");
 
   uint32_t read_bytes = std::get<3>(*transfer_payload);
+  if (read_bytes >= MAX_PACKET_SIZE) {
+    return Status("Read transfer payload too large: %u", read_bytes);
+  }
   buffer.resize(read_bytes, 0);
   error = ReadAllBytes(buffer.data(), buffer.size());
   if (error.Fail())
@@ -581,6 +586,9 @@ Status HdcClient::RecvFile(const FileSpec &src, const FileSpec &dst) {
     error = PullFileChunk(buf);
     if (error.Fail())
       return error;
+    if (buf.empty()) {
+      break;
+    }
     dst_file.write(buf.data(), buf.size());
     cur_size += buf.size();
   }
@@ -731,6 +739,9 @@ Status HdcClient::SendMessage(llvm::StringRef packet, const bool reconnect) {
       return error;
     }
   }
+  if (packet.size() >= MAX_PACKET_SIZE) {
+    return Status("Send message packet too large: %lu", packet.size());
+  }
 
   unsigned msg_len = packet.size() + 1;
   const unsigned vector_size = 128;
@@ -765,6 +776,9 @@ Status HdcClient::ReadMessage(std::vector<char> &message) {
   }
 
   packet_len = htonl(packet_len);
+  if (packet_len >= MAX_PACKET_SIZE) {
+    return Status("Read message packet too large: %u", packet_len);
+  }
   message.resize(packet_len, 0);
   error = ReadAllBytes(&message[0], packet_len);
   if (error.Fail()) {
@@ -840,6 +854,9 @@ Status HdcClient::ReadResponseStatus(const char *expected) {
     return error;
   }
   len = htonl(len);
+  if (len >= MAX_PACKET_SIZE) {
+    return Status("Read response packet too large: %u", len);
+  }
   const unsigned vector_size = 128;
   llvm::SmallVector<char, vector_size> message(len + 1);
   error = ReadAllBytes(message.data(), len);
