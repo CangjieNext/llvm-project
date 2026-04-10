@@ -72,8 +72,8 @@ void CangjieExpressionParser::PrepareContextInfo(ExecutionContext &exeCtx, Cangj
   }
   m_in_class_context = true;
   if (sym_ctx.function) {
-    std::string classname = thisVar->GetTypeName().GetCString();
-    std::string funcscope = sym_ctx.function->GetNameNoArguments().GetCString();
+    std::string classname = SafeAsCString(thisVar->GetTypeName());
+    std::string funcscope = SafeAsCString(sym_ctx.function->GetNameNoArguments());
     auto pos = funcscope.rfind("::");
     auto funcname = (pos == std::string::npos) ? funcscope: funcscope.substr(pos + 2);
     m_in_constructor = (funcname == "init" || funcname == classname);

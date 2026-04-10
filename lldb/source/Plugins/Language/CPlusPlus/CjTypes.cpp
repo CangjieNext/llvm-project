@@ -132,8 +132,6 @@ bool lldb_private::formatters::CStringSummaryProvider(
     // Need delete cpoint after CString refactor to built-in on Jet backend.
     cpoint = chars;
   }
-  time_t currentTime;
-  struct tm* localTime = localtime(&currentTime);
   stream.Printf("%s", cpoint->GetSummaryAsCString());
 
   return true;

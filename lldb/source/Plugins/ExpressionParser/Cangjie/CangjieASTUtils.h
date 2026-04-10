@@ -100,6 +100,7 @@ bool IsGenericFromFuncDecl(std::vector<std::string>& instantiatedNames, std::str
 std::string GetGenericDeclName(const std::string& type_name);
 std::string GetGenericParamDeclName(const std::string& name);
 std::string GetTypeNameWithoutPrefix(ConstString type_name, std::string& pkgname);
+std::string SafeAsCString(const ConstString& cs);
 }
 
 #endif

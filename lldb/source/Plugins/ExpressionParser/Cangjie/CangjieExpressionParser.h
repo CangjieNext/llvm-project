@@ -75,11 +75,11 @@ private:
                                           ///to use when reporting used
                                           ///variables.
   lldb_private::Materializer::PersistentVariableDelegate
-      *m_result_delegate; ///< If non-NULL, used to report expression results to
+      *m_result_delegate = nullptr; ///< If non-NULL, used to report expression results to
                           ///ClangUserExpression.
 
   lldb_private::Materializer::PersistentVariableDelegate
-      *m_error_result_delegate; ///< If non-NULL, used to report expression results to
+      *m_error_result_delegate = nullptr; ///< If non-NULL, used to report expression results to
                           ///ClangUserExpression.
   std::vector<std::string> m_include_directories;
   std::string m_result_type_name;

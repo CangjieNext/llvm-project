@@ -584,8 +584,10 @@ Status HdcClient::RecvFile(const FileSpec &src, const FileSpec &dst) {
   std::vector<char> buf;
   while (cur_size < all_size) {
     error = PullFileChunk(buf);
-    if (error.Fail())
+    if (error.Fail()) {
+      dst_file.close();
       return error;
+    }
     if (buf.empty()) {
       break;
     }
@@ -594,11 +596,15 @@ Status HdcClient::RecvFile(const FileSpec &src, const FileSpec &dst) {
   }
 
   error = SendCommandMessage(HdcCommand::CMD_FILE_FINISH, {});
-  if (error.Fail())
+  if (error.Fail()) {
+    dst_file.close();
     return error;
+  }
   error = ReadResponseStatus("FileTransfer finish");
-  if (error.Fail())
+  if (error.Fail()) {
+    dst_file.close();
     return error;
+  }
 
   dst_file.close();
   if (dst_file.has_error())

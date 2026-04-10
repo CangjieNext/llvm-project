@@ -83,7 +83,7 @@ std::string lldb_private::GetEnumNameWithoutPrefix(std::string& name, std::strin
 
 std::string lldb_private::GetTypeNameWithoutPrefix(ConstString type_name, std::string& pkgname)
 {
-    std::string name = type_name.GetCString();
+    std::string name = SafeAsCString(type_name);
     name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
     if (EndsWith(name, "*")) {
       name = name.substr(0, name.size() - 1);
@@ -166,7 +166,7 @@ std::string lldb_private::GetSubNameWithoutPkgname(std::string& name, std::strin
 
 std::string lldb_private::GetPkgNameFromCompilerUnit(const CompileUnit& compUnit)
 {
-  std::string diFileName = compUnit.GetPrimaryFile().GetFilename().GetCString();
+  std::string diFileName = SafeAsCString(compUnit.GetPrimaryFile().GetFilename());
   return diFileName.substr(diFileName.find('-') + 1);
 }
 
@@ -222,13 +222,13 @@ OwnedPtr<AST::Type> CangjieASTBuiler::CreateFuncType(Ptr<Decl> target, std::stri
   auto paramCount = func_type.GetFunctionArgumentCount();
   for (int i = 0; i < paramCount; i++) {
     auto paramType = func_type.GetFunctionArgumentAtIndex(i);
-    std::string paramTypeStr = paramType.GetTypeName().GetCString();
+    std::string paramTypeStr = SafeAsCString(paramType.GetTypeName());
     ret->paramTypes.emplace_back(CreateAstType(AstTypeInfo(paramTypeStr, paramType), target, pkg, true));
   }
 
   auto retType = func_type.GetFunctionReturnType();
   if (retType.IsValid()) {
-    std::string retTypeStr = retType.GetTypeName().GetCString();
+    std::string retTypeStr = SafeAsCString(retType.GetTypeName());
     ret->retType = CreateAstType(AstTypeInfo(retTypeStr, retType), target, pkg, true);
   }
   return ret;
@@ -275,13 +275,13 @@ GetEnumElementsType(std::vector<std::string> elements, CompilerType type, std::s
     return elements_type;
   }
 
-  for (int i = 0; i < type.GetNumDirectBaseClasses(); i++) {
+  for (uint32_t i = 0; i < type.GetNumDirectBaseClasses(); i++) {
     auto base = type.GetDirectBaseClassAtIndex(i, nullptr);
     auto num_fields = base.GetNumFields();
     if (num_fields != elements.size() + 1) {
       continue;
     }
-    for (int j = 1; j < num_fields; j++) {
+    for (uint32_t j = 1; j < num_fields; j++) {
       std::string name;
       arg = base.GetFieldAtIndex(j, name, nullptr, nullptr, nullptr);
       if (arg.IsPointerType()) {
@@ -596,7 +596,7 @@ OwnedPtr<Cangjie::AST::VarDecl> CangjieASTBuiler::CreateEnumVarDecl(
     CompilerType type, std::string name, std::string prefix, Ptr<Decl> target) {
   auto decl = MakeOwned<Cangjie::AST::VarDecl>();
   decl->identifier = name;
-  std::string typeStr = type.GetTypeName().GetCString();
+  std::string typeStr = SafeAsCString(type.GetTypeName());
   decl->type = nullptr;
   decl->EnableAttr(Attribute::PUBLIC, Attribute::EXTERNAL);
   decl->isVar = true;
@@ -610,7 +610,7 @@ OwnedPtr<Cangjie::AST::VarDecl> CangjieASTBuiler::CreateVarDecl(
     const CompilerType type, std::string name, std::string prefix, Ptr<Decl> target) {
   auto decl = MakeOwned<Cangjie::AST::VarDecl>();
   decl->identifier = name;
-  decl->type = CreateAstType(AstTypeInfo(type.GetTypeName().GetCString(), type), target, prefix, true);
+  decl->type = CreateAstType(AstTypeInfo(SafeAsCString(type.GetTypeName()), type), target, prefix, true);
   decl->EnableAttr(Attribute::PUBLIC, Attribute::GLOBAL);
   decl->isVar = true;
   if (decl->type) {
@@ -625,13 +625,13 @@ OwnedPtr<Cangjie::AST::FuncDecl> CangjieASTBuiler::CreateEnumFuncDecl(
   decl->identifier = funcName;
   decl->funcBody = MakeOwned<FuncBody>();
   // For example, a generic type's name can be default::Enum$RGBColor<$G_T>.
-  std::string typeStr = enumType.GetTypeName().GetCString();
+  std::string typeStr = SafeAsCString(enumType.GetTypeName());
   decl->funcBody->retType = CreateAstType(AstTypeInfo(typeStr, enumType), pdecl, m_current_pkgname, true);
   auto paramList = MakeOwned<FuncParamList>();
 
   if (typeStr.find(E2_PREFIX_NAME_OPTION_LIKE) != std::string::npos) {
     bool isMember = (pdecl != nullptr);
-    std::string paramTypeStr = ctorFuncType.GetTypeName().GetCString();
+    std::string paramTypeStr = SafeAsCString(ctorFuncType.GetTypeName());
     if (IsGenericTypeParameters(typeStr)) {
       paramTypeStr = GENERIC_TYPE_PREFIX_NAME + GetGenericParamDeclName(typeStr);
     }
@@ -645,7 +645,7 @@ OwnedPtr<Cangjie::AST::FuncDecl> CangjieASTBuiler::CreateEnumFuncDecl(
       bool isMember = (pdecl != nullptr);
       std::string member_name2;
       auto field = ctorFuncType.GetFieldAtIndex(i, member_name2, nullptr, nullptr, nullptr);
-      std::string paramTypeStr = field.GetTypeName().GetCString();
+      std::string paramTypeStr = SafeAsCString(field.GetTypeName());
       OwnedPtr<FuncParam> param = MakeOwned<FuncParam>();
       param->identifier = "a" + std::to_string(i);
       auto tempDecl = isMember ? pdecl: decl.get();
@@ -706,14 +706,14 @@ OwnedPtr<Cangjie::AST::FuncDecl> CangjieASTBuiler::CreateFuncDecl(
     decl->funcBody->retType = CreateAstType(AstTypeInfo(pdecl->identifier), pdecl, m_current_pkgname);
   } else {
     auto retType = type.GetFunctionReturnType();
-    std::string retTypeStr = retType.GetTypeName().GetCString();
+    std::string retTypeStr = SafeAsCString(retType.GetTypeName());
     auto tempDecl = lldb_private::IsGenericFromFuncDecl(instantiatedNames, retTypeStr) ? decl.get():pdecl;
     decl->funcBody->retType = CreateAstType(AstTypeInfo(retTypeStr, retType), tempDecl, m_current_pkgname, true);
   }
   auto paramList = MakeOwned<FuncParamList>();
   for (int i = 0; i < type.GetFunctionArgumentCount(); i++) {
     auto paramType = type.GetFunctionArgumentAtIndex(i);
-    std::string paramTypeStr = paramType.GetTypeName().GetCString();
+    std::string paramTypeStr = SafeAsCString(paramType.GetTypeName());
     if (i == 0 && paramTypeStr.find(LOCAL_FUNC_CAPTUREDVAR) != std::string::npos) {
       // If the first argument is about captured variables, you need to omit the first argument.
       m_capture_vars.insert({identifier, paramType});
@@ -824,4 +824,9 @@ std::string lldb_private::GetGenericDeclName(const std::string& declName) {
     return name;
   }
   return name.substr(0, pos);
+}
+
+std::string lldb_private::SafeAsCString(const ConstString& cs) {
+  const char *s = cs.AsCString();
+  return s ? std::string(s) : std::string();
 }

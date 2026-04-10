@@ -63,8 +63,8 @@ private:
       : public Materializer::PersistentVariableDelegate {
   public:
     CangjiePersistentVariableDelegate() {}
-    ConstString GetName();
-    void DidDematerialize(lldb::ExpressionVariableSP &variable);
+    ConstString GetName() override;
+    void DidDematerialize(lldb::ExpressionVariableSP &variable) override;
     lldb::ExpressionVariableSP GetVariable() { return m_variable; }
     void RegisterPersistentState(PersistentExpressionState *persistent_state);
   private:

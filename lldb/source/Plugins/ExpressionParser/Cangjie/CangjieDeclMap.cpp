@@ -27,7 +27,7 @@ using namespace Cangjie::AST;
 
 bool CangjieDeclMap::IsInterfaceType(CompilerType& type) {
   if (type.GetTypeClass() == lldb::eTypeClassClass) {
-    std::string typeName = type.GetTypeName().GetCString();
+    std::string typeName = SafeAsCString(type.GetTypeName());
     if (typeName.find(INTERFACE_PREFIX_NAME) != std::string::npos) {
       return true;
     }
@@ -93,7 +93,7 @@ void CangjieDeclMap::CollectOptionValType(CompilerType& val_type) {
     }
     if (child_type.GetTypeClass() == lldb::eTypeClassTypedef) {
       auto underlyingType = child_type.GetTypedefedType();
-      std::string typeName = underlyingType.GetTypeName().GetCString();
+      std::string typeName = SafeAsCString(underlyingType.GetTypeName());
       m_parsed_types.insert({DeletePrefixOfType(typeName), underlyingType});
     }
   }
@@ -102,7 +102,7 @@ void CangjieDeclMap::CollectOptionValType(CompilerType& val_type) {
 CompilerType CangjieDeclMap::GetVariableType(lldb::VariableSP var) {
     CompilerType type = var->GetType()->GetFullCompilerType();
     ReplaceTypeDefWithInterfaceType(type);
-    std::string type_name = type.GetTypeName().GetCString();
+    std::string type_name = SafeAsCString(type.GetTypeName());
     if (CangjieASTBuiler::IsFunctionType(type.GetTypeName())) {
       type_name = GetSubNameWithoutPkgname(type_name, m_current_pkgname);
     }
@@ -121,7 +121,7 @@ CompilerType CangjieDeclMap::GetVariableType(lldb::VariableSP var) {
         auto valobj = frame->GetValueObjectForFrameVariable(var, lldb::DynamicValueType::eNoDynamicValues);
         auto dynamic_Type = valobj->GetDynamicType();
         type = dynamic_Type;
-        type_name = type.GetTypeName().GetCString();
+        type_name = SafeAsCString(type.GetTypeName());
         if (CangjieASTBuiler::IsFunctionType(type.GetTypeName())) {
           type_name = GetSubNameWithoutPkgname(type_name, m_current_pkgname);
         }
@@ -341,7 +341,7 @@ std::vector<lldb_private::CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::Look
       if (decl_ctx.IsClassMethod(nullptr, nullptr, nullptr)) {
         continue;
       }
-      std::string funcName = sym_ctx.function->GetNameNoArguments().GetCString();
+      std::string funcName = SafeAsCString(sym_ctx.function->GetNameNoArguments());
       auto type = sym_ctx.function->GetCompilerType();
       CompilerTypeInfo tempInfo(type, sym_ctx.GetFunctionStartLineEntry().line,
                                 sym_ctx.GetFunctionName(Mangled::NamePreference::ePreferMangled).AsCString());
@@ -431,7 +431,7 @@ std::vector<CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::LookUpFunction(std
   // Collect some info about our frame's context.
   auto frame_sym_ctx = frame->GetSymbolContext(lldb::eSymbolContextFunction | lldb::eSymbolContextBlock);
   if (frame_sym_ctx.function) {
-    localScope = frame_sym_ctx.function->GetNameNoArguments().GetCString();
+    localScope = SafeAsCString(frame_sym_ctx.function->GetNameNoArguments());
   }
   Log *log = GetLog(LLDBLog::Expressions);
   auto num_indices = sc_list.GetSize();
@@ -444,7 +444,7 @@ std::vector<CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::LookUpFunction(std
     if (CheckNestedGenericFunction(sym_ctx.function->GetNameNoArguments())) {
       return result;
     }
-    std::string funcNameWithPkg = sym_ctx.function->GetNameNoArguments().GetCString();
+    std::string funcNameWithPkg = SafeAsCString(sym_ctx.function->GetNameNoArguments());
     if (funcNameWithPkg.find(m_current_pkgname) == std::string::npos) {
       builder.m_type_names.insert(funcNameWithPkg);
       continue;
@@ -455,7 +455,7 @@ std::vector<CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::LookUpFunction(std
       continue;
     }
     std::string funcName = m_current_pkgname + PACKAGE_SUFFIX + decl_ctx.GetName().AsCString();
-    std::string mangleName = sym_ctx.function->GetNameNoArguments().GetCString();
+    std::string mangleName = SafeAsCString(sym_ctx.function->GetNameNoArguments());
     auto funcScope = mangleName.substr(0, mangleName.rfind(PACKAGE_SUFFIX));
     if (IsLocalFunction(localScope, funcScope)) {
       funcName = decl_ctx.GetName().AsCString();
@@ -616,7 +616,7 @@ void CangjieDeclMap::CreateStaticVarDecls(
       return;
     }
     // Check and add static variable
-    std::string prefixname = type.GetTypeName().GetCString() + std::string("::");
+    std::string prefixname = SafeAsCString(type.GetTypeName()) + std::string("::");
     auto pos = prefixname.find("<");
     if (pos != std::string::npos) {
       // "default::Rect2<$G_T>""  ==> "default::Rect2<"
@@ -625,7 +625,7 @@ void CangjieDeclMap::CreateStaticVarDecls(
     auto varSize = m_static_variables->GetSize();
     for (size_t i = 0; i < varSize; i++) {
       auto var = m_static_variables->GetVariableAtIndex(i);
-      std::string varname = var->GetName().GetCString();
+      std::string varname = SafeAsCString(var->GetName());
       if (varname.find(prefixname) != 0) {
         continue;
       }
@@ -763,7 +763,7 @@ void CangjieDeclMap::CreateClassLikeParentDecls(CompilerType type, Ptr<AST::Inhe
   for (size_t i = 0; i < type.GetNumDirectBaseClasses(); i++) {
     auto superType = type.GetDirectBaseClassAtIndex(i, nullptr);
     ReplaceTypeDefWithInterfaceType(superType);
-    std::string superName = superType.GetTypeName().GetCString();
+    std::string superName = SafeAsCString(superType.GetTypeName());
     if (!superType.IsValid()) {
       continue;
     }
@@ -871,7 +871,7 @@ OwnedPtr<GenericConstraint> CangjieDeclMap::CreateGenericConstraintsDecl(Ptr<AST
     OwnedPtr<AST::Type> ctype = builder.CreateAstType(AstTypeInfo(up), decltmp, m_current_pkgname);
 
     gc->upperBounds.emplace_back(std::move(ctype));
-    std::string superName = superType.GetTypeName().GetCString();
+    std::string superName = SafeAsCString(superType.GetTypeName());
   }
   return gc;
 }
@@ -909,7 +909,7 @@ Ptr<AST::Decl> CangjieDeclMap::CreateClassDecl(CompilerType type, std::string pr
   decl->identifier = name;
   decl->fullPackageName = m_current_pkgname;
   decl->mangledName = BaseMangler().Mangle(*decl);
-  std::string typeName = type.GetTypeName().GetCString();
+  std::string typeName = SafeAsCString(type.GetTypeName());
   builder.CreateDeclGeneric(decl.get(), typeName);
   Ptr<AST::Decl> cla = RawStaticCast<AST::Decl *>(decl.get());
   CreateGenericConstraints(cla, type);
@@ -946,7 +946,7 @@ Ptr<AST::Decl> CangjieDeclMap::CreateEnumDecl(CompilerType type, std::string pre
     type = type.GetPointeeType();
   }
   auto decl = builder.CreateEnumDecl(type);
-  std::string typeName = type.GetTypeName().GetCString();
+  std::string typeName = SafeAsCString(type.GetTypeName());
   builder.CreateDeclGeneric(decl.get(), typeName);
   CreateEnumConstructors(decl, type);
   auto eDecl = Ptr(RawStaticCast<AST::Decl *>(decl.get()));
@@ -962,7 +962,7 @@ Ptr<AST::Decl> CangjieDeclMap::CreateStructDecl(CompilerType type, std::string p
   decl->fullPackageName = m_current_pkgname;
   decl->mangledName = BaseMangler().Mangle(*decl);
   decl->EnableAttr(Attribute::PUBLIC, Attribute::GLOBAL);
-  std::string typeName = type.GetTypeName().GetCString();
+  std::string typeName = SafeAsCString(type.GetTypeName());
   builder.CreateDeclGeneric(decl.get(), typeName);
   Ptr<AST::Decl> cla = RawStaticCast<AST::Decl *>(decl.get());
   CreateGenericConstraints(cla, type);
@@ -979,7 +979,7 @@ Ptr<AST::Decl> CangjieDeclMap::CreateInterfaceDecl(CompilerType type, std::strin
   decl->fullPackageName = m_current_pkgname;
   decl->mangledName = BaseMangler().Mangle(*decl);
   decl->EnableAttr(Attribute::PUBLIC, Attribute::GLOBAL);
-  std::string typeName = type.GetTypeName().GetCString();
+  std::string typeName = SafeAsCString(type.GetTypeName());
   typeName = DeletePrefixOfType(typeName);
   builder.CreateDeclGeneric(decl.get(), typeName);
   auto target = GetSameGlobalDecl(std::move(decl), true);
@@ -1017,7 +1017,7 @@ Ptr<AST::Decl> CangjieDeclMap::CreateTypeDecl(CompilerType type) {
   if (!type.IsValid()) {
     return nullptr;
   }
-  std::string typeName = type.GetTypeName().GetCString();
+  std::string typeName = SafeAsCString(type.GetTypeName());
   if (CangjieASTBuiler::IsFunctionType(ConstString(typeName.c_str()))) {
     return nullptr;
   }
@@ -1066,7 +1066,7 @@ void CangjieDeclMap::CreateInjectedSuper(Ptr<AST::Decl>& thisdecl)
 void CangjieDeclMap::CreateInjectedThis()
 {
   m_parsed_vars.insert({ConstString("this"), m_this_variable->GetVariable()});
-  std::string name = m_this_variable->GetTypeName().GetCString();
+  std::string name = SafeAsCString(m_this_variable->GetTypeName());
   CompilerType realType = m_this_variable->GetCompilerType();
   if (IsGenericTypeParameters(name)) {
     realType = m_this_variable->GetDynamicType();
@@ -1249,7 +1249,7 @@ void CangjieDeclMap::CreateEnumConstructors(OwnedPtr<AST::EnumDecl> &decl, const
   // for example,  enum RGBColor { Red | Green} have enum type RGBColor.
   // step1: find enum type Ctor-RGBColor.
   // for example, enum RGBColor's type name is Enum$RGBColor, subName is RGBColor.
-  std::string typeName = type.GetTypeName().GetCString();
+  std::string typeName = SafeAsCString(type.GetTypeName());
   EnumLayout kind = GetEnumLayout(typeName);
   // for enum type
   decl->hasArguments = (kind != EnumLayout::E0Int);
@@ -1522,16 +1522,14 @@ std::vector<OwnedPtr<AST::Package>> CangjieDeclMap::CreateFakePackage() {
 
 void CangjieDeclMap::CollectGenericTypeOfVariable(const CompilerType& type)   {
   Log *log = GetLog(LLDBLog::Expressions);
-  std::string varTypeName = std::string(type.GetTypeName().AsCString());
-
   if (!type.IsValid() || type.GetTypeClass() == lldb::eTypeClassEnumeration) {
     return;
   }
-  std::string fullName = type.GetTypeName().AsCString();
+  std::string fullName = SafeAsCString(type.GetTypeName());
   if (!lldb_private::IsGenericInstanced(fullName)) {
     return;
   }
-  auto name = lldb_private::GetGenericDeclName(varTypeName);
+  auto name = lldb_private::GetGenericDeclName(fullName);
   auto userDefinedType = GetGenericTypeByPartName(name);
   if (userDefinedType.IsValid()) {
     LLDB_LOGF(log, "[Generic]: get generic type [%s] from variable[%s]. \n",
@@ -1699,7 +1697,7 @@ void CangjieDeclMap::CreateCapturedVars() {
     cd->identifier = fn + "$class" + LOCAL_FUNC_CAPTUREDVAR;
     cd->fullPackageName = m_current_pkgname;
     cd->mangledName = BaseMangler().Mangle(*cd);
-    std::string typeName = type.GetTypeName().GetCString();
+    std::string typeName = SafeAsCString(type.GetTypeName());
     builder.CreateDeclGeneric(cd.get(), typeName);
     Ptr<AST::Decl> cla = RawStaticCast<AST::Decl *>(cd.get());
     CreateGenericConstraints(cla, type);
@@ -1896,7 +1894,7 @@ void CangjieDeclMap::AddFieldToRecordType(CompilerType& instancedType, Ptr<AST::
       LLDB_LOGF(log, "    start add [%s.%s : %s]. \n", ConstString(decl->identifier.Val()).AsCString(),
                 ConstString(member_name).AsCString(), child_type.GetTypeName().AsCString());
     }
-    std::string compilerTypeName = child_type.GetTypeName().AsCString();
+    std::string compilerTypeName = SafeAsCString(child_type.GetTypeName());
     auto subTy = GetMemberDeclTyByName(ty, member_name, typeName);
     // There are three kind cases, for example
     // class A<T> {

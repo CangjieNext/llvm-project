@@ -48,7 +48,7 @@ public:
 
 private:
   uint64_t m_size;
-  CjArraySyntheticFrontEnd *m_data;
+  std::unique_ptr<CjArraySyntheticFrontEnd> m_data;
 };
 
 class CjHashMapSyntheticFrontEnd : public SyntheticChildrenFrontEnd {
@@ -68,7 +68,7 @@ private:
   int64_t m_freeOffset = 0;
   ValueObjectSP m_appendIndex;
   ValueObjectSP m_freeSize;
-  CjArraySyntheticFrontEnd *m_data;
+  std::unique_ptr<CjArraySyntheticFrontEnd> m_data;
   bool m_internal = false;
 };
 
@@ -83,7 +83,7 @@ public:
   size_t GetIndexOfChildWithName(ConstString name) override { return ExtractIndexFromString(name.GetCString()); }
 
 private:
-  CjHashMapSyntheticFrontEnd *m_map;
+  std::unique_ptr<CjHashMapSyntheticFrontEnd> m_map;
 };
 
 class CjTupleSyntheticFrontEnd : public SyntheticChildrenFrontEnd {
@@ -383,7 +383,7 @@ bool CjArrayListSyntheticFrontEnd::Update() {
   ValueObjectSP data = m_backend.GetChildMemberWithName(ConstString("myData"), true);
   ValueObjectSP size = m_backend.GetChildMemberWithName(ConstString("mySize"), true);
   if (data) {
-    m_data = new CjArraySyntheticFrontEnd(data);
+    m_data = std::make_unique<CjArraySyntheticFrontEnd>(data);
   }
   if (size) {
     m_size = size->GetValueAsUnsigned(0);
@@ -747,7 +747,7 @@ bool CjHashMapSyntheticFrontEnd::Update() {
   m_freeSize = m_backend.GetChildMemberWithName(ConstString("freeSize"), true);
   auto entries = m_backend.GetChildMemberWithName(ConstString("entries"), true);
   if (entries) {
-    m_data = new CjArraySyntheticFrontEnd(entries);
+    m_data = std::make_unique<CjArraySyntheticFrontEnd>(entries);
   }
   return false;
 }
@@ -758,7 +758,7 @@ CjHashSetSyntheticFrontEnd::CjHashSetSyntheticFrontEnd(ValueObjectSP valobj_sp)
 }
 
 bool CjHashSetSyntheticFrontEnd::Update() {
-  m_map = new CjHashMapSyntheticFrontEnd(m_backend.GetChildMemberWithName(ConstString("myMap"), true));
+  m_map = std::make_unique<CjHashMapSyntheticFrontEnd>(m_backend.GetChildMemberWithName(ConstString("myMap"), true));
   if (m_map) {
     // Mark the map(HashMap) is a child of HashSet.
     m_map->SetIsInternalType(true);
