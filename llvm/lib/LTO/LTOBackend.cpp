@@ -29,6 +29,7 @@
 #include "llvm/MC/SubtargetFeature.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ModuleSymbolTable.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Passes/StandardInstrumentations.h"
@@ -79,6 +80,10 @@ static cl::opt<bool> ThinLTOAssumeMerged(
     "thinlto-assume-merged", cl::init(false),
     cl::desc("Assume the input has already undergone ThinLTO function "
              "importing and the other pre-optimization pipeline changes."));
+
+static cl::opt<bool> CJLTOPrintRemoved(
+    "cj-lto-print-removed", cl::Hidden, cl::init(false),
+    cl::desc("Print definitions removed during the LTO optimization pipeline"));
 
 extern cl::opt<int> MaxRecursionInl;
 extern cl::opt<int> CountedLoopTripWidth;
@@ -253,6 +258,37 @@ createTargetMachine(const Config &Conf, const Target *TheTarget, Module &M) {
   return TM;
 }
 
+static StringSet<> collectDefinedGlobals(const Module &M) {
+  StringSet<> defs;
+  for (const Function &F : M)
+    if (!F.isDeclaration() && F.hasName())
+      defs.insert(F.getName());
+  for (const GlobalVariable &GV : M.globals())
+    if (!GV.isDeclaration() && GV.hasName())
+      defs.insert(GV.getName());
+  for (const GlobalAlias &GA : M.aliases())
+    if (!GA.isDeclaration() && GA.hasName())
+      defs.insert(GA.getName());
+  for (const GlobalIFunc &GIF : M.ifuncs())
+    if (!GIF.isDeclaration() && GIF.hasName())
+      defs.insert(GIF.getName());
+  return defs;
+}
+
+static void printRemovedGlobals(const Module &M, const StringSet<> &Before) {
+  if (!CJLTOPrintRemoved)
+    return;
+  StringSet<> After = collectDefinedGlobals(M);
+  size_t Removed = 0;
+  for (const auto &Item : Before) {
+    if (After.contains(Item.getKey()))
+      continue;
+    errs() << "[cj-lto] removed definition: " << Item.getKey() << "\n";
+    ++Removed;
+  }
+  errs() << "[cj-lto] removed definition count: " << Removed << "\n";
+}
+
 static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
                            unsigned OptLevel, bool IsThinLTO,
                            ModuleSummaryIndex *ExportSummary,
@@ -292,11 +328,14 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;
   ModuleAnalysisManager MAM;
+  // 创建了四个对象，分别负责缓存、管理对应的代码特征
 
   PassInstrumentationCallbacks PIC;
   StandardInstrumentations SI(Conf.DebugPassManager);
   SI.registerCallbacks(PIC, &FAM);
   PassBuilder PB(TM, Conf.PTO, PGOOpt, &PIC);
+  //TM ： Target machine 知道是在什么cpu上跑
+  // 这个里面还加入了一个 pgo, pic
 
   RegisterPassPlugins(Conf.PassPlugins, PB);
 
@@ -323,11 +362,16 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   PB.registerFunctionAnalyses(FAM);
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+  // cross 的比较重要可以让 大家共享
 
   ModulePassManager MPM;
 
   if (!Conf.DisableVerify)
     MPM.addPass(VerifierPass());
+
+  StringSet<> DefinedBeforeOpt;
+  if (CJLTOPrintRemoved)
+    DefinedBeforeOpt = collectDefinedGlobals(Mod);
 
   if (CJPipeline) {
     // Customize parameters for cangjie-pipeline.
@@ -354,6 +398,7 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   }
 
   auto addCangjiePasses = [&]() {
+    // 后端定制pass
     if (CJPipeline) {
       MPM.addPass(CJSpecificOpt(OptLevel));
       MPM.addPass(PlaceSafepoints());
@@ -394,6 +439,7 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   } else {
     MPM.addPass(PB.buildLTODefaultPipeline(OL, ExportSummary));
   }
+  // 这里会插入很多的pass
 
   addCangjiePasses();
 
@@ -401,6 +447,7 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
     MPM.addPass(VerifierPass());
 
   MPM.run(Mod, MAM);
+  printRemovedGlobals(Mod, DefinedBeforeOpt);
 }
 
 bool lto::opt(const Config &Conf, TargetMachine *TM, unsigned Task, Module &Mod,
