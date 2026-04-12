@@ -7052,14 +7052,265 @@ enum MachineOutlinerClass {
   MachineOutlinerTailCall, /// Only emit a branch.
   MachineOutlinerNoLRSave, /// Emit a call and return.
   MachineOutlinerThunk,    /// Emit a call and tail-call.
-  MachineOutlinerRegSave   /// Same as default, but save to a register.
+  MachineOutlinerRegSave,  /// Same as default, but save to a register.
+  /// Cangjie prologue outlining. The caller keeps the ADR/ADRP/ADD prefix,
+  /// branches to the outlined prologue body, and the outlined function returns
+  /// to the instruction after the branch through x9.
+  MachineOutlinerCangjiePrologueBranch
 };
 
 enum MachineOutlinerMBBFlags {
   LRUnavailableSomewhere = 0x2,
   HasCalls = 0x4,
-  UnsafeRegsDead = 0x8
+  UnsafeRegsDead = 0x8,
+  HasCangjiePrologueForOutlining = 0x10
 };
+
+static bool isCangjieFrameAddressADR(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::ADR &&
+         MI.getFlag(MachineInstr::FrameSetup) && MI.getNumOperands() >= 1 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::X9;
+}
+
+static bool isCangjieFrameAddressADRP(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::ADRP &&
+         MI.getFlag(MachineInstr::FrameSetup) && MI.getNumOperands() >= 1 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::X10;
+}
+
+static bool isCangjieFrameAddressADD(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::ADDXri && MI.getNumOperands() >= 2 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::X10 &&
+         MI.getOperand(1).isReg() &&
+         MI.getOperand(1).getReg() == AArch64::X10;
+}
+
+static bool isCangjieFrameAddressStore(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::STPXi &&
+         MI.getFlag(MachineInstr::FrameSetup) && MI.getNumOperands() >= 4 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::X10 &&
+         MI.getOperand(1).isReg() &&
+         MI.getOperand(1).getReg() == AArch64::X9 &&
+         MI.getOperand(2).isReg() &&
+         MI.getOperand(2).getReg() == AArch64::FP &&
+         MI.getOperand(3).isImm() && MI.getOperand(3).getImm() == -2;
+}
+
+static bool isCangjieFrameRecordStore(const MachineInstr &MI) {
+  if ((MI.getOpcode() != AArch64::STPXi &&
+       MI.getOpcode() != AArch64::STPXpre) ||
+      !MI.getFlag(MachineInstr::FrameSetup))
+    return false;
+
+  bool HasFP = false;
+  bool HasLR = false;
+  for (const MachineOperand &MO : MI.operands()) {
+    if (!MO.isReg())
+      continue;
+    HasFP |= MO.getReg() == AArch64::FP;
+    HasLR |= MO.getReg() == AArch64::LR || MO.getReg() == AArch64::W30;
+  }
+  return HasFP && HasLR;
+}
+
+static bool isFramePointerSetup(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::ADDXri &&
+         MI.getFlag(MachineInstr::FrameSetup) && MI.getNumOperands() >= 2 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::FP &&
+         MI.getOperand(1).isReg() &&
+         MI.getOperand(1).getReg() == AArch64::SP;
+}
+
+static MachineBasicBlock::iterator
+nextNonDebugInstr(MachineBasicBlock &MBB, MachineBasicBlock::iterator I) {
+  if (I != MBB.end())
+    ++I;
+  while (I != MBB.end() && I->isDebugInstr())
+    ++I;
+  return I;
+}
+
+static MachineBasicBlock::iterator
+prevNonDebugInstr(MachineBasicBlock &MBB, MachineBasicBlock::iterator I) {
+  while (I != MBB.begin()) {
+    --I;
+    if (!I->isDebugInstr())
+      return I;
+  }
+  return MBB.end();
+}
+
+static bool isBefore(MachineBasicBlock &MBB, MachineBasicBlock::iterator LHS,
+                     MachineBasicBlock::iterator RHS) {
+  return std::find(MBB.begin(), RHS, LHS) != RHS;
+}
+
+static bool isInRange(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
+                      MachineBasicBlock::iterator Begin,
+                      MachineBasicBlock::iterator End) {
+  return I != End && std::find(Begin, End, I) != End;
+}
+
+static bool emitsCangjieMethodDescAddress(const MachineFunction &MF) {
+  return !MF.getFunction().hasFnAttribute("leaf-function");
+}
+
+static bool preprocessCangjiePrologueForOutlining(MachineBasicBlock &MBB) {
+  MachineFunction &MF = *MBB.getParent();
+  if (&MBB != &MF.front() || !emitsCangjieMethodDescAddress(MF))
+    return false;
+
+  MachineBasicBlock::iterator ADR = MBB.end();
+  MachineBasicBlock::iterator ADRP = MBB.end();
+  MachineBasicBlock::iterator AddrSeqEnd = MBB.end();
+  MachineBasicBlock::iterator Store = MBB.end();
+  MachineBasicBlock::iterator FPSetup = MBB.end();
+
+  for (MachineBasicBlock::iterator I = MBB.begin(); I != MBB.end(); ++I) {
+    if (!isCangjieFrameAddressADR(*I))
+      continue;
+
+    MachineBasicBlock::iterator Next = nextNonDebugInstr(MBB, I);
+    if (Next == MBB.end() || !isCangjieFrameAddressADRP(*Next))
+      continue;
+
+    MachineBasicBlock::iterator NextADD = nextNonDebugInstr(MBB, Next);
+
+    ADR = I;
+    ADRP = Next;
+    AddrSeqEnd = NextADD;
+    if (NextADD != MBB.end() && isCangjieFrameAddressADD(*NextADD))
+      AddrSeqEnd = nextNonDebugInstr(MBB, NextADD);
+    break;
+  }
+
+  if (ADR == MBB.end())
+    return false;
+
+  for (MachineBasicBlock::iterator I = MBB.begin(); I != MBB.end(); ++I) {
+    if (FPSetup == MBB.end() && isFramePointerSetup(*I))
+      FPSetup = I;
+    if (Store == MBB.end() && isCangjieFrameAddressStore(*I))
+      Store = I;
+  }
+
+  if (Store == MBB.end() || FPSetup == MBB.end() ||
+      !isBefore(MBB, ADR, Store) || !isBefore(MBB, FPSetup, Store))
+    return false;
+
+  for (MachineBasicBlock::iterator I = std::next(FPSetup); I != Store; ++I)
+    if (I->definesRegister(AArch64::FP))
+      return false;
+
+  MachineBasicBlock::iterator PrologueBegin =
+      MBB.SkipPHIsLabelsAndDebug(MBB.begin());
+  if (!isInRange(MBB, PrologueBegin, ADR, AddrSeqEnd))
+    MBB.splice(PrologueBegin, &MBB, ADR, AddrSeqEnd);
+
+  MachineBasicBlock::iterator StoreInsert = std::next(FPSetup);
+  if (Store != StoreInsert)
+    MBB.splice(StoreInsert, &MBB, Store);
+  return true;
+}
+
+static bool hasCangjiePrologueAddressPrefix(outliner::Candidate &C) {
+  MachineBasicBlock &MBB = *C.getMBB();
+  MachineBasicBlock::iterator ADRP = prevNonDebugInstr(MBB, C.front());
+  if (ADRP == MBB.end())
+    return false;
+
+  if (isCangjieFrameAddressADD(*ADRP)) {
+    ADRP = prevNonDebugInstr(MBB, ADRP);
+    if (ADRP == MBB.end())
+      return false;
+  }
+
+  if (!isCangjieFrameAddressADRP(*ADRP))
+    return false;
+
+  MachineBasicBlock::iterator ADR = prevNonDebugInstr(MBB, ADRP);
+  return ADR != MBB.end() && isCangjieFrameAddressADR(*ADR);
+}
+
+static bool containsCangjieFrameAddressStore(outliner::Candidate &C) {
+  return llvm::any_of(make_range(C.front(), std::next(C.back())),
+                      isCangjieFrameAddressStore);
+}
+
+static bool isCangjiePrologueBranchCandidate(outliner::Candidate &C) {
+  if (!(C.Flags & HasCangjiePrologueForOutlining))
+    return false;
+
+  if (!emitsCangjieMethodDescAddress(*C.getMF()))
+    return false;
+
+  MachineBasicBlock &MBB = *C.getMBB();
+  if (std::next(C.back()) == MBB.end())
+    return false;
+
+  return hasCangjiePrologueAddressPrefix(C) &&
+         containsCangjieFrameAddressStore(C);
+}
+
+static bool definesCangjiePrologueBranchRegister(const MachineInstr &MI) {
+  return llvm::any_of(MI.operands(), [](const MachineOperand &MO) {
+    if (!MO.isReg() || !MO.isDef())
+      return false;
+    Register Reg = MO.getReg();
+    return Reg == AArch64::X9 || Reg == AArch64::W9;
+  });
+}
+
+static MachineBasicBlock::iterator
+findFirstCangjiePrologueX9Def(MachineBasicBlock &MBB) {
+  // The Cangjie prologue branch path keeps the address prefix in the caller and
+  // synthesizes the final "add x9, x9, #16; br x9" in the outlined function.
+  // As soon as the original sequence starts redefining x9/w9, the special
+  // candidate must stop there and leave the rest in the caller.
+  MachineBasicBlock::iterator I = MBB.SkipPHIsLabelsAndDebug(MBB.begin());
+  if (I == MBB.end() || !isCangjieFrameAddressADR(*I))
+    return MBB.end();
+
+  I = nextNonDebugInstr(MBB, I);
+  if (I == MBB.end() || !isCangjieFrameAddressADRP(*I))
+    return MBB.end();
+
+  I = nextNonDebugInstr(MBB, I);
+  if (I != MBB.end() && isCangjieFrameAddressADD(*I))
+    I = nextNonDebugInstr(MBB, I);
+
+  for (; I != MBB.end(); ++I) {
+    if (!I->isDebugInstr() && definesCangjiePrologueBranchRegister(*I))
+      return I;
+  }
+
+  return MBB.end();
+}
+
+static bool hasCangjiePrologueAddressPrefixAtBlockBegin(MachineBasicBlock &MBB) {
+  MachineBasicBlock::iterator ADR = MBB.SkipPHIsLabelsAndDebug(MBB.begin());
+  if (ADR == MBB.end() || !isCangjieFrameAddressADR(*ADR))
+    return false;
+
+  MachineBasicBlock::iterator ADRP = nextNonDebugInstr(MBB, ADR);
+  if (ADRP == MBB.end() || !isCangjieFrameAddressADRP(*ADRP))
+    return false;
+
+  return true;
+}
+
+static bool isAllowedCangjiePrologueLRUse(MachineInstr &MI) {
+  if (!emitsCangjieMethodDescAddress(*MI.getMF()))
+    return false;
+
+  return isCangjieFrameRecordStore(MI) &&
+         hasCangjiePrologueAddressPrefixAtBlockBegin(*MI.getParent());
+}
 
 Register
 AArch64InstrInfo::findRegisterToSaveLRTo(outliner::Candidate &C) const {
@@ -7140,6 +7391,31 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
             return true;
           }) != RepeatedSequenceLocs.end()) {
     return outliner::OutlinedFunction();
+  }
+
+  bool HasBTI = any_of(RepeatedSequenceLocs, [](outliner::Candidate &C) {
+    return C.getMF()->getInfo<AArch64FunctionInfo>()->branchTargetEnforcement();
+  });
+
+  if (!HasBTI &&
+      !FirstCand.getMF()
+           ->getInfo<AArch64FunctionInfo>()
+           ->shouldSignReturnAddress(true)) {
+    std::vector<outliner::Candidate> PrologueBranchCandidates =
+        RepeatedSequenceLocs;
+    llvm::erase_if(PrologueBranchCandidates, [](outliner::Candidate &C) {
+      return !isCangjiePrologueBranchCandidate(C);
+    });
+
+    if (PrologueBranchCandidates.size() >= 2) {
+      for (outliner::Candidate &C : PrologueBranchCandidates)
+        C.setCallInfo(MachineOutlinerCangjiePrologueBranch, 4);
+
+      RepeatedSequenceLocs = PrologueBranchCandidates;
+      return outliner::OutlinedFunction(
+          RepeatedSequenceLocs, SequenceSize, 8,
+          MachineOutlinerCangjiePrologueBranch);
+    }
   }
 
   // Since at this point all candidates agree on their return address signing
@@ -7273,10 +7549,6 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
 
   unsigned FrameID = MachineOutlinerDefault;
   NumBytesToCreateFrame += 4;
-
-  bool HasBTI = any_of(RepeatedSequenceLocs, [](outliner::Candidate &C) {
-    return C.getMF()->getInfo<AArch64FunctionInfo>()->branchTargetEnforcement();
-  });
 
   // We check to see if CFI Instructions are present, and if they are
   // we find the number of CFI Instructions in the candidates.
@@ -7573,6 +7845,10 @@ bool AArch64InstrInfo::isMBBSafeToOutlineFrom(MachineBasicBlock &MBB,
                                               unsigned &Flags) const {
   if (!TargetInstrInfo::isMBBSafeToOutlineFrom(MBB, Flags))
     return false;
+
+  if (preprocessCangjiePrologueForOutlining(MBB))
+    Flags |= MachineOutlinerMBBFlags::HasCangjiePrologueForOutlining;
+
   // Check if LR is available through all of the MBB. If it's not, then set
   // a flag.
   assert(MBB.getParent()->getRegInfo().tracksLiveness() &&
@@ -7662,6 +7938,10 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
   if (FuncInfo->getLOHRelated().count(&MI))
     return outliner::InstrType::Illegal;
 
+  if ((Flags & HasCangjiePrologueForOutlining) &&
+      isInRange(*MBB, MIT, findFirstCangjiePrologueX9Def(*MBB), MBB->end()))
+    return outliner::InstrType::Illegal;
+
   // We can only outline these if we will tail call the outlined function, or
   // fix up the CFI offsets. Currently, CFI instructions are outlined only if
   // in a tail call.
@@ -7699,7 +7979,8 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
 
     // If it uses LR or W30 explicitly, then don't touch it.
     if (MOP.isReg() && !MOP.isImplicit() &&
-        (MOP.getReg() == AArch64::LR || MOP.getReg() == AArch64::W30))
+        (MOP.getReg() == AArch64::LR || MOP.getReg() == AArch64::W30) &&
+        !isAllowedCangjiePrologueLRUse(MI))
       return outliner::InstrType::Illegal;
   }
 
@@ -7776,8 +8057,9 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
     return outliner::InstrType::Illegal;
 
   // Don't touch the link register or W30.
-  if (MI.readsRegister(AArch64::W30, &getRegisterInfo()) ||
-      MI.modifiesRegister(AArch64::W30, &getRegisterInfo()))
+  if ((MI.readsRegister(AArch64::W30, &getRegisterInfo()) ||
+       MI.modifiesRegister(AArch64::W30, &getRegisterInfo())) &&
+      !isAllowedCangjiePrologueLRUse(MI))
     return outliner::InstrType::Illegal;
 
   // Don't outline BTI instructions, because that will prevent the outlining
@@ -7920,6 +8202,31 @@ void AArch64InstrInfo::buildOutlinedFrame(
     FI->setOutliningStyle("Thunk");
   }
 
+  if (OF.FrameConstructionID == MachineOutlinerCangjiePrologueBranch) {
+    FI->setOutliningStyle("Cangjie Prologue Branch");
+
+    if (!MBB.isLiveIn(AArch64::X9))
+      MBB.addLiveIn(AArch64::X9);
+    if (!MBB.isLiveIn(AArch64::X10))
+      MBB.addLiveIn(AArch64::X10);
+
+    for (MachineInstr &MI : MBB) {
+      for (MachineOperand &MO : MI.operands()) {
+        if (MO.isReg() && MO.isUse() && MO.getReg() == AArch64::X9)
+          MO.setIsKill(false);
+      }
+    }
+
+    BuildMI(MBB, MBB.end(), DebugLoc(), get(AArch64::ADDXri), AArch64::X9)
+        .addReg(AArch64::X9)
+        .addImm(16)
+        .addImm(0);
+    BuildMI(MBB, MBB.end(), DebugLoc(), get(AArch64::TCRETURNriALL))
+        .addReg(AArch64::X9)
+        .addImm(0);
+    return;
+  }
+
   bool IsLeafFunction = true;
 
   // Is there a call in the outlined range?
@@ -8032,6 +8339,14 @@ void AArch64InstrInfo::buildOutlinedFrame(
 MachineBasicBlock::iterator AArch64InstrInfo::insertOutlinedCall(
     Module &M, MachineBasicBlock &MBB, MachineBasicBlock::iterator &It,
     MachineFunction &MF, outliner::Candidate &C) const {
+
+  if (C.CallConstructionID == MachineOutlinerCangjiePrologueBranch) {
+    MBB.splitAt(*C.back());
+    It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::TCRETURNdi))
+                            .addGlobalAddress(M.getNamedValue(MF.getName()))
+                            .addImm(0));
+    return It;
+  }
 
   // Are we tail calling?
   if (C.CallConstructionID == MachineOutlinerTailCall) {
