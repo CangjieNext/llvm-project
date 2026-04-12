@@ -47,6 +47,7 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <iterator>
@@ -7061,6 +7062,118 @@ enum MachineOutlinerMBBFlags {
   UnsafeRegsDead = 0x8
 };
 
+static bool isCangjieFrameAddressADR(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::ADR &&
+         MI.getFlag(MachineInstr::FrameSetup) && MI.getNumOperands() >= 1 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::X9;
+}
+
+static bool isCangjieFrameAddressADRP(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::ADRP &&
+         MI.getFlag(MachineInstr::FrameSetup) && MI.getNumOperands() >= 1 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::X10;
+}
+
+static bool isCangjieFrameAddressADD(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::ADDXri && MI.getNumOperands() >= 2 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::X10 &&
+         MI.getOperand(1).isReg() &&
+         MI.getOperand(1).getReg() == AArch64::X10;
+}
+
+static bool isCangjieFrameAddressStore(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::STPXi &&
+         MI.getFlag(MachineInstr::FrameSetup) && MI.getNumOperands() >= 4 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::X10 &&
+         MI.getOperand(1).isReg() &&
+         MI.getOperand(1).getReg() == AArch64::X9 &&
+         MI.getOperand(2).isReg() &&
+         MI.getOperand(2).getReg() == AArch64::FP &&
+         MI.getOperand(3).isImm() && MI.getOperand(3).getImm() == -2;
+}
+
+static bool isFramePointerSetup(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::ADDXri &&
+         MI.getFlag(MachineInstr::FrameSetup) && MI.getNumOperands() >= 2 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::FP &&
+         MI.getOperand(1).isReg() &&
+         MI.getOperand(1).getReg() == AArch64::SP;
+}
+
+static MachineBasicBlock::iterator
+nextNonDebugInstr(MachineBasicBlock &MBB, MachineBasicBlock::iterator I) {
+  if (I != MBB.end())
+    ++I;
+  while (I != MBB.end() && I->isDebugInstr())
+    ++I;
+  return I;
+}
+
+static bool isBefore(MachineBasicBlock &MBB, MachineBasicBlock::iterator LHS,
+                     MachineBasicBlock::iterator RHS) {
+  return std::find(MBB.begin(), RHS, LHS) != RHS;
+}
+
+static bool isInRange(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
+                      MachineBasicBlock::iterator Begin,
+                      MachineBasicBlock::iterator End) {
+  return I != End && std::find(Begin, End, I) != End;
+}
+
+static void preprocessCangjiePrologueForOutlining(MachineBasicBlock &MBB) {
+  MachineBasicBlock::iterator ADR = MBB.end();
+  MachineBasicBlock::iterator ADRP = MBB.end();
+  MachineBasicBlock::iterator AddrSeqEnd = MBB.end();
+  MachineBasicBlock::iterator Store = MBB.end();
+  MachineBasicBlock::iterator FPSetup = MBB.end();
+
+  for (MachineBasicBlock::iterator I = MBB.begin(); I != MBB.end(); ++I) {
+    if (!isCangjieFrameAddressADR(*I))
+      continue;
+
+    MachineBasicBlock::iterator Next = nextNonDebugInstr(MBB, I);
+    if (Next == MBB.end() || !isCangjieFrameAddressADRP(*Next))
+      continue;
+
+    ADR = I;
+    ADRP = Next;
+    AddrSeqEnd = nextNonDebugInstr(MBB, ADRP);
+    if (AddrSeqEnd != MBB.end() && isCangjieFrameAddressADD(*AddrSeqEnd))
+      AddrSeqEnd = nextNonDebugInstr(MBB, AddrSeqEnd);
+    break;
+  }
+
+  if (ADR == MBB.end())
+    return;
+
+  for (MachineBasicBlock::iterator I = MBB.begin(); I != MBB.end(); ++I) {
+    if (FPSetup == MBB.end() && isFramePointerSetup(*I))
+      FPSetup = I;
+    if (Store == MBB.end() && isCangjieFrameAddressStore(*I))
+      Store = I;
+  }
+
+  if (Store == MBB.end() || FPSetup == MBB.end() ||
+      !isBefore(MBB, ADR, Store) || !isBefore(MBB, FPSetup, Store))
+    return;
+
+  for (MachineBasicBlock::iterator I = std::next(FPSetup); I != Store; ++I)
+    if (I->definesRegister(AArch64::FP))
+      return;
+
+  MachineBasicBlock::iterator PrologueBegin =
+      MBB.SkipPHIsLabelsAndDebug(MBB.begin());
+  if (!isInRange(MBB, PrologueBegin, ADR, AddrSeqEnd))
+    MBB.splice(PrologueBegin, &MBB, ADR, AddrSeqEnd);
+
+  MBB.splice(std::next(FPSetup), &MBB, Store);
+}
+
 Register
 AArch64InstrInfo::findRegisterToSaveLRTo(outliner::Candidate &C) const {
   MachineFunction *MF = C.getMF();
@@ -7573,6 +7686,9 @@ bool AArch64InstrInfo::isMBBSafeToOutlineFrom(MachineBasicBlock &MBB,
                                               unsigned &Flags) const {
   if (!TargetInstrInfo::isMBBSafeToOutlineFrom(MBB, Flags))
     return false;
+
+    preprocessCangjiePrologueForOutlining(MBB);
+
   // Check if LR is available through all of the MBB. If it's not, then set
   // a flag.
   assert(MBB.getParent()->getRegInfo().tracksLiveness() &&

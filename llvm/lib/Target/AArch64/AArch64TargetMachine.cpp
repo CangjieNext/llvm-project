@@ -801,16 +801,16 @@ void AArch64PassConfig::addPreEmitPass() {
 
   if (TM->getOptLevel() != CodeGenOpt::None && EnableCompressJumpTables)
     addPass(createAArch64CompressJumpTablesPass());
-
-  if (TM->getOptLevel() != CodeGenOpt::None && EnableCollectLOH &&
-      TM->getTargetTriple().isOSBinFormatMachO())
-    addPass(createAArch64CollectLOHPass());
 }
 
 void AArch64PassConfig::addPreEmitPass2() {
   // SVE bundles move prefixes with destructive operations. BLR_RVMARKER pseudo
   // instructions are lowered to bundles as well.
   addPass(createUnpackMachineBundles(nullptr));
+
+  if (TM->getOptLevel() != CodeGenOpt::None && EnableCollectLOH &&
+      TM->getTargetTriple().isOSBinFormatMachO())
+    addPass(createAArch64CollectLOHPass());
 }
 
 yaml::MachineFunctionInfo *
