@@ -7058,7 +7058,8 @@ enum MachineOutlinerClass {
 enum MachineOutlinerMBBFlags {
   LRUnavailableSomewhere = 0x2,
   HasCalls = 0x4,
-  UnsafeRegsDead = 0x8
+  UnsafeRegsDead = 0x8,
+  HasCustomOutlinePattern = 0x10
 };
 
 Register
@@ -7109,6 +7110,35 @@ static bool outliningCandidatesV8_3OpsConsensus(const outliner::Candidate &a,
   return SubtargetA.hasV8_3aOps() == SubtargetB.hasV8_3aOps();
 }
 
+static bool candidateHasFPAndLRStore(outliner::Candidate &C);
+static bool candidateHasCJMachOOutlineContextStore(outliner::Candidate &C);
+static bool candidateHasOutlineAddressAdjust(outliner::Candidate &C);
+static bool candidateUsesOutlineBranchReturn(outliner::Candidate &C);
+static bool candidateHasExpectedOutlineBranchReturnPrefix(
+    outliner::Candidate &C, const AArch64InstrInfo &TII);
+
+static bool allCandidatesUseCustomOutlineBranchReturn(
+    std::vector<outliner::Candidate> &Candidates) {
+  return !Candidates.empty() &&
+         llvm::all_of(Candidates, [](outliner::Candidate &C) {
+           return (C.Flags &
+                   MachineOutlinerMBBFlags::HasCustomOutlinePattern) &&
+                  candidateUsesOutlineBranchReturn(C);
+         });
+}
+
+static void cloneCandidateCFIToContinuation(outliner::Candidate &C,
+                                            MachineBasicBlock &Continuation) {
+  MachineFunction *MF = Continuation.getParent();
+  auto InsertPt = Continuation.begin();
+  for (auto I = C.front(), E = std::next(C.back()); I != E; ++I) {
+    if (!I->isCFIInstruction())
+      continue;
+    MachineInstr *CFIClone = MF->CloneMachineInstr(&*I);
+    Continuation.insert(InsertPt, CFIClone);
+  }
+}
+
 outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
     std::vector<outliner::Candidate> &RepeatedSequenceLocs) const {
   outliner::Candidate &FirstCand = RepeatedSequenceLocs[0];
@@ -7117,6 +7147,10 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
                       [this](unsigned Sum, const MachineInstr &MI) {
                         return Sum + getInstSizeInBytes(MI);
                       });
+  for (auto &MI : make_range(FirstCand.front(), std::next(FirstCand.back()))) {
+    SequenceSize += getInstSizeInBytes(MI);
+  }
+
   unsigned NumBytesToCreateFrame = 0;
 
   // We only allow outlining for functions having exactly matching return
@@ -7138,9 +7172,8 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
               return false;
             }
             return true;
-          }) != RepeatedSequenceLocs.end()) {
+          }) != RepeatedSequenceLocs.end())
     return outliner::OutlinedFunction();
-  }
 
   // Since at this point all candidates agree on their return address signing
   // picking just one is fine. If the candidate functions potentially sign their
@@ -7221,7 +7254,7 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
   }
 
   // Properties about candidate MBBs that hold for all of them.
-  unsigned FlagsSetInAll = 0xF;
+  unsigned FlagsSetInAll = ~0u;
 
   // Compute liveness information for each candidate, and set FlagsSetInAll.
   for (outliner::Candidate &C : RepeatedSequenceLocs)
@@ -7243,8 +7276,9 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
     // to compute liveness here.
     if (C.Flags & UnsafeRegsDead)
       return false;
-    return C.isAnyUnavailableAcrossOrOutOfSeq(
-        {AArch64::W16, AArch64::W17, AArch64::NZCV}, TRI);
+    return C.isAnyUnavailableAcrossOrOutOfSeq({AArch64::W16}, TRI) ||
+           C.isAnyUnavailableAcrossOrOutOfSeq({AArch64::W17}, TRI) ||
+           C.isAnyUnavailableAcrossOrOutOfSeq({AArch64::NZCV}, TRI);
   };
 
   // Are there any candidates where those registers are live?
@@ -7258,6 +7292,12 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
     if (RepeatedSequenceLocs.size() < 2)
       return outliner::OutlinedFunction();
   }
+
+  if (llvm::any_of(RepeatedSequenceLocs, [this](outliner::Candidate &C) {
+        return candidateUsesOutlineBranchReturn(C) &&
+               !candidateHasExpectedOutlineBranchReturnPrefix(C, *this);
+      }))
+    return outliner::OutlinedFunction();
 
   // At this point, we have only "safe" candidates to outline. Figure out
   // frame + call instruction information.
@@ -7292,12 +7332,22 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
   // since if we outline one of the CFI instructions in a function, we have to
   // outline them all for correctness. If we do not, the address offsets will be
   // incorrect between the two sections of the program.
+  bool AllUseCustomBranchReturn =
+      allCandidatesUseCustomOutlineBranchReturn(RepeatedSequenceLocs);
   for (outliner::Candidate &C : RepeatedSequenceLocs) {
     std::vector<MCCFIInstruction> CFIInstructions =
         C.getMF()->getFrameInstructions();
 
-    if (CFICount > 0 && CFICount != CFIInstructions.size())
+    if (CFICount > 0 && CFICount != CFIInstructions.size() &&
+        !AllUseCustomBranchReturn)
       return outliner::OutlinedFunction();
+
+    if (candidateUsesOutlineBranchReturn(C)) {
+      MachineInstr *FirstInstr = &*C.front();
+      if (FirstInstr->getOpcode() != AArch64::SUBXri &&
+          FirstInstr->getOpcode() != AArch64::STPXpre)
+        return outliner::OutlinedFunction();
+    }
   }
 
   // Returns true if an instructions is safe to fix up, false otherwise.
@@ -7370,7 +7420,8 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
 
   else if (LastInstrOpcode == AArch64::BL ||
            ((LastInstrOpcode == AArch64::BLR ||
-             LastInstrOpcode == AArch64::BLRNoIP) &&
+             LastInstrOpcode == AArch64::BLRNoIP) || 
+             LastInstrOpcode == TargetOpcode::STATEPOINT &&
             !HasBTI)) {
     // FIXME: Do we need to check if the code after this uses the value of LR?
     FrameID = MachineOutlinerThunk;
@@ -7387,6 +7438,13 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
 
     // Check if we have to save LR.
     for (outliner::Candidate &C : RepeatedSequenceLocs) {
+      if (candidateUsesOutlineBranchReturn(C)) {
+        NumBytesNoStackCalls += 4;
+        C.setCallInfo(MachineOutlinerNoLRSave, 4);
+        CandidatesWithoutStackFixups.push_back(C);
+        continue;
+      }
+
       // If we have a noreturn caller, then we're going to be conservative and
       // say that we have to save LR. If we don't have a ret at the end of the
       // block, then we can't reason about liveness accurately.
@@ -7531,8 +7589,13 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
   }
 
   // If we have CFI instructions, we can only outline if the outlined section
-  // can be a tail call
-  if (FrameID != MachineOutlinerTailCall && CFICount > 0)
+  // can be a tail call. Custom branch-return candidates are handled
+  // separately by cloning the candidate CFI into the caller continuation block.
+  bool CanOutlineCustomCFI =
+      CFICount > 0 && FrameID == MachineOutlinerNoLRSave &&
+      allCandidatesUseCustomOutlineBranchReturn(RepeatedSequenceLocs);
+  if (FrameID != MachineOutlinerTailCall && CFICount > 0 &&
+      !CanOutlineCustomCFI)
     return outliner::OutlinedFunction();
 
   return outliner::OutlinedFunction(RepeatedSequenceLocs, SequenceSize,
@@ -7568,6 +7631,493 @@ bool AArch64InstrInfo::isFunctionSafeToOutlineFrom(
   // It's safe to outline from MF.
   return true;
 }
+
+static bool isAllowedOutlinedLRUse(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::SUBXri || MI.getOpcode() == AArch64::STPXi;
+}
+
+static bool isFrameSetupADRToX9(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::ADR && MI.getNumOperands() >= 1 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::X9;
+}
+
+static bool isFrameSetupADRPToX10(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::ADRP && MI.getNumOperands() >= 1 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::X10;
+}
+
+static bool isOutlineFrameSetupSub(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::SUBXri && MI.getNumOperands() >= 2 &&
+         MI.getOperand(0).isReg() && MI.getOperand(0).getReg() == AArch64::SP &&
+         MI.getOperand(1).isReg() && MI.getOperand(1).getReg() == AArch64::SP;
+}
+
+static bool isOutlineFrameSetupAdd(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::ADDXri && MI.getNumOperands() >= 2 &&
+         MI.getOperand(0).isReg() && MI.getOperand(0).getReg() == AArch64::FP &&
+         MI.getOperand(1).isReg() && MI.getOperand(1).getReg() == AArch64::SP;
+}
+
+static bool isInjectedOutlineAddressAdjust(const MachineInstr &MI) {
+  if (MI.getOpcode() != AArch64::ADDXri || MI.getNumOperands() < 4)
+    return false;
+
+  const MachineOperand &Dest = MI.getOperand(0);
+  const MachineOperand &Src = MI.getOperand(1);
+  const MachineOperand &Imm = MI.getOperand(2);
+  const MachineOperand &Shift = MI.getOperand(3);
+  return Dest.isReg() && Dest.getReg() == AArch64::X9 && Src.isReg() &&
+         Src.getReg() == AArch64::X9 && Imm.isImm() && Imm.getImm() == 8 &&
+         Shift.isImm() && Shift.getImm() == 0;
+}
+
+static bool isAlreadyPreprocessed(const MachineBasicBlock &MBB) {
+  auto It = MBB.begin();
+  if (It == MBB.end() || !isFrameSetupADRToX9(*It))
+    return false;
+
+  It = std::next(It);
+  if (It != MBB.end() && isFrameSetupADRPToX10(*It))
+    return true;
+
+  unsigned Scanned = 0;
+  for (const MachineInstr &MI : MBB) {
+    if (isInjectedOutlineAddressAdjust(MI))
+      return true;
+    if (++Scanned == 8)
+      break;
+  }
+  return false;
+}
+
+static bool isOutlineFPAndLRStore(const MachineInstr &MI) {
+  if (MI.getOpcode() != AArch64::STPXi && MI.getOpcode() != AArch64::STPXpre)
+    return false;
+
+  bool HasFP = false;
+  bool HasLR = false;
+  for (unsigned I = 0; I < MI.getNumOperands(); ++I) {
+    const MachineOperand &MO = MI.getOperand(I);
+    if (!MO.isReg())
+      continue;
+    if (MO.getReg() == AArch64::FP)
+      HasFP = true;
+    if (MO.getReg() == AArch64::LR || MO.getReg() == AArch64::W30)
+      HasLR = true;
+  }
+  return HasFP && HasLR;
+}
+
+static bool isCJMachOOutlineContextStore(const MachineInstr &MI) {
+  return MI.getOpcode() == AArch64::STPXi && MI.getNumOperands() >= 4 &&
+         MI.getOperand(0).isReg() &&
+         MI.getOperand(0).getReg() == AArch64::X10 &&
+         MI.getOperand(1).isReg() &&
+         MI.getOperand(1).getReg() == AArch64::X9 &&
+         MI.getOperand(2).isReg() &&
+         MI.getOperand(2).getReg() == AArch64::FP &&
+         MI.getOperand(3).isImm() && MI.getOperand(3).getImm() == -2;
+}
+
+static bool candidateHasFPAndLRStore(outliner::Candidate &C) {
+  for (auto I = C.front(), E = std::next(C.back()); I != E; ++I) {
+    if (isOutlineFPAndLRStore(*I))
+      return true;
+  }
+  return false;
+}
+
+static bool candidateHasCJMachOOutlineContextStore(outliner::Candidate &C) {
+  for (auto I = C.front(), E = std::next(C.back()); I != E; ++I) {
+    if (isCJMachOOutlineContextStore(*I))
+      return true;
+  }
+  return false;
+}
+
+static void clearKillOnCJMachOOutlineContextStoreX9(MachineBasicBlock &MBB) {
+  for (MachineInstr &MI : MBB) {
+    if (!isCJMachOOutlineContextStore(MI))
+      continue;
+
+    MachineOperand &X9 = MI.getOperand(1);
+    if (X9.isReg() && X9.getReg() == AArch64::X9)
+      X9.setIsKill(false);
+    return;
+  }
+}
+
+static bool candidateHasOutlineAddressAdjust(outliner::Candidate &C) {
+  for (auto I = C.front(), E = std::next(C.back()); I != E; ++I) {
+    if (isInjectedOutlineAddressAdjust(*I))
+      return true;
+  }
+  return false;
+}
+
+static bool candidateUsesOutlineBranchReturn(outliner::Candidate &C) {
+  return candidateHasFPAndLRStore(C) &&
+         (candidateHasOutlineAddressAdjust(C) ||
+          candidateHasCJMachOOutlineContextStore(C));
+}
+
+static int64_t getOutlineBranchReturnAddressAdjust(outliner::Candidate &C) {
+  if (candidateHasCJMachOOutlineContextStore(C))
+    return 16;
+  if (candidateHasOutlineAddressAdjust(C))
+    return 8;
+  return 0;
+}
+
+static bool candidateHasExpectedOutlineBranchReturnPrefix(
+    outliner::Candidate &C, const AArch64InstrInfo &TII) {
+  int64_t AddressAdjust = getOutlineBranchReturnAddressAdjust(C);
+  if (AddressAdjust == 0)
+    return false;
+
+  unsigned BytesBeforeCandidate = 0;
+  MachineBasicBlock *MBB = C.getMBB();
+  for (auto I = MBB->begin(), E = C.front(); I != E; ++I)
+    BytesBeforeCandidate += TII.getInstSizeInBytes(*I);
+
+  // The outlined function branches back through X9, which contains the function
+  // entry address. After outlining, the continuation starts after the retained
+  // prefix and the inserted branch to the outlined function.
+  return BytesBeforeCandidate + 4 == static_cast<unsigned>(AddressAdjust);
+}
+
+static const MCCFIInstruction *getCFIInstruction(const MachineInstr &MI) {
+  if (!MI.isCFIInstruction())
+    return nullptr;
+
+  unsigned CFIIndex = MI.getOperand(0).getCFIIndex();
+  const std::vector<MCCFIInstruction> &Instrs =
+      MI.getMF()->getFrameInstructions();
+  if (CFIIndex >= Instrs.size())
+    return nullptr;
+  return &Instrs[CFIIndex];
+}
+
+static bool isDefCFAOffsetCFI(const MachineInstr &MI) {
+  const MCCFIInstruction *CFI = getCFIInstruction(MI);
+  return CFI && CFI->getOperation() == MCCFIInstruction::OpDefCfaOffset;
+}
+
+static bool isDefCFAFPRegCFI(const MachineInstr &MI,
+                             const TargetRegisterInfo &TRI) {
+  const MCCFIInstruction *CFI = getCFIInstruction(MI);
+  int DwarfFP = TRI.getDwarfRegNum(AArch64::FP, true);
+  return CFI && DwarfFP >= 0 &&
+         CFI->getOperation() == MCCFIInstruction::OpDefCfa &&
+         CFI->getRegister() == static_cast<unsigned>(DwarfFP);
+}
+
+static bool canSkipWhenSearchingAdjacentCFI(const MachineInstr &MI) {
+  return MI.isDebugInstr() || MI.isIndirectDebugValue() || MI.isKill();
+}
+
+static bool canContinueSearchingPrologueCFI(const MachineInstr &MI) {
+  return MI.isCFIInstruction() || MI.getFlag(MachineInstr::FrameSetup);
+}
+
+static MachineInstr *findPreviousDefCFAOffsetCFI(MachineInstr &Anchor) {
+  MachineBasicBlock *MBB = Anchor.getParent();
+  auto I = MachineBasicBlock::iterator(Anchor);
+  while (I != MBB->begin()) {
+    --I;
+    if (canSkipWhenSearchingAdjacentCFI(*I))
+      continue;
+    if (isDefCFAOffsetCFI(*I))
+      return &*I;
+    if (!canContinueSearchingPrologueCFI(*I))
+      return nullptr;
+  }
+  return nullptr;
+}
+
+static MachineInstr *findNextDefCFAOffsetCFI(MachineInstr &Anchor) {
+  MachineBasicBlock *MBB = Anchor.getParent();
+  for (auto I = std::next(MachineBasicBlock::iterator(Anchor)),
+            E = MBB->end();
+       I != E; ++I) {
+    if (canSkipWhenSearchingAdjacentCFI(*I))
+      continue;
+    if (isDefCFAOffsetCFI(*I))
+      return &*I;
+    if (!canContinueSearchingPrologueCFI(*I))
+      return nullptr;
+  }
+  return nullptr;
+}
+
+static MachineInstr *findAdjacentDefCFAOffsetCFI(MachineInstr &Anchor) {
+  if (MachineInstr *CFI = findPreviousDefCFAOffsetCFI(Anchor))
+    return CFI;
+  return findNextDefCFAOffsetCFI(Anchor);
+}
+
+static MachineInstr *findNextDefCFAFPRegCFI(MachineInstr &Anchor,
+                                            const TargetRegisterInfo &TRI) {
+  MachineBasicBlock *MBB = Anchor.getParent();
+  for (auto I = std::next(MachineBasicBlock::iterator(Anchor)),
+            E = MBB->end();
+       I != E; ++I) {
+    if (canSkipWhenSearchingAdjacentCFI(*I))
+      continue;
+    if (isDefCFAFPRegCFI(*I, TRI))
+      return &*I;
+    if (!canContinueSearchingPrologueCFI(*I))
+      return nullptr;
+  }
+  return nullptr;
+}
+
+static MachineInstr *findFirstMatchingInstr(MachineBasicBlock &MBB,
+                                            bool (*Pred)(const MachineInstr &)) {
+  for (MachineInstr &MI : MBB)
+    if (Pred(MI))
+      return &MI;
+  return nullptr;
+}
+
+static bool isSameRelocatedCFI(const MCCFIInstruction &LHS,
+                               const MCCFIInstruction &RHS) {
+  if (LHS.getOperation() != RHS.getOperation())
+    return false;
+
+  switch (LHS.getOperation()) {
+  case MCCFIInstruction::OpDefCfaOffset:
+    return LHS.getOffset() == RHS.getOffset();
+  case MCCFIInstruction::OpDefCfa:
+    return LHS.getRegister() == RHS.getRegister() &&
+           LHS.getOffset() == RHS.getOffset();
+  default:
+    return false;
+  }
+}
+
+static bool hasMatchingCFI(MachineBasicBlock &MBB,
+                           const MCCFIInstruction &CFI) {
+  for (MachineInstr &MI : MBB) {
+    const MCCFIInstruction *ExistingCFI = getCFIInstruction(MI);
+    if (ExistingCFI && isSameRelocatedCFI(*ExistingCFI, CFI))
+      return true;
+  }
+  return false;
+}
+
+static void insertCFIAfter(MachineFunction &MF, MachineInstr &InsertAfter,
+                           const MCCFIInstruction &CFI,
+                           unsigned SourceMIFlags) {
+  MachineBasicBlock &MBB = *InsertAfter.getParent();
+  BuildMI(MBB, std::next(MachineBasicBlock::iterator(InsertAfter)), DebugLoc(),
+          MF.getSubtarget().getInstrInfo()->get(TargetOpcode::CFI_INSTRUCTION))
+      .addCFIIndex(MF.addFrameInst(CFI))
+      .setMIFlags(SourceMIFlags);
+}
+
+static bool moveCJMachOPrologueCFIToOutlinedFunction(outliner::Candidate &C,
+                                                     MachineFunction &MF,
+                                                     bool InsertIntoOutlined) {
+  if (!(C.Flags & MachineOutlinerMBBFlags::HasCustomOutlinePattern) ||
+      !candidateUsesOutlineBranchReturn(C))
+    return false;
+
+  const TargetRegisterInfo *TRI =
+      C.getMBB()->getParent()->getSubtarget().getRegisterInfo();
+  if (!TRI)
+    return false;
+
+  MachineInstr *FrameSetupSub = nullptr;
+  MachineInstr *ContextStore = nullptr;
+  for (auto I = C.front(), E = std::next(C.back()); I != E; ++I) {
+    if (!FrameSetupSub && isOutlineFrameSetupSub(*I))
+      FrameSetupSub = &*I;
+    if (isCJMachOOutlineContextStore(*I))
+      ContextStore = &*I;
+  }
+  if (!FrameSetupSub || !ContextStore || MF.empty())
+    return false;
+
+  MachineInstr *DefCFAOffset = findAdjacentDefCFAOffsetCFI(*FrameSetupSub);
+  MachineInstr *DefCFAFP = findNextDefCFAFPRegCFI(*ContextStore, *TRI);
+  if (!DefCFAOffset || !DefCFAFP)
+    return false;
+
+  const MCCFIInstruction *DefCFAOffsetInst =
+      getCFIInstruction(*DefCFAOffset);
+  const MCCFIInstruction *DefCFAFPInst = getCFIInstruction(*DefCFAFP);
+  if (!DefCFAOffsetInst || !DefCFAFPInst)
+    return false;
+
+  MCCFIInstruction DefCFAOffsetCopy = *DefCFAOffsetInst;
+  MCCFIInstruction DefCFACopy = *DefCFAFPInst;
+  unsigned DefCFAOffsetFlags = DefCFAOffset->getFlags();
+  unsigned DefCFAFlags = DefCFAFP->getFlags();
+
+  if (InsertIntoOutlined) {
+    MachineBasicBlock &OutlinedMBB = MF.front();
+    MachineInstr *OutlinedSub =
+        findFirstMatchingInstr(OutlinedMBB, isOutlineFrameSetupSub);
+    MachineInstr *OutlinedContextStore =
+        findFirstMatchingInstr(OutlinedMBB, isCJMachOOutlineContextStore);
+    if (!OutlinedSub || !OutlinedContextStore)
+      return false;
+
+    if (!hasMatchingCFI(OutlinedMBB, DefCFAOffsetCopy))
+      insertCFIAfter(MF, *OutlinedSub, DefCFAOffsetCopy, DefCFAOffsetFlags);
+    if (!hasMatchingCFI(OutlinedMBB, DefCFACopy))
+      insertCFIAfter(MF, *OutlinedContextStore, DefCFACopy, DefCFAFlags);
+  }
+
+  DefCFAOffset->eraseFromParent();
+  DefCFAFP->eraseFromParent();
+  return true;
+}
+
+static void moveCJMachOPrologueCFIToOutlinedFunction(
+    const outliner::OutlinedFunction &OF, MachineFunction &MF) {
+  bool InsertIntoOutlined = true;
+  for (const outliner::Candidate &OriginalC : OF.Candidates) {
+    outliner::Candidate C = OriginalC;
+    if (moveCJMachOPrologueCFIToOutlinedFunction(C, MF, InsertIntoOutlined))
+      InsertIntoOutlined = false;
+  }
+}
+
+struct CJMachOOutlinePattern {
+  MachineInstr *CFI = nullptr;
+  MachineInstr *FPSetup = nullptr;
+  MachineInstr *ADR = nullptr;
+  MachineInstr *ADRP = nullptr;
+  MachineInstr *ContextStore = nullptr;
+};
+
+static bool matchCJMachOOutlinePattern(MachineBasicBlock &MBB,
+                                       CJMachOOutlinePattern &Pattern) {
+  auto It = MBB.begin();
+  if (It == MBB.end() || !isOutlineFrameSetupSub(*It))
+    return false;
+
+  ++It;
+  if (It == MBB.end() || !It->isCFIInstruction())
+    return false;
+  Pattern.CFI = &*It;
+
+  ++It;
+  if (It == MBB.end() || !isOutlineFPAndLRStore(*It))
+    return false;
+
+  ++It;
+  if (It == MBB.end() || !isOutlineFrameSetupAdd(*It))
+    return false;
+  Pattern.FPSetup = &*It;
+
+  ++It;
+  if (It == MBB.end() || !isFrameSetupADRToX9(*It))
+    return false;
+  Pattern.ADR = &*It;
+
+  ++It;
+  if (It == MBB.end() || !isFrameSetupADRPToX10(*It))
+    return false;
+  Pattern.ADRP = &*It;
+
+  for (++It; It != MBB.end(); ++It) {
+    if (isCJMachOOutlineContextStore(*It)) {
+      Pattern.ContextStore = &*It;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static bool preprocessCJMachOOutlineMBB(MachineBasicBlock &MBB) {
+  MachineFunction *MF = MBB.getParent();
+  if (&MBB != &MF->front())
+    return false;
+  if (isAlreadyPreprocessed(MBB))
+    return false;
+
+  CJMachOOutlinePattern Pattern;
+  if (!matchCJMachOOutlinePattern(MBB, Pattern))
+    return false;
+
+  MachineInstr *ContextStoreClone = MF->CloneMachineInstr(Pattern.ContextStore);
+  MachineInstr *CFIClone = MF->CloneMachineInstr(Pattern.CFI);
+  MachineInstr *ADRPClone = MF->CloneMachineInstr(Pattern.ADRP);
+  MachineInstr *ADRClone = MF->CloneMachineInstr(Pattern.ADR);
+
+  MBB.insert(std::next(MachineBasicBlock::iterator(*Pattern.FPSetup)),
+             ContextStoreClone);
+  MBB.insert(MBB.begin(), CFIClone);
+  MBB.insert(MBB.begin(), ADRPClone);
+  MBB.insert(MBB.begin(), ADRClone);
+
+  Pattern.ContextStore->removeFromParent();
+  Pattern.CFI->removeFromParent();
+  Pattern.ADRP->removeFromParent();
+  Pattern.ADR->removeFromParent();
+  return true;
+}
+
+static bool preprocessLegacyOutlineMBB(MachineBasicBlock &MBB) {
+  MachineFunction *MF = MBB.getParent();
+  if (&MBB != &MF->front())
+    return false;
+
+  if (isAlreadyPreprocessed(MBB))
+    return false;
+
+  std::vector<MachineInstr *> FirstFiveInstructions;
+  MachineBasicBlock::iterator CheckIt = MBB.begin();
+
+  for (; CheckIt != MBB.end(); ++CheckIt) {
+    MachineInstr *MI = &*CheckIt;
+    FirstFiveInstructions.push_back(MI);
+    if (MI->getOpcode() == AArch64::STURXi)
+      break;
+  }
+
+  if (CheckIt == MBB.end() || FirstFiveInstructions.size() < 5)
+    return false;
+
+  MachineInstr &CFI = *FirstFiveInstructions[1];
+  if (!CFI.isCFIInstruction())
+    return false;
+
+  MachineInstr &STUR = *FirstFiveInstructions.back();
+  MachineInstr *STURClone = MF->CloneMachineInstr(&STUR);
+
+  MachineInstr &First = *FirstFiveInstructions[0];
+  MachineInstr &ADR = (First.getOpcode() == AArch64::STPXpre)
+                          ? *FirstFiveInstructions[3]
+                          : *FirstFiveInstructions[4];
+  if (!isFrameSetupADRToX9(ADR))
+    return false;
+
+  MachineInstr *ADRClone = MF->CloneMachineInstr(&ADR);
+
+  MBB.insert(std::next(MachineBasicBlock::iterator(ADR)), STURClone);
+  ADR.removeFromParent();
+
+  MachineInstr *CFIClone = MF->CloneMachineInstr(&CFI);
+  MBB.insert(MBB.begin(), CFIClone);
+  CFI.removeFromParent();
+
+  MBB.insert(MBB.begin(), ADRClone);
+
+  STUR.removeFromParent();
+  return true;
+}
+
+static bool PreprocessingMBB(MachineBasicBlock &MBB) {
+  return preprocessCJMachOOutlineMBB(MBB) || preprocessLegacyOutlineMBB(MBB);
+}
+
 
 bool AArch64InstrInfo::isMBBSafeToOutlineFrom(MachineBasicBlock &MBB,
                                               unsigned &Flags) const {
@@ -7634,6 +8184,9 @@ bool AArch64InstrInfo::isMBBSafeToOutlineFrom(MachineBasicBlock &MBB,
   if (!CanSaveLR && !LRU.available(AArch64::LR))
     Flags |= MachineOutlinerMBBFlags::LRUnavailableSomewhere;
 
+  if (PreprocessingMBB(MBB))
+    Flags |= MachineOutlinerMBBFlags::HasCustomOutlinePattern;
+
   return true;
 }
 
@@ -7644,18 +8197,19 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
   MachineBasicBlock *MBB = MI.getParent();
   MachineFunction *MF = MBB->getParent();
   AArch64FunctionInfo *FuncInfo = MF->getInfo<AArch64FunctionInfo>();
+  bool HasCustomPattern = Flags & MachineOutlinerMBBFlags::HasCustomOutlinePattern;
 
   // Don't outline anything used for return address signing. The outlined
   // function will get signed later if needed
   switch (MI.getOpcode()) {
-  case AArch64::PACIASP:
-  case AArch64::PACIBSP:
-  case AArch64::AUTIASP:
-  case AArch64::AUTIBSP:
-  case AArch64::RETAA:
-  case AArch64::RETAB:
-  case AArch64::EMITBKEY:
-    return outliner::InstrType::Illegal;
+  case AArch64::PACIASP: 
+  case AArch64::PACIBSP: 
+  case AArch64::AUTIASP: 
+  case AArch64::AUTIBSP: 
+  case AArch64::RETAA: 
+  case AArch64::RETAB: 
+  case AArch64::EMITBKEY: 
+      return outliner::InstrType::Illegal;
   }
 
   // Don't outline LOHs.
@@ -7668,9 +8222,13 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
   //
   // FIXME: If the proper fixups for the offset are implemented, this should be
   // possible.
-  if (MI.isCFIInstruction())
-    return outliner::InstrType::Legal;
 
+  if (MI.isCFIInstruction()){
+    if (HasCustomPattern)
+      return outliner::InstrType::Illegal;
+
+    return outliner::InstrType::Legal;
+  }
   // Don't allow debug values to impact outlining type.
   if (MI.isDebugInstr() || MI.isIndirectDebugValue())
     return outliner::InstrType::Invisible;
@@ -7699,8 +8257,12 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
 
     // If it uses LR or W30 explicitly, then don't touch it.
     if (MOP.isReg() && !MOP.isImplicit() &&
-        (MOP.getReg() == AArch64::LR || MOP.getReg() == AArch64::W30))
+        (MOP.getReg() == AArch64::LR || MOP.getReg() == AArch64::W30)){
+      if (HasCustomPattern && isAllowedOutlinedLRUse(MI))
+        return outliner::InstrType::Legal;
+
       return outliner::InstrType::Illegal;
+    }
   }
 
   // Special cases for instructions that can always be outlined, but will fail
@@ -7747,6 +8309,15 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
         MI.getOpcode() == AArch64::BLRNoIP || MI.getOpcode() == AArch64::BL)
       UnknownCallOutlineType = outliner::InstrType::LegalTerminator;
 
+    if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+      StatepointOpers SO(&MI);
+      const MachineOperand *MOSym = &(SO.getCallTarget());
+      const auto *Callee = dyn_cast<const Function>(MOSym->getGlobal());
+      if (!Callee || !Callee->isCangjieSafePoint())
+        UnknownCallOutlineType = outliner::InstrType::LegalTerminator;
+    }
+
+
     if (!Callee)
       return UnknownCallOutlineType;
 
@@ -7774,7 +8345,7 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
   // Don't outline positions.
   if (MI.isPosition())
     return outliner::InstrType::Illegal;
-
+  
   // Don't touch the link register or W30.
   if (MI.readsRegister(AArch64::W30, &getRegisterInfo()) ||
       MI.modifiesRegister(AArch64::W30, &getRegisterInfo()))
@@ -7903,17 +8474,31 @@ void AArch64InstrInfo::buildOutlinedFrame(
     // For thunk outlining, rewrite the last instruction from a call to a
     // tail-call.
     MachineInstr *Call = &*--MBB.instr_end();
+    MachineOperand *Callee = &Call->getOperand(0);
     unsigned TailOpcode;
     if (Call->getOpcode() == AArch64::BL) {
       TailOpcode = AArch64::TCRETURNdi;
-    } else {
+    } else if (Call->getOpcode() == AArch64::BLR 
+            || Call->getOpcode() == AArch64::BLRNoIP) {
       assert(Call->getOpcode() == AArch64::BLR ||
              Call->getOpcode() == AArch64::BLRNoIP);
       TailOpcode = AArch64::TCRETURNriALL;
+    } else {
+      assert(Call->getOpcode() == TargetOpcode::STATEPOINT);
+      Callee = &Call->getOperand(Call->getNumDefs() + 3);
+      TailOpcode = Callee->isReg() ? AArch64::TCRETURNriALL : AArch64::TCRETURNdi; 
     }
-    MachineInstr *TC = BuildMI(MF, DebugLoc(), get(TailOpcode))
-                           .add(Call->getOperand(0))
-                           .addImm(0);
+
+    MachineInstr *TC = nullptr;
+    if (Call->getOpcode() != TargetOpcode::STATEPOINT)
+      TC = BuildMI(MF, DebugLoc(), get(TailOpcode))
+                            .add(Call->getOperand(0))
+                            .addImm(0);
+    else 
+      TC = BuildMI(MF, DebugLoc(), get(TailOpcode))
+                            .add(*Callee)
+                            .addImm(0);
+
     MBB.insert(MBB.end(), TC);
     Call->eraseFromParent();
 
@@ -8004,7 +8589,12 @@ void AArch64InstrInfo::buildOutlinedFrame(
                          ShouldSignReturnAddrWithAKey);
     return;
   }
-
+  outliner::Candidate FirstCand = OF.Candidates.front();
+  bool UsesCJMachOContextStore =
+      candidateHasCJMachOOutlineContextStore(FirstCand);
+  bool flag_stp = candidateUsesOutlineBranchReturn(FirstCand);
+  if (flag_stp)
+    moveCJMachOPrologueCFIToOutlinedFunction(OF, MF);
   // It's not a tail call, so we have to insert the return ourselves.
 
   // LR has to be a live in so that we can return to it.
@@ -8013,8 +8603,23 @@ void AArch64InstrInfo::buildOutlinedFrame(
 
   MachineInstr *ret = BuildMI(MF, DebugLoc(), get(AArch64::RET))
                           .addReg(AArch64::LR);
-  MBB.insert(MBB.end(), ret);
-
+  if (!flag_stp) {
+    MBB.insert(MBB.end(), ret);
+  } else {
+    int64_t AddressAdjust = getOutlineBranchReturnAddressAdjust(FirstCand);
+    assert(AddressAdjust != 0 &&
+           "outline branch return requires an address adjustment");
+    if (UsesCJMachOContextStore)
+      clearKillOnCJMachOOutlineContextStoreX9(MBB);
+    BuildMI(MBB, MBB.end(), DebugLoc(),
+          get(AArch64::ADDXri), AArch64::X9)
+      .addReg(AArch64::X9)
+      .addImm(AddressAdjust)
+      .addImm(0);
+    BuildMI(MBB, MBB.end(), DebugLoc(), get(AArch64::TCRETURNriALL))
+        .addReg(AArch64::X9)
+        .addImm(0);
+  }
   signOutlinedFunction(MF, MBB, ShouldSignReturnAddr,
                        ShouldSignReturnAddrWithAKey);
 
@@ -8032,10 +8637,85 @@ void AArch64InstrInfo::buildOutlinedFrame(
 MachineBasicBlock::iterator AArch64InstrInfo::insertOutlinedCall(
     Module &M, MachineBasicBlock &MBB, MachineBasicBlock::iterator &It,
     MachineFunction &MF, outliner::Candidate &C) const {
+  MachineInstr *StatePointInst = 
+  (C.back()->getOpcode() == TargetOpcode::STATEPOINT) ? 
+  &*C.back() : nullptr;
+
+  MachineInstr *OutlinedStatePoint = nullptr;
+  std::vector<MachineOperand> OSPOperands;
+
+  if (StatePointInst) {
+    OSPOperands.reserve(8);
+    StatepointOpers SOpers(StatePointInst);
+    const TargetRegisterInfo *TRI = MBB.getParent()->getSubtarget().getRegisterInfo();
+
+    unsigned NumArgs = StatePointInst->getOperand(SOpers.getNCallArgsPos()).getImm();
+    SmallSet<Register, 2> ArgSet;
+    SmallSet<Register, 2> DefArgSet;
+
+    for (unsigned i = 0; i < NumArgs; ++i) {
+      const MachineOperand &Arg = StatePointInst->getOperand(4 + i + StatePointInst->getNumDefs());
+      if (Arg.isReg() && Arg.isUse()) {
+        Register Reg = Arg.getReg();
+        if (Register::isPhysicalRegister(Reg))
+          ArgSet.insert(Reg);
+      }
+    }
+    for (auto I = C.front(), E = C.back(); I != E; ++I) {
+      if (I->isDebugInstr() || I->hasImplicitDef())
+        continue;
+      bool IsDefArg = false;
+      for (auto &def: I->defs()) {
+        auto defReg = def.getReg();
+        ArgSet.erase(defReg);
+        for (MCRegAliasIterator Alias(defReg, TRI, true); Alias.isValid(); ++Alias)
+          ArgSet.erase(*Alias);
+      }
+    }
+
+    // Add CC, flags, Num Args.
+    for (unsigned i = 0; i < SOpers.getNCallArgsPos(); ++i)
+      OSPOperands.push_back(StatePointInst->getOperand(i));
+
+    OSPOperands.push_back(MachineOperand::CreateImm(ArgSet.size()));
+    OSPOperands.push_back(MachineOperand::CreateGA(M.getNamedValue(MF.getName()), 0));
+
+    for (auto &Arg: ArgSet) {
+      OSPOperands.push_back(MachineOperand::CreateReg(Arg, false));
+      OSPOperands.back().setIsKill();
+    }
+
+    for (unsigned i = SOpers.getVarIdx(); i < StatePointInst->getNumOperands(); ++i)
+      OSPOperands.push_back(StatePointInst->getOperand(i));
+  }
+  bool flag_stp = candidateUsesOutlineBranchReturn(C);
+  bool UseOutlineBranchReturn =
+      flag_stp && !StatePointInst &&
+      std::next(MachineBasicBlock::iterator(*C.back())) != MBB.end();
+  MachineBasicBlock *Continuation = nullptr;
+
+  // Outline branch-return candidates resume in the next basic block after the
+  // outlined function branches back via X9. Split the continuation out before
+  // inserting a branch terminator so the current block remains well-formed.
+  if (UseOutlineBranchReturn)
+    Continuation = MBB.splitAt(*C.back(), /*UpdateLiveIns=*/true);
 
   // Are we tail calling?
   if (C.CallConstructionID == MachineOutlinerTailCall) {
     // If yes, then we can just branch to the label.
+    if (StatePointInst) {
+      It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(TargetOpcode::STATEPOINT)));
+      for (auto &Operand: OSPOperands)
+        It->addOperand(Operand);
+    } else
+      It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::TCRETURNdi))
+                              .addGlobalAddress(M.getNamedValue(MF.getName()))
+                              .addImm(0));
+    return It;
+  }
+
+  if (UseOutlineBranchReturn) {
+    cloneCandidateCFIToContinuation(C, *Continuation);
     It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::TCRETURNdi))
                             .addGlobalAddress(M.getNamedValue(MF.getName()))
                             .addImm(0));
@@ -8046,8 +8726,13 @@ MachineBasicBlock::iterator AArch64InstrInfo::insertOutlinedCall(
   if (C.CallConstructionID == MachineOutlinerNoLRSave ||
       C.CallConstructionID == MachineOutlinerThunk) {
     // No, so just insert the call.
-    It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::BL))
-                            .addGlobalAddress(M.getNamedValue(MF.getName())));
+    if (StatePointInst) {
+     It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(TargetOpcode::STATEPOINT)));
+      for (auto &Operand: OSPOperands)
+        It->addOperand(Operand);
+    } else
+      It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::BL))
+                              .addGlobalAddress(M.getNamedValue(MF.getName())));
     return It;
   }
 
@@ -8092,16 +8777,20 @@ MachineBasicBlock::iterator AArch64InstrInfo::insertOutlinedCall(
                   .addImm(16);
   }
 
-  It = MBB.insert(It, Save);
-  It++;
-
   // Insert the call.
-  It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::BL))
+  if (!flag_stp) {
+    It = MBB.insert(It, Save);
+    It++;
+    It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::BL))
                           .addGlobalAddress(M.getNamedValue(MF.getName())));
-  CallPt = It;
-  It++;
-
-  It = MBB.insert(It, Restore);
+    CallPt = It;
+    It++;
+    It = MBB.insert(It, Restore);
+  } else {
+    It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::BL))
+                          .addGlobalAddress(M.getNamedValue(MF.getName())));
+    CallPt = It;
+  }
   return CallPt;
 }
 
