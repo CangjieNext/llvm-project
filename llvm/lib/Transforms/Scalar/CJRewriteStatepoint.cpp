@@ -340,6 +340,8 @@ static Value *findBaseDefiningValueOfVector(Value *I, DefiningValueMapTy &Cache,
   // Each case parallels findBaseDefiningValue below, see that code for
   // detailed motivation.
 
+
+
   auto Cached = Cache.find(I);
   if (Cached != Cache.end())
     return Cached->second;
