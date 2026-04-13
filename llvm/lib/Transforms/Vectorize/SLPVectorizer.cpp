@@ -215,6 +215,12 @@ static const int MinScheduleRegionSize = 16;
 /// avoids spending time checking the cost model and realizing that they will
 /// be inevitably scalarized.
 static bool isValidElementType(Type *Ty) {
+  // Do not vectorize GC-managed pointer types (addrspace(1)). Creating vectors
+  // of such pointers causes CJRewriteStatepoint to fail when computing base
+  // pointers, since it does not handle arbitrary vector instructions.
+  if (auto *PT = dyn_cast<PointerType>(Ty))
+    if (PT->getAddressSpace() == 1)
+      return false;
   return VectorType::isValidElementType(Ty) && !Ty->isX86_FP80Ty() &&
          !Ty->isPPC_FP128Ty();
 }

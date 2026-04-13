@@ -794,9 +794,16 @@ bool LoopVectorizationLegality::canVectorizeInstrs() {
 
       // Check that the instruction return type is vectorizable.
       // Also, we can't vectorize extractelement instructions.
+      // Do not vectorize GC-managed pointer types (addrspace(1)); creating
+      // vectors of such pointers causes CJRewriteStatepoint to fail.
+      auto isGCPointerType = [](Type *T) -> bool {
+        if (auto *PT = dyn_cast<PointerType>(T))
+          return PT->getAddressSpace() == 1;
+        return false;
+      };
       if ((!VectorType::isValidElementType(I.getType()) &&
            !I.getType()->isVoidTy()) ||
-          isa<ExtractElementInst>(I)) {
+          isa<ExtractElementInst>(I) || isGCPointerType(I.getType())) {
         reportVectorizationFailure("Found unvectorizable type",
             "instruction return type cannot be vectorized",
             "CantVectorizeInstructionReturnType", ORE, TheLoop, &I);
@@ -806,7 +813,7 @@ bool LoopVectorizationLegality::canVectorizeInstrs() {
       // Check that the stored type is vectorizable.
       if (auto *ST = dyn_cast<StoreInst>(&I)) {
         Type *T = ST->getValueOperand()->getType();
-        if (!VectorType::isValidElementType(T)) {
+        if (!VectorType::isValidElementType(T) || isGCPointerType(T)) {
           reportVectorizationFailure("Store instruction cannot be vectorized",
                                      "store instruction cannot be vectorized",
                                      "CantVectorizeStore", ORE, TheLoop, ST);
