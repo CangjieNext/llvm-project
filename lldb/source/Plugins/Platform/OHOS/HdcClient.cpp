@@ -41,6 +41,7 @@
 #include <sstream>
 #include <utility>
 #include <securec.h>
+#include <regex>
 
 // On Windows, transitive dependencies pull in <Windows.h>, which defines a
 // macro that clashes with a method name.
@@ -204,9 +205,22 @@ Status HdcClient::SetPortForwarding(const uint16_t local_port,
   return ReadResponseStatus("Forwardport result:OK");
 }
 
+bool ValidateSocketName(const std::string& name) {
+    if (name.empty()) {
+        return false;
+    }
+
+    const std::regex valid_chars(R"(^[a-zA-Z0-9_.-]+$)");
+
+    return std::regex_match(name, valid_chars);
+}
+
 Status HdcClient::SetPortForwarding(const uint16_t local_port,
                                     llvm::StringRef remote_socket_name,
                                     const UnixSocketNamespace socket_namespace) {
+  if (!ValidateSocketName(remote_socket_name.str())) {
+    return Status("Remote socket name is invalid: %s", remote_socket_name.str().c_str());
+  }
   const char *sock_namespace_str = (socket_namespace == UnixSocketNamespace::UnixSocketNamespaceAbstract)
                                    ? kSocketNamespaceAbstract
                                    : kSocketNamespaceFileSystem;
@@ -247,6 +261,18 @@ Status HdcClient::DeletePortForwarding(const uint16_t local_port,
   return ReadResponseStatus("Remove forward ruler success");
 }
 
+static std::string EscapeHdcPath(const std::string& path) {
+  std::string result = "\"";
+  for (char c : path) {
+    if (c == '"' || c == '\\') {
+      result += '\\';
+    }
+    result += c;
+  }
+  result += "\"";
+  return result;
+}
+
 Status HdcClient::LocalTransferFile(const char *direction, const FileSpec &src,
                                     const FileSpec &dst) {
   const unsigned vector_size = 128;
@@ -258,7 +284,7 @@ Status HdcClient::LocalTransferFile(const char *direction, const FileSpec &src,
   std::stringstream cmd;
   cmd << "file " << direction << " -cwd ";
   cmd.write(cwd.data(), cwd.size());
-  cmd << " \"" << src.GetPath() << "\" \"" << dst.GetPath() << "\"";
+  cmd << " " << EscapeHdcPath(src.GetPath()) << " " << EscapeHdcPath(dst.GetPath());
   Status error = SendMessage(cmd.str());
   if (error.Fail())
     return error;
@@ -568,7 +594,7 @@ Status HdcClient::RecvFile(const FileSpec &src, const FileSpec &dst) {
 
   std::stringstream cmd;
   cmd << "file recv remote -m";
-  cmd << " \"" << src.GetPath() << "\" \"" << dst.GetPath() << "\"";
+  cmd << " " << EscapeHdcPath(src.GetPath()) << " " << EscapeHdcPath(dst.GetPath());
   Status error = SendMessage(cmd.str());
   if (error.Fail())
     return error;
@@ -685,7 +711,7 @@ Status HdcClient::SendFile(const FileSpec &src, const FileSpec &dst) {
     return Status("Unable to open local file %s", local_file_path.c_str());
 
   std::stringstream cmd;
-  cmd << "file send remote -m \"" << src.GetPath() << "\" \"" << dst.GetPath() << "\"";
+  cmd << "file send remote -m " << EscapeHdcPath(src.GetPath()) << " " << EscapeHdcPath(dst.GetPath());
   Status error = SendMessage(cmd.str());
   if (error.Fail())
     return error;
@@ -885,7 +911,6 @@ Status HdcClient::ReadAllBytes(void *buffer, size_t size) {
 
 Status HdcClient::Shell(const char *command, milliseconds timeout,
                         std::string *output) {
-  assert(command && command[0]);
   std::string cmd = "shell ";
   cmd += command;
   Status error = SendMessage(cmd);

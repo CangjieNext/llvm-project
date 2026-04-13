@@ -10,8 +10,19 @@
 
 #include "CangjieExpressionSourceCode.h"
 #include "lldb/Utility/StreamString.h"
+#include <regex>
 
 using namespace lldb_private;
+
+bool ValidateClassname(const std::string& classname) {
+    if (classname.empty()) {
+        return false;
+    }
+
+    const std::regex pattern(R"(^[a-zA-Z0-9_.<>]+$)");
+
+    return std::regex_match(classname, pattern);
+}
 
 bool CangjieExpressionSourceCode::GetText(
     std::string &text, ExecutionContext &exe_ctx, bool add_locals,
@@ -49,6 +60,7 @@ bool CangjieExpressionSourceCode::GetText(
           module_imports.c_str(), m_body.c_str());
       break;
     case WrapKind::MemberFunction:
+      std::string classname = ValidateClassname(m_class_name) ? m_class_name : "";
       wrap_stream.Printf(
           "package __cjdb_expr\n"
           "%s\n"
@@ -71,7 +83,7 @@ bool CangjieExpressionSourceCode::GetText(
           "  __lldb_injected_self.__lldb_wrapped_expr(__lldb_arg)\n"
           "}\n",
           module_imports.c_str(),
-          m_class_name.c_str(), m_body.c_str());
+          classname.c_str(), m_body.c_str());
       break;
     }
     text = std::string(wrap_stream.GetString());

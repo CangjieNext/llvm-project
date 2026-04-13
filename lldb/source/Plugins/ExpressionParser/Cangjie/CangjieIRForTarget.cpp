@@ -305,11 +305,11 @@ bool CangjieIRForTarget::IsReferenceType(lldb::VariableSP value) {
 void CangjieIRForTarget::AddVariableToArgs() {
   lldb_private::Log *log = GetLog(LLDBLog::Expressions);
   for (llvm::GlobalVariable &global_var : m_module->globals()) {
-    lldb_private::ConstString global_name(global_var.getName().data());
+    lldb_private::ConstString global_name(global_var.getName().str().c_str());
     lldb_private::Mangled mangled_name(global_name);
     lldb_private::ConstString demanglede_name = mangled_name.GetName();
     if (demanglede_name.GetStringRef().startswith("__lldb_locals::")) {
-      demanglede_name.SetCString(demanglede_name.GetStringRef().substr(strlen("__lldb_locals::")).data());
+      demanglede_name.SetCString(demanglede_name.GetStringRef().substr(strlen("__lldb_locals::")).str().c_str());
     }
 
     lldb::VariableSP value;
@@ -456,7 +456,7 @@ bool CangjieIRForTarget::HandleIRForExecute() {
     // If the class context does not contain the this variable, the struct is zero size.
     // __lldb_injected_self will be deleted by codegen.
     if (this_var != m_this_obj_name) {
-      m_func_name.SetCString(extend_func.data());
+      m_func_name.SetCString(extend_func.str().c_str());
       m_replace_this_object = false;
     }
   }
@@ -464,7 +464,7 @@ bool CangjieIRForTarget::HandleIRForExecute() {
   // Check whether the "this" variable needs to be replaced.
   if (m_replace_this_object) {
     ReplaceIRGlobals();
-    m_func_name.SetCString(extend_func.data());
+    m_func_name.SetCString(extend_func.str().c_str());
   }
 
   // Replace all result variables and variables in the program with parameters of the expr function.
@@ -529,7 +529,7 @@ bool CangjieIRForTarget::CreateResultVariable(lldb_private::Materializer::Persis
   // There are two wrapper kind: Function and MemberFunction.
   lldb_private::ConstString replaceFunc = m_func_name;
   if (in_member) {
-    replaceFunc.SetCString(FindExtendFunction().data());
+    replaceFunc.SetCString(FindExtendFunction().str().c_str());
   }
   Function *llvm_function =
       replaceFunc.IsEmpty() ? nullptr

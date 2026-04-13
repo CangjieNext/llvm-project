@@ -144,8 +144,8 @@ bool CangjieExpressionParser::Parse(ExecutionContext &exeCtx, const std::string 
   auto triple = target_arch.GetTriple();
   SetTripleInfoIfNeed(target_arch, target_triple);
   LLDB_LOGF(log, "using target triple %s %s %s %s %s\n", triple.str().c_str(),
-            triple.getArchName().data(), triple.getVendorName().data(),
-            triple.getOSName().data(), triple.getEnvironmentName().data());
+            triple.getArchName().str().c_str(), triple.getVendorName().str().c_str(),
+            triple.getOSName().str().c_str(), triple.getEnvironmentName().str().c_str());
   if (target_triple.env == Cangjie::Triple::Environment::ANDROID) {
     target_triple.apiLevel = "31";
   }

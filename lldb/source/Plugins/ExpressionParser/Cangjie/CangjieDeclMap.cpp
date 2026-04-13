@@ -420,7 +420,7 @@ std::vector<CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::LookUpFunction(std
   target->GetImages().FindFunctions(ConstString(name),
       lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options, sc_list);
 
-  std::string re_cstr = std::string("^") + name + std::string("<.+>$");
+  std::string re_cstr = std::string("^") + llvm::Regex::escape(name) + std::string("<.+>$");
   target->GetImages().FindFunctions(RegularExpression(llvm::StringRef(re_cstr)), function_options, sc_generic_list);
   sc_list.Append(sc_generic_list);
   if (sc_list.IsEmpty()) {
