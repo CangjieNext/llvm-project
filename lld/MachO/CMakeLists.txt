@@ -3,6 +3,7 @@ tablegen(LLVM Options.inc -gen-opt-parser-defs)
 add_public_tablegen_target(MachOOptionsTableGen)
 
 include_directories(${LLVM_MAIN_SRC_DIR}/../libunwind/include)
+include_directories(${LLVM_MAIN_SRC_DIR}/../utils/demangle)
 
 add_lld_library(lldMachO
   Arch/ARM.cpp

@@ -247,6 +247,25 @@ static llvm::CachePruningPolicy getLTOCachePolicy(InputArgList &args) {
   return CHECK(parseCachePruningPolicy(ltoPolicy), "invalid LTO cache policy");
 }
 
+static void parseVisiblePkgs(InputArgList &args) {
+  for (const Arg *arg : args.filtered(OPT_visible_pkgs_eq)) {
+    StringRef values(arg->getValue());
+    while (true) {
+      StringRef pkg;
+      std::tie(pkg, values) = values.split(',');
+      pkg = pkg.trim();
+      if (pkg.empty()) {
+        error(arg->getSpelling() + ": package names must not be empty in '" +
+              arg->getValue() + "'");
+        break;
+      }
+      config->visiblePkgs.insert(pkg);
+      if (values.empty())
+        break;
+    }
+  }
+}
+
 // What caused a given library to be loaded. Only relevant for archives.
 // Note that this does not tell us *how* we should load the library, i.e.
 // whether we should do it lazily or eagerly (AKA force loading). The "how" is
@@ -1330,6 +1349,7 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
   config->applicationExtension = args.hasFlag(
       OPT_application_extension, OPT_no_application_extension, false);
   config->exportDynamic = args.hasArg(OPT_export_dynamic);
+  parseVisiblePkgs(args);
   config->forceLoadObjC = args.hasArg(OPT_ObjC);
   config->forceLoadSwift = args.hasArg(OPT_force_load_swift_libs);
   config->deadStripDylibs = args.hasArg(OPT_dead_strip_dylibs);

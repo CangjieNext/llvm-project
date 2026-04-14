@@ -13,6 +13,7 @@
 #include "Symbols.h"
 #include "Target.h"
 
+#include "CangjieDemangle.h"
 #include "lld/Common/Args.h"
 #include "lld/Common/CommonLinkerContext.h"
 #include "lld/Common/Strings.h"
@@ -30,6 +31,29 @@ using namespace lld::macho;
 using namespace llvm;
 using namespace llvm::MachO;
 using namespace llvm::sys;
+
+static bool hasVisiblePkg(StringRef symbolName) {
+  if (config->visiblePkgs.empty() || symbolName.empty())
+    return false;
+
+  StringRef demangleName = GlobalValue::dropLLVMManglingEscape(symbolName);
+  auto matchesPkg = [](StringRef name) {
+    auto info = Cangjie::Demangle(name.str());
+    return info.IsValid() && config->visiblePkgs.count(info.GetPkgName());
+  };
+
+  if (matchesPkg(demangleName))
+    return true;
+
+  if (demangleName.consume_front("_"))
+    return matchesPkg(demangleName);
+
+  return false;
+}
+
+static bool shouldKeepVisibleForPkg(const lto::InputFile::Symbol &objSym) {
+  return hasVisiblePkg(objSym.getIRName()) || hasVisiblePkg(objSym.getName());
+}
 
 static lto::Config createConfig() {
   lto::Config c;
@@ -89,8 +113,9 @@ void BitcodeCompiler::add(BitcodeFile &f) {
       r.FinalDefinitionInLinkageUnit = true;
     }
 
-    r.VisibleToRegularObj =
-        sym->isUsedInRegularObj || (r.Prevailing && r.ExportDynamic);
+    r.VisibleToRegularObj = sym->isUsedInRegularObj ||
+                            (r.Prevailing && r.ExportDynamic) ||
+                            shouldKeepVisibleForPkg(objSym);
 
     // Un-define the symbol so that we don't get duplicate symbol errors when we
     // load the ObjFile emitted by LTO compilation.
