@@ -31,6 +31,30 @@ using namespace llvm;
 using namespace llvm::MachO;
 using namespace llvm::sys;
 
+static Optional<StringRef> getBitcodePackageName(const BitcodeFile &file) {
+  if (!file.obj)
+    return None;
+
+  // For Cangjie bitcode, the module identifier is:
+  //   <subCHIRPackageIdx>-<pkgName>
+  StringRef pkgName = file.obj->getSourceFileName();
+  unsigned subCHIRPackageIdx = 0;
+  constexpr unsigned decimalBase = 10;
+  if (pkgName.consumeInteger(decimalBase, subCHIRPackageIdx) ||
+      !pkgName.consume_front("-") || pkgName.empty())
+    return None;
+  return pkgName;
+}
+
+static bool shouldKeepVisibleForPkg(const BitcodeFile &file) {
+  if (config->hideAllVisiblePkgs || config->visiblePkgs.empty())
+    return false;
+  if (!config->hasMatchedVisiblePkg)
+    return true;
+  Optional<StringRef> pkgName = getBitcodePackageName(file);
+  return pkgName && config->visiblePkgs.count(*pkgName);
+}
+
 static lto::Config createConfig() {
   lto::Config c;
   c.Options = initTargetOptionsFromCodeGenFlags();
@@ -46,6 +70,7 @@ static lto::Config createConfig() {
   c.TimeTraceGranularity = config->timeTraceGranularity;
   c.OptLevel = config->ltoo;
   c.CGOptLevel = args::getCGOptLevel(config->ltoo);
+  c.OpaquePointers =false;
   if (config->saveTemps)
     checkError(c.addSaveTemps(config->outputFile.str() + ".",
                               /*UseInputModulePath=*/true));
@@ -62,10 +87,12 @@ void BitcodeCompiler::add(BitcodeFile &f) {
   ArrayRef<lto::InputFile::Symbol> objSyms = f.obj->symbols();
   std::vector<lto::SymbolResolution> resols;
   resols.reserve(objSyms.size());
+  bool exportForPkg = shouldKeepVisibleForPkg(f);
 
   // Provide a resolution to the LTO API for each symbol.
-  bool exportDynamic =
+  bool defaultExportDynamic =
       config->outputType != MH_EXECUTE || config->exportDynamic;
+  bool exportDynamic = defaultExportDynamic && exportForPkg;
   auto symIt = f.symbols.begin();
   for (const lto::InputFile::Symbol &objSym : objSyms) {
     resols.emplace_back();

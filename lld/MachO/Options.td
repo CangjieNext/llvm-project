@@ -92,6 +92,10 @@ def no_call_graph_profile_sort : Flag<["--"], "no-call-graph-profile-sort">,
 def print_symbol_order: Joined<["--"], "print-symbol-order=">,
     HelpText<"Print a symbol order specified by --call-graph-profile-sort into the specified file">,
     Group<grp_lld>;
+def visible_pkgs_eq : Joined<["--"], "visible-pkgs=">,
+    HelpText<"Keep symbols visible for the specified Cangjie packages in FullLTO">,
+    MetaVarName<"<pkg[,pkg...]>">,
+    Group<grp_lld>;
 
 // This is a complete Options.td compiled from Apple's ld(1) manpage
 // dated 2018-03-07 and cross checked with ld64 source code in repo
@@ -944,6 +948,10 @@ def no_objc_category_merging : Flag<["-"], "no_objc_category_merging">,
 def object_path_lto : Separate<["-"], "object_path_lto">,
     MetaVarName<"<path>">,
     HelpText<"Retain any temporary mach-o file in <path> that would otherwise be deleted during LTO">,
+    Group<grp_rare>;
+def lto_emit_obj_only : Flag<["-"], "lto-emit-obj-only">,
+    HelpText<"Stop after emitting LTO native object files">,
+    Flags<[HelpHidden]>,
     Group<grp_rare>;
 def cache_path_lto : Separate<["-"], "cache_path_lto">,
     MetaVarName<"<path>">,

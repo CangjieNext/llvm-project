@@ -247,6 +247,70 @@ static llvm::CachePruningPolicy getLTOCachePolicy(InputArgList &args) {
   return CHECK(parseCachePruningPolicy(ltoPolicy), "invalid LTO cache policy");
 }
 
+static bool collectVisiblePkgs(InputArgList &args) {
+  for (const Arg *arg : args.filtered(OPT_visible_pkgs_eq)) {
+    StringRef rawValue = arg->getValue();
+    if (rawValue.empty()) {
+      config->hideAllVisiblePkgs = true;
+      continue;
+    }
+
+    SmallVector<StringRef, 4> pkgNames;
+    rawValue.split(pkgNames, ',', /*MaxSplit=*/-1, /*KeepEmpty=*/true);
+    for (StringRef pkg : pkgNames) {
+      pkg = pkg.trim();
+      if (pkg.empty()) {
+        error("empty package name in --visible-pkgs");
+        return false;
+      }
+      config->visiblePkgs.insert(pkg);
+    }
+  }
+  return true;
+}
+
+static Optional<StringRef> getBitcodePackageName(const BitcodeFile &file) {
+  if (!file.obj)
+    return None;
+
+  // For Cangjie bitcode, the module identifier is:
+  //   <subCHIRPackageIdx>-<pkgName>
+  StringRef pkgName = file.obj->getSourceFileName();
+  unsigned subCHIRPackageIdx = 0;
+  if (pkgName.consumeInteger(10, subCHIRPackageIdx) ||
+      !pkgName.consume_front("-") || pkgName.empty())
+    return None;
+  return pkgName;
+}
+
+static bool validateVisiblePkgModules() {
+  if (!config->hideAllVisiblePkgs && config->visiblePkgs.empty())
+    return true;
+
+  for (InputFile *file : inputFiles) {
+    auto *bitcodeFile = dyn_cast<BitcodeFile>(file);
+    if (!bitcodeFile)
+      continue;
+    Optional<StringRef> pkgName = getBitcodePackageName(*bitcodeFile);
+    if (!pkgName) {
+      error("invalid Cangjie bitcode module identifier '" +
+            bitcodeFile->obj->getSourceFileName() +
+            "' for --visible-pkgs, expected <split-index>-<package-name>");
+      return false;
+    }
+    if (config->visiblePkgs.count(*pkgName) != 0) {
+      config->hasMatchedVisiblePkg = true;
+    }
+  }
+  return true;
+}
+
+static bool parseVisiblePkgs(InputArgList &args) {
+  if (!collectVisiblePkgs(args))
+    return false;
+  return true;
+}
+
 // What caused a given library to be loaded. Only relevant for archives.
 // Note that this does not tell us *how* we should load the library, i.e.
 // whether we should do it lazily or eagerly (AKA force loading). The "how" is
@@ -1319,6 +1383,7 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     config->umbrella = arg->getValue();
   }
   config->ltoObjPath = args.getLastArgValue(OPT_object_path_lto);
+  config->ltoEmitObjOnly = args.hasArg(OPT_lto_emit_obj_only);
   config->ltoo = args::getInteger(args, OPT_lto_O, 2);
   if (config->ltoo > 3)
     error("--lto-O: invalid optimization level: " + Twine(config->ltoo));
@@ -1330,6 +1395,8 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
   config->applicationExtension = args.hasFlag(
       OPT_application_extension, OPT_no_application_extension, false);
   config->exportDynamic = args.hasArg(OPT_export_dynamic);
+  if (!parseVisiblePkgs(args))
+    return false;
   config->forceLoadObjC = args.hasArg(OPT_ObjC);
   config->forceLoadSwift = args.hasArg(OPT_force_load_swift_libs);
   config->deadStripDylibs = args.hasArg(OPT_dead_strip_dylibs);
@@ -1559,6 +1626,8 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
 
     initLLVM(); // must be run before any call to addFile()
     createFiles(args);
+    if (!validateVisiblePkgModules())
+      return false;
 
     config->isPic = config->outputType == MH_DYLIB ||
                     config->outputType == MH_BUNDLE ||
@@ -1596,6 +1665,8 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
       parseClangOption(arg->getValue(), arg->getSpelling());
 
     compileBitcodeFiles();
+    if (config->ltoEmitObjOnly)
+      return !errorCount();
     replaceCommonSymbols();
 
     StringRef orderFile = args.getLastArgValue(OPT_order_file);

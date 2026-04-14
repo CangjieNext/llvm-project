@@ -153,6 +153,7 @@ struct Configuration {
   llvm::StringRef thinLTOJobs;
   llvm::StringRef umbrella;
   uint32_t ltoo = 2;
+  bool ltoEmitObjOnly = false;
   llvm::CachePruningPolicy thinLTOCachePolicy;
   llvm::StringRef thinLTOCacheDir;
   bool deadStripDylibs = false;
@@ -173,6 +174,9 @@ struct Configuration {
   std::vector<std::string> astPaths;
   std::vector<Symbol *> explicitUndefineds;
   llvm::StringSet<> explicitDynamicLookups;
+  llvm::StringSet<> visiblePkgs;
+  bool hasMatchedVisiblePkg = false;
+  bool hideAllVisiblePkgs = false;
   // There are typically few custom sectionAlignments or segmentProtections,
   // so use a vector instead of a map.
   std::vector<SectionAlign> sectionAlignments;
