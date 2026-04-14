@@ -29,6 +29,7 @@
 #include "llvm/MC/SubtargetFeature.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ModuleSymbolTable.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Passes/StandardInstrumentations.h"
@@ -79,6 +80,10 @@ static cl::opt<bool> ThinLTOAssumeMerged(
     "thinlto-assume-merged", cl::init(false),
     cl::desc("Assume the input has already undergone ThinLTO function "
              "importing and the other pre-optimization pipeline changes."));
+  
+ static cl::opt<bool> CJLTOPrintRemoved(
+ 	     "cj-lto-print-removed", cl::Hidden, cl::init(false),
+ 	     cl::desc("Print definitions removed during the LTO optimization pipeline"));
 
 extern cl::opt<int> MaxRecursionInl;
 extern cl::opt<int> CountedLoopTripWidth;
@@ -253,6 +258,58 @@ createTargetMachine(const Config &Conf, const Target *TheTarget, Module &M) {
   return TM;
 }
 
+static bool shouldTrackDefinition(StringRef Name) {
+ 	   return !Name.startswith("llvm.");
+ 	 }
+ 	 
+ 	 struct DefinedSymbolsBeforeOpt {
+ 	   StringSet<> functions;
+ 	   StringSet<> globals;
+ 	 };
+ 	 
+ 	 static DefinedSymbolsBeforeOpt collectDefinedGlobals(const Module &M) {
+ 	   DefinedSymbolsBeforeOpt defs;
+ 	   for (const Function &F : M)
+ 	     if (!F.isDeclaration() && F.hasName() && shouldTrackDefinition(F.getName()))
+ 	       defs.functions.insert(F.getName());
+ 	   for (const GlobalVariable &GV : M.globals())
+ 	     if (!GV.isDeclaration() && GV.hasName() && shouldTrackDefinition(GV.getName()))
+ 	       defs.globals.insert(GV.getName());
+ 	   for (const GlobalAlias &GA : M.aliases())
+ 	     if (!GA.isDeclaration() && GA.hasName() && shouldTrackDefinition(GA.getName()))
+ 	       defs.globals.insert(GA.getName());
+ 	   for (const GlobalIFunc &GIF : M.ifuncs())
+ 	     if (!GIF.isDeclaration() && GIF.hasName() && shouldTrackDefinition(GIF.getName()))
+ 	       defs.globals.insert(GIF.getName());
+ 	   return defs;
+ 	 }
+ 	 
+ 	 static void printRemovedGlobals(const Module &M, const DefinedSymbolsBeforeOpt &Before) {
+ 	   if (!CJLTOPrintRemoved)
+ 	     return;
+ 	 
+ 	   DefinedSymbolsBeforeOpt After = collectDefinedGlobals(M);
+ 	   size_t RemovedFunctions = 0;
+ 	   size_t RemovedGlobals = 0;
+ 	 
+ 	   for (const auto &Item : Before.functions) {
+ 	     if (After.functions.contains(Item.getKey()))
+ 	       continue;
+ 	     errs() << "[cj-lto] removed function: " << Item.getKey() << "\n";
+ 	     ++RemovedFunctions;
+ 	   }
+ 	 
+ 	   for (const auto &Item : Before.globals) {
+ 	     if (After.globals.contains(Item.getKey()))
+ 	       continue;
+ 	     errs() << "[cj-lto] removed global: " << Item.getKey() << "\n";
+ 	     ++RemovedGlobals;
+ 	   }
+ 	 
+ 	   errs() << "[cj-lto] removed function count: " << RemovedFunctions << "\n";
+ 	   errs() << "[cj-lto] removed global count: " << RemovedGlobals << "\n";
+ 	 }
+
 static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
                            unsigned OptLevel, bool IsThinLTO,
                            ModuleSummaryIndex *ExportSummary,
@@ -329,6 +386,10 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   if (!Conf.DisableVerify)
     MPM.addPass(VerifierPass());
 
+  DefinedSymbolsBeforeOpt DefinedBeforeOpt;
+ 	   if (CJLTOPrintRemoved)
+ 	     DefinedBeforeOpt = collectDefinedGlobals(Mod);
+
   if (CJPipeline) {
     // Customize parameters for cangjie-pipeline.
     if (OptLevel > 1 && !MaxRecursionInl.getPosition()) {
@@ -403,6 +464,7 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
     MPM.addPass(VerifierPass());
 
   MPM.run(Mod, MAM);
+  printRemovedGlobals(Mod, DefinedBeforeOpt);
 }
 
 bool lto::opt(const Config &Conf, TargetMachine *TM, unsigned Task, Module &Mod,
