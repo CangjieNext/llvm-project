@@ -345,6 +345,8 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
     CJDCE.addCangjieVirtualFunctionDependencies(M);
   if (CJPipeline && ClEnableCJTIE)
     CJDCE.initTIE(M);
+  if (CJPipeline && ClEnableCJTIE)
+    CJDCE.rewriteLLVMUsed(M);
 
   // Loop over the module, adding globals which are obviously necessary.
   for (GlobalObject &GO : M.global_objects()) {
@@ -443,6 +445,20 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
       GIF.setResolver(nullptr);
     }
 
+  if (CJPipeline && ClEnableCJTIE) {
+    SmallVector<GlobalValue *, 16> UsedRemovals;
+    for (Function *F : DeadFunctions)
+      if (!F->use_empty())
+        UsedRemovals.push_back(F);
+    for (GlobalVariable *GV : DeadGlobalVars)
+      if ((CangjieDCE::isCangjieType(GV) ||
+           CangjieDCE::isMetaAssociatedWithType(GV) ||
+           GV->isCJStaticGenericTI() || GV->isCJOuterTypeExtensions()) &&
+          !GV->use_empty())
+        UsedRemovals.push_back(GV);
+    CJDCE.removeFromLLVMUsed(M, UsedRemovals);
+  }
+
   // Now that all interferences have been dropped, delete the actual objects
   // themselves.
   auto EraseUnusedGlobalValue = [&](GlobalValue *GV) {
@@ -490,10 +506,8 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
   for (GlobalIFunc *GIF : DeadIFuncs)
     EraseUnusedGlobalValue(GIF);
 
-  if (CJPipeline && ClEnableCJTIE) {
+  if (CJPipeline && ClEnableCJTIE)
     CJDCE.rewriteExtensions(M);
-    CJDCE.rewriteLLVMUsed(M);
-  }
 
   // Make sure that all memory is released
   AliveGlobals.clear();
@@ -839,42 +853,153 @@ void CangjieDCE::rewriteExtensions(Module &M) {
       continue;
     ArrayType *AT = ArrayType::get(ATy, LiveGVs.size());
     Constant *NewC = ConstantArray::get(AT, LiveGVs);
-    GlobalVariable *NewGV = cast<GlobalVariable>(
-        M.getOrInsertGlobal(GV->getName().str() + ".new", AT));
-    NewGV->setLinkage(GlobalVariable::PrivateLinkage);
-    NewGV->setInitializer(NewC);
+    GlobalVariable *NewGV = new GlobalVariable(
+        M, AT, false, GlobalValue::PrivateLinkage, NewC,
+        GV->getName().str() + ".dce.new");
     NewGV->copyAttributesFrom(GV);
     NewGV->copyMetadata(GV, /*Offset=*/0);
-    // Replace GV
-    if (GV->getNumUses() != 1) // 1: llvm.used
-      report_fatal_error("User number should be one");
-    auto *Expr = dyn_cast<ConstantExpr>(GV->use_begin()->getUser());
-    Expr->handleOperandChange(GV, NewGV);
+    NewGV->setLinkage(GlobalVariable::PrivateLinkage);
+
+    auto ReplaceUsedListEntry = [&M, GV, NewGV](StringRef Name) {
+      GlobalVariable *UsedGV = M.getNamedGlobal(Name);
+      if (!UsedGV || !UsedGV->hasInitializer())
+        return false;
+
+      auto *InitArray = dyn_cast<ConstantArray>(UsedGV->getInitializer());
+      if (!InitArray)
+        return false;
+
+      SmallVector<Constant *, 16> Members;
+      Members.reserve(InitArray->getNumOperands());
+      bool Changed = false;
+      auto *NewMember =
+          ConstantExpr::getPointerCast(NewGV, Type::getInt8PtrTy(M.getContext()));
+      for (Value *Op : InitArray->operands()) {
+        auto *Member = cast<Constant>(Op);
+        if (Member->stripPointerCasts() == GV) {
+          Members.push_back(NewMember);
+          Changed = true;
+          continue;
+        }
+        Members.push_back(Member);
+      }
+
+      if (!Changed)
+        return false;
+
+      Constant *OldInit = UsedGV->getInitializer();
+      auto *NewInit =
+          ConstantArray::get(cast<ArrayType>(InitArray->getType()), Members);
+      UsedGV->setInitializer(NewInit);
+      if (OldInit != NewInit)
+        OldInit->removeDeadConstantUsers();
+      return true;
+    };
+
+    bool Replaced =
+        ReplaceUsedListEntry("llvm.used") || ReplaceUsedListEntry("llvm.compiler.used");
+    if (!Replaced && !GV->use_empty())
+      report_fatal_error("Failed to rewrite llvm.used entry for compacted global");
     GV->eraseFromParent();
   }
 }
 
 void CangjieDCE::rewriteLLVMUsed(Module &M) {
-  GlobalVariable *GV = M.getNamedGlobal("llvm.used");
-  if (!GV)
+  auto SanitizeUsedList = [&M](StringRef Name) {
+    GlobalVariable *GV = M.getNamedGlobal(Name);
+    if (!GV || !GV->hasInitializer())
+      return;
+    auto *C = GV->getInitializer();
+    auto *Placeholder = M.getGlobalVariable("__cj_llvm_used_placeholder");
+    if (!Placeholder) {
+      auto *I8Ty = Type::getInt8Ty(M.getContext());
+      Placeholder = new GlobalVariable(
+          M, I8Ty, true, GlobalValue::PrivateLinkage,
+          ConstantInt::get(I8Ty, 0), "__cj_llvm_used_placeholder");
+      Placeholder->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    }
+    auto *PlaceholderMember =
+        ConstantExpr::getPointerCast(Placeholder, Type::getInt8PtrTy(M.getContext()));
+    std::vector<Constant *> ValidMembers;
+    ValidMembers.reserve(C->getNumOperands());
+    for (unsigned I = 0, E = C->getNumOperands(); I != E; ++I) {
+      auto *Member = cast<Constant>(C->getOperand(I));
+      Value *V = Member->stripPointerCasts();
+      if ((isa<GlobalVariable>(V) || isa<Function>(V) || isa<GlobalAlias>(V)) &&
+          V->hasName()) {
+        ValidMembers.push_back(Member);
+      } else {
+        ValidMembers.push_back(PlaceholderMember);
+      }
+    }
+    if (ValidMembers.size() == C->getNumOperands())
+      return;
+
+    Constant *OldInit = GV->getInitializer();
+    auto *NewC = ConstantArray::get(cast<ArrayType>(C->getType()), ValidMembers);
+    GV->setInitializer(NewC);
+    if (OldInit != NewC)
+      OldInit->removeDeadConstantUsers();
+  };
+
+  SanitizeUsedList("llvm.used");
+  SanitizeUsedList("llvm.compiler.used");
+}
+
+void CangjieDCE::removeFromLLVMUsed(
+    Module &M, const SmallVectorImpl<GlobalValue *> &Values) {
+  if (Values.empty())
     return;
-  auto *C = GV->getInitializer();
-  std::vector<Constant *> LiveGVs;
-  for (unsigned I = 0, E = C->getNumOperands(); I != E; ++I) {
-    if (isa<ConstantPointerNull>(C->getOperand(I)))
-      continue;
-    LiveGVs.push_back(cast<Constant>(C->getOperand(I)));
-  }
-  if (LiveGVs.empty() || LiveGVs.size() == C->getNumOperands())
-    return;
-  auto *AT = ArrayType::get(Type::getInt8PtrTy(M.getContext()), LiveGVs.size());
-  auto *NewC = ConstantArray::get(AT, LiveGVs);
-  GV->setName("llvm.used.old");
-  GlobalVariable *NewGV =
-      cast<GlobalVariable>(M.getOrInsertGlobal("llvm.used", AT));
-  NewGV->setLinkage(GlobalVariable::AppendingLinkage);
-  NewGV->setInitializer(NewC);
-  NewGV->copyAttributesFrom(GV);
-  NewGV->copyMetadata(GV, /*Offset=*/0);
-  GV->eraseFromParent();
+
+  SmallPtrSet<Constant *, 16> DeadSet;
+  for (GlobalValue *GV : Values)
+    DeadSet.insert(GV);
+
+  auto RemoveFromUsedList = [&M, &DeadSet](StringRef Name) {
+    GlobalVariable *GV = M.getNamedGlobal(Name);
+    if (!GV || !GV->hasInitializer())
+      return;
+
+    auto *InitArray = dyn_cast<ConstantArray>(GV->getInitializer());
+    if (!InitArray)
+      return;
+
+    auto *Placeholder = M.getGlobalVariable("__cj_llvm_used_placeholder");
+    if (!Placeholder) {
+      auto *I8Ty = Type::getInt8Ty(M.getContext());
+      Placeholder = new GlobalVariable(
+          M, I8Ty, true, GlobalValue::PrivateLinkage,
+          ConstantInt::get(I8Ty, 0), "__cj_llvm_used_placeholder");
+      Placeholder->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    }
+    auto *PlaceholderMember =
+        ConstantExpr::getPointerCast(Placeholder, Type::getInt8PtrTy(M.getContext()));
+
+    SmallVector<Constant *, 16> Members;
+    Members.reserve(InitArray->getNumOperands());
+    bool Changed = false;
+    for (Value *Op : InitArray->operands()) {
+      auto *Member = cast<Constant>(Op);
+      auto *Target = dyn_cast<Constant>(Member->stripPointerCasts());
+      if (Target && DeadSet.contains(Target)) {
+        Members.push_back(PlaceholderMember);
+        Changed = true;
+        continue;
+      }
+      Members.push_back(Member);
+    }
+
+    if (!Changed)
+      return;
+
+    Constant *OldInit = GV->getInitializer();
+    auto *NewInit =
+        ConstantArray::get(cast<ArrayType>(InitArray->getType()), Members);
+    GV->setInitializer(NewInit);
+    if (OldInit != NewInit)
+      OldInit->removeDeadConstantUsers();
+  };
+
+  RemoveFromUsedList("llvm.used");
+  RemoveFromUsedList("llvm.compiler.used");
 }

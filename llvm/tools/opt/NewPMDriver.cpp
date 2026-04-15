@@ -41,6 +41,56 @@ using namespace llvm;
 using namespace opt_tool;
 
 namespace llvm {
+extern cl::opt<bool> CJPipeline;
+} // namespace llvm
+
+static void sanitizeLLVMUsedLikeList(Module &M, StringRef Name) {
+  GlobalVariable *GV = M.getNamedGlobal(Name);
+  if (!GV || !GV->hasInitializer())
+    return;
+
+  auto *InitArray = dyn_cast<ConstantArray>(GV->getInitializer());
+  if (!InitArray)
+    return;
+
+  auto *Placeholder = M.getGlobalVariable("__cj_llvm_used_placeholder");
+  if (!Placeholder) {
+    auto *I8Ty = Type::getInt8Ty(M.getContext());
+    Placeholder = new GlobalVariable(
+        M, I8Ty, true, GlobalValue::PrivateLinkage,
+        ConstantInt::get(I8Ty, 0), "__cj_llvm_used_placeholder");
+    Placeholder->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+  }
+  auto *PlaceholderMember =
+      ConstantExpr::getPointerCast(Placeholder, Type::getInt8PtrTy(M.getContext()));
+
+  SmallVector<Constant *, 16> ValidMembers;
+  ValidMembers.reserve(InitArray->getNumOperands());
+  bool Changed = false;
+  for (Value *Op : InitArray->operands()) {
+    auto *Member = cast<Constant>(Op);
+    Value *V = Member->stripPointerCasts();
+    if ((isa<GlobalVariable>(V) || isa<Function>(V) || isa<GlobalAlias>(V)) &&
+        V->hasName()) {
+      ValidMembers.push_back(Member);
+      continue;
+    }
+    ValidMembers.push_back(PlaceholderMember);
+    Changed = true;
+  }
+
+  if (!Changed)
+    return;
+
+  Constant *OldInit = GV->getInitializer();
+  auto *NewInit =
+      ConstantArray::get(cast<ArrayType>(InitArray->getType()), ValidMembers);
+  GV->setInitializer(NewInit);
+  if (OldInit != NewInit)
+    OldInit->removeDeadConstantUsers();
+}
+
+namespace llvm {
 cl::opt<bool> DebugifyEach(
     "debugify-each",
     cl::desc("Start each pass with debugify and end it with check-debugify"));
@@ -523,6 +573,9 @@ bool llvm::runPassPipeline(StringRef Arg0, Module &M, TargetMachine *TM,
     outs() << "\n";
     return true;
   }
+
+  sanitizeLLVMUsedLikeList(M, "llvm.used");
+  sanitizeLLVMUsedLikeList(M, "llvm.compiler.used");
 
   // Now that we have all of the passes ready, run them.
   MPM.run(M, MAM);

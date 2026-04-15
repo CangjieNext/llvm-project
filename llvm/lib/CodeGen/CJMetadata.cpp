@@ -60,7 +60,7 @@ const std::string StrPool(".Lstr_pool.");
 const std::string StrPoolDict(".Lstr_pool_dict.");
 } // namespace
 CJMetadataInfo::CJMetadataInfo(AsmPrinter &AP, StackMaps &SM)
-    : AP(AP), SM(SM), OS(*AP.OutStreamer), Context(AP.OutContext),
+    : M(nullptr), AP(AP), SM(SM), OS(*AP.OutStreamer), Context(AP.OutContext),
       TT(AP.TM.getTargetTriple()) {}
 
 void processStructTypeOffsets(StructType *ST, SmallVectorImpl<uint64_t> &Refs,
@@ -111,6 +111,72 @@ void CJMetadataInfo::init() {
   FuncPtrSize = SM.isARM() ? 4 : 8; // method pc size, arm: 4 byte, other: 8 byte
 }
 
+void CJMetadataInfo::loadRootMetadataKeepSet() {
+  RootMetadataKeepSetLoaded = true;
+  HasRootMetadataKeepFilter = false;
+  RootMetadataKeepNames.clear();
+  if (!M)
+    return;
+  auto *KeepMD = M->getNamedMetadata("cj.root.metadata.keep");
+  if (!KeepMD)
+    return;
+
+  for (const auto *Node : KeepMD->operands()) {
+    if (!Node || Node->getNumOperands() != 1)
+      continue;
+    auto *NameMD = dyn_cast<MDString>(Node->getOperand(0));
+    if (!NameMD)
+      continue;
+    RootMetadataKeepNames.insert(NameMD->getString());
+  }
+  HasRootMetadataKeepFilter = !RootMetadataKeepNames.empty();
+}
+
+void CJMetadataInfo::loadRootFunctionKeepSet() {
+  RootFunctionKeepSetLoaded = true;
+  HasRootFunctionKeepFilter = false;
+  RootFunctionKeepNames.clear();
+  if (!M)
+    return;
+  auto *KeepMD = M->getNamedMetadata("cj.root.function.keep");
+  if (!KeepMD)
+    return;
+
+  for (const auto *Node : KeepMD->operands()) {
+    if (!Node || Node->getNumOperands() != 1)
+      continue;
+    auto *NameMD = dyn_cast<MDString>(Node->getOperand(0));
+    if (!NameMD)
+      continue;
+    RootFunctionKeepNames.insert(NameMD->getString());
+  }
+  HasRootFunctionKeepFilter = !RootFunctionKeepNames.empty();
+}
+
+void CJMetadataInfo::ensureRootKeepSets(const Module *Mod) {
+  if (Mod && M != Mod) {
+    M = const_cast<Module *>(Mod);
+    RootFunctionKeepSetLoaded = false;
+    RootMetadataKeepSetLoaded = false;
+  }
+  if (!RootFunctionKeepSetLoaded)
+    loadRootFunctionKeepSet();
+  if (!RootMetadataKeepSetLoaded)
+    loadRootMetadataKeepSet();
+}
+
+bool CJMetadataInfo::shouldEmitMetadataName(StringRef Name) const {
+  return !HasRootMetadataKeepFilter || RootMetadataKeepNames.count(Name) != 0;
+}
+
+bool CJMetadataInfo::shouldEmitMetadataGV(const GlobalVariable *GV) const {
+  return GV && shouldEmitMetadataName(GV->getName());
+}
+
+bool CJMetadataInfo::shouldEmitFunctionName(StringRef Name) const {
+  return !HasRootFunctionKeepFilter || RootFunctionKeepNames.count(Name) != 0;
+}
+
 void CJMetadataInfo::recordKlass(const GlobalVariable *GV) {
   if (!GV->hasInitializer()) {
     ExternalTITable.push_back(GV); // external , undef classmeta
@@ -121,6 +187,37 @@ void CJMetadataInfo::recordKlass(const GlobalVariable *GV) {
 
 void CJMetadataInfo::recordGlobalVariable(const GlobalVariable *GV) {
   if (!GV->isCJMeta())
+    return;
+
+  if (GV->isCJStaticGenericTI()) {
+    assert(GV->hasInitializer() && "StaticGenericTI has no Initializer!");
+    const Constant *C = GV->getInitializer();
+    for (unsigned Idx = 0; Idx < C->getNumOperands(); Idx++) {
+      auto *RefGV = dyn_cast<GlobalValue>(C->getOperand(Idx)->stripPointerCasts());
+      if (RefGV && shouldEmitMetadataName(RefGV->getName()))
+        StaticGenericTI.push_back(RefGV);
+    }
+    return;
+  }
+
+  if (GV->isCJInnerTypeExtensions()) {
+    if (shouldEmitMetadataGV(GV))
+      InnerTypeExtensions.push_back(GV);
+    return;
+  }
+
+  if (GV->isCJOuterTypeExtensions()) {
+    assert(GV->hasInitializer());
+    auto *C = GV->getInitializer();
+    for (unsigned I = 0; I < C->getNumOperands(); ++I) {
+      auto *RefGV = dyn_cast<GlobalVariable>(C->getOperand(I)->stripPointerCasts());
+      if (RefGV && shouldEmitMetadataGV(RefGV))
+        OuterTypeExtensions.push_back(RefGV);
+    }
+    return;
+  }
+
+  if (!shouldEmitMetadataGV(GV))
     return;
 
   auto HandleGVAttribute = [this](const GlobalVariable *GV) -> void {
@@ -172,27 +269,6 @@ void CJMetadataInfo::recordGlobalVariable(const GlobalVariable *GV) {
       return;
     }
 
-    if (GV->isCJStaticGenericTI()) {
-      assert(GV->hasInitializer() && "StaticGenericTI has no Initializer!");
-      const Constant *C = GV->getInitializer();
-      for (unsigned Idx = 0; Idx < C->getNumOperands(); Idx++)
-        StaticGenericTI.push_back(cast<GlobalValue>(C->getOperand(Idx)));
-      return;
-    }
-
-    if (GV->isCJInnerTypeExtensions()) {
-      assert(GV->hasInitializer());
-      InnerTypeExtensions.push_back(GV);
-      return;
-    }
-
-    if (GV->isCJOuterTypeExtensions()) {
-      assert(GV->hasInitializer());
-      auto *C = GV->getInitializer();
-      for (unsigned I = 0; I < C->getNumOperands(); ++I)
-        OuterTypeExtensions.push_back(cast<GlobalVariable>(C->getOperand(I)));
-      return;
-    }
   };
 
   HandleGVAttribute(GV);
@@ -231,6 +307,7 @@ void CJMetadataInfo::recordGlobalVariable(const GlobalVariable *GV) {
 }
 
 void CJMetadataInfo::recordMetadata() {
+  ensureRootKeepSets(M);
   for (const auto &G : M->globals())
     recordGlobalVariable(&G);
 
@@ -238,14 +315,19 @@ void CJMetadataInfo::recordMetadata() {
 }
 
 void CJMetadataInfo::recordExternalMethod() {
+  ensureRootKeepSets(M);
   for (const auto &F : M->functions())
-    if (F.isDeclaration() && F.hasCangjieGC())
+    if (F.isDeclaration() && F.hasCangjieGC() &&
+        shouldEmitFunctionName(F.getName()))
       ExternalMethod.push_back(&F);
 }
 
 void CJMetadataInfo::recordCurrentFunc() {
   const Function &F = AP.MF->getFunction();
+  ensureRootKeepSets(F.getParent());
   if (!F.hasCangjieGC() || F.hasFnAttribute("leaf-function"))
+    return;
+  if (HasRootFunctionKeepFilter && !shouldEmitFunctionName(F.getName()))
     return;
 
   // pc + methodinfo. stackmap symbol
@@ -849,7 +931,7 @@ void CJMetadataInfo::emitStringPoolTable() {
 }
 
 void CJMetadataInfo::emitCJMetadata(Module &M) {
-  CJMetadataInfo::M = &M;
+  ensureRootKeepSets(&M);
   recordMetadata();
   init();
   // RW Section

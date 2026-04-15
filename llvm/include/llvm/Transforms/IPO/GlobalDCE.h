@@ -142,6 +142,7 @@ struct CangjieDCE {
   void updateLiveExtensions();
   void rewriteExtensions(Module &);
   void rewriteLLVMUsed(Module &);
+  void removeFromLLVMUsed(Module &, const SmallVectorImpl<GlobalValue *> &);
 };
 
 }

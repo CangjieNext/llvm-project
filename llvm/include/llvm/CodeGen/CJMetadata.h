@@ -14,6 +14,7 @@
 
 #ifndef LLVM_CODEGEN_CJMETADATA_H
 #define LLVM_CODEGEN_CJMETADATA_H
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/CodeGen/StackMapEncode.h"
@@ -108,6 +109,12 @@ private:
   void recordMetadata();
   void recordGlobalVariable(const GlobalVariable *GV);
   void recordKlass(const GlobalVariable *GV);
+  void ensureRootKeepSets(const Module *Mod);
+  void loadRootFunctionKeepSet();
+  void loadRootMetadataKeepSet();
+  bool shouldEmitMetadataGV(const GlobalVariable *GV) const;
+  bool shouldEmitMetadataName(StringRef Name) const;
+  bool shouldEmitFunctionName(StringRef Name) const;
 
   uint64_t addMangledStr(std::string &Str);
   void splitStr(std::string &Str, std::vector<uint64_t> &CompressedCode);
@@ -153,6 +160,12 @@ private:
   MCSymbol *StrPoolDictOffsetsSym;
   uint64_t StrPoolIdx;
   uint32_t FuncPtrSize;
+  bool RootFunctionKeepSetLoaded = false;
+  bool RootMetadataKeepSetLoaded = false;
+  bool HasRootFunctionKeepFilter = false;
+  bool HasRootMetadataKeepFilter = false;
+  StringSet<> RootFunctionKeepNames;
+  StringSet<> RootMetadataKeepNames;
 };
 } // namespace llvm
 #endif // LLVM_CODEGEN_CJMETADATA_H

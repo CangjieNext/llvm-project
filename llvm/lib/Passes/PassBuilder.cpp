@@ -160,6 +160,7 @@
 #include "llvm/Transforms/Scalar/CJSimpleOpt.h"
 #include "llvm/Transforms/Scalar/CJGenericIntrinsicOpt.h"
 #include "llvm/Transforms/Scalar/CJLoopFloatOpt.h"
+#include "llvm/Transforms/Scalar/CJRootMetadataMark.h"
 #include "llvm/Transforms/Scalar/CJRSSCE.h"
 #include "llvm/Transforms/Scalar/CJRuntimeLowering.h"
 #include "llvm/Transforms/Scalar/CJRewriteStatepoint.h"

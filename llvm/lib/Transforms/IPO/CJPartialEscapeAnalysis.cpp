@@ -66,9 +66,18 @@ void setEscapeMeta(Instruction *I) {
 
 Type *getAllocaType(GlobalVariable *Klass, bool &HasRef, uint32_t &AS,
                     bool &NonMovArray, Instruction *Val) {
+  if (Klass == nullptr) {
+    return nullptr;
+  }
   Module *M = Klass->getParent();
+  if (M == nullptr) {
+    return nullptr;
+  }
   LLVMContext &C = M ->getContext();
   StructType *ST = getTypeLayoutType(Klass);
+  if (ST == nullptr || ST->getNumElements() == 0) {
+    return nullptr;
+  }
   const DataLayout &DL = M->getDataLayout();
   uint32_t ObjSize =
       static_cast<unsigned>(DL.getTypeAllocSize(ST).getFixedSize());
@@ -80,7 +89,9 @@ Type *getAllocaType(GlobalVariable *Klass, bool &HasRef, uint32_t &AS,
   }
   // none-array type
   StructType *ArrayBaseType = dyn_cast<StructType>(ST->getElementType(0));
-  if (!ArrayBaseType || ArrayBaseType->getName() != "ArrayBase") {
+  ArrayType *ArrayElements =
+      ST->getNumElements() > 1 ? dyn_cast<ArrayType>(ST->getElementType(1)) : nullptr;
+  if (!ArrayBaseType || ArrayBaseType->getName() != "ArrayBase" || !ArrayElements) {
     ObjSize += ObjectHeadSize;
     ObjSize = (ObjSize + 7) & (~(7)); // 8 bytes alignment
     AS = ObjSize;
@@ -98,8 +109,7 @@ Type *getAllocaType(GlobalVariable *Klass, bool &HasRef, uint32_t &AS,
     return nullptr; // unknown array size
   }
 
-  Type *ElementType =
-      dyn_cast<ArrayType>(ST->getElementType(1))->getElementType();
+  Type *ElementType = ArrayElements->getElementType();
   unsigned ElementSize =
       static_cast<unsigned>(DL.getTypeAllocSize(ElementType).getFixedSize());
   // ElemSize may be 0, when that is RawArray<Unit>.ti and Unit.type is {}.

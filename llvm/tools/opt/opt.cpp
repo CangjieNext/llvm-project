@@ -71,6 +71,58 @@ extern cl::opt<bool> EnableCJNewArrayFast;
 extern cl::opt<bool> CJDisableEscapeAnalysis;
 extern cl::opt<bool> CJDisablePEA;
 }
+
+static void sanitizeLLVMUsedLikeList(Module &M, StringRef Name) {
+  GlobalVariable *GV = M.getNamedGlobal(Name);
+  if (!GV || !GV->hasInitializer())
+    return;
+
+  auto *InitArray = dyn_cast<ConstantArray>(GV->getInitializer());
+  if (!InitArray)
+    return;
+
+  auto *Placeholder = M.getGlobalVariable("__cj_llvm_used_placeholder");
+  if (!Placeholder) {
+    auto *I8Ty = Type::getInt8Ty(M.getContext());
+    Placeholder = new GlobalVariable(
+        M, I8Ty, true, GlobalValue::PrivateLinkage,
+        ConstantInt::get(I8Ty, 0), "__cj_llvm_used_placeholder");
+    Placeholder->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+  }
+  auto *PlaceholderMember =
+      ConstantExpr::getPointerCast(Placeholder, Type::getInt8PtrTy(M.getContext()));
+
+  SmallVector<Constant *, 16> ValidMembers;
+  ValidMembers.reserve(InitArray->getNumOperands());
+  bool Changed = false;
+  for (Value *Op : InitArray->operands()) {
+    auto *Member = cast<Constant>(Op);
+    Value *V = Member->stripPointerCasts();
+    if ((isa<GlobalVariable>(V) || isa<Function>(V) || isa<GlobalAlias>(V)) &&
+        V->hasName()) {
+      ValidMembers.push_back(Member);
+      continue;
+    }
+    ValidMembers.push_back(PlaceholderMember);
+    Changed = true;
+  }
+
+  if (!Changed)
+    return;
+
+  Constant *OldInit = GV->getInitializer();
+  auto *NewInit =
+      ConstantArray::get(cast<ArrayType>(InitArray->getType()), ValidMembers);
+  GV->setInitializer(NewInit);
+  if (OldInit != NewInit)
+    OldInit->removeDeadConstantUsers();
+}
+
+static void sanitizeLLVMUsedLists(Module &M) {
+  sanitizeLLVMUsedLikeList(M, "llvm.used");
+  sanitizeLLVMUsedLikeList(M, "llvm.compiler.used");
+}
+
 static codegen::RegisterCodeGenFlags CFG;
 
 // The OptimizationList is automatically populated with registered Passes by the
@@ -647,6 +699,8 @@ int main(int argc, char **argv) {
   // If we are supposed to override the target triple or data layout, do so now.
   if (!TargetTriple.empty())
     M->setTargetTriple(Triple::normalize(TargetTriple));
+
+  sanitizeLLVMUsedLists(*M);
 
   // Immediately run the verifier to catch any problems before starting up the
   // pass pipelines.  Otherwise we can crash on broken code during
