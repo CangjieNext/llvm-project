@@ -34,7 +34,6 @@
 using namespace lldb;
 using namespace lldb_private;
 
-// Constructors
 SBCJThread::SBCJThread() : m_opaque_sp(new ExecutionContextRef()) {
   LLDB_INSTRUMENT_VA(this);
 }
@@ -50,8 +49,6 @@ SBCJThread::SBCJThread(const SBCJThread &rhs) {
   m_opaque_sp = clone(rhs.m_opaque_sp);
 }
 
-// Assignment operator
-
 const lldb::SBCJThread &SBCJThread::operator=(const SBCJThread &rhs) {
   LLDB_INSTRUMENT_VA(this, rhs);
 
@@ -60,7 +57,6 @@ const lldb::SBCJThread &SBCJThread::operator=(const SBCJThread &rhs) {
   return *this;
 }
 
-// Destructor
 SBCJThread::~SBCJThread() = default;
 
 bool SBCJThread::IsValid() const {
@@ -98,7 +94,6 @@ void SBCJThread::SetCJThread(const lldb::CJThreadSP &lldb_object_sp) {
 SBError SBCJThread::ResumeNewPlan(ExecutionContext &exe_ctx,
                                   ThreadPlan *new_plan) {
   SBError sb_error;
-
   Process *process = exe_ctx.GetProcessPtr();
   if (!process) {
     sb_error.SetErrorString("No process in SBCJThread::ResumeNewPlan");
@@ -149,16 +144,33 @@ void SBCJThread::StepInstruction(bool step_over, SBError &error) {
   }
 
   CJThreadSP cjthread = exe_ctx.GetCJThreadSP();
+  if (!cjthread) {
+    error.SetErrorString("No cjthread in SBCJThread::StepInstruction");
+    return;
+  }
   Status new_plan_status;
   if (cjthread->GetCJThreadState() != CJThreadState::eRunning) {
     CJThread::WaitUntilCJThreadScheduled(exe_ctx.GetTargetRef(), cjthread, new_plan_status);
   }
-  ThreadSP thread = exe_ctx.GetProcessSP()->GetThreadList().GetSelectedThread();
+  ProcessSP process_sp = exe_ctx.GetProcessSP();
+  if (!process_sp) {
+    error.SetErrorString("No process in SBCJThread::StepInstruction");
+    return;
+  }
+  ThreadSP thread = process_sp->GetThreadList().GetSelectedThread();
+  if (!thread) {
+    error.SetErrorString("No thread in SBCJThread::StepInstruction");
+    return;
+  }
   ThreadPlanSP new_plan_sp(thread->QueueThreadPlanForStepSingleInstruction(
       step_over, true, true, new_plan_status));
 
   if (new_plan_status.Success()) {
-    error = ResumeNewPlan(exe_ctx, new_plan_sp.get());
+    if (new_plan_sp) {
+      error = ResumeNewPlan(exe_ctx, new_plan_sp.get());
+    } else {
+      error.SetErrorString("Failed to create thread plan");
+    }
   } else {
     error.SetErrorString(new_plan_status.AsCString());
   }
@@ -185,11 +197,24 @@ void SBCJThread::StepOver(lldb::RunMode stop_other_threads, SBError &error) {
   }
 
   CJThreadSP cjthread = exe_ctx.GetCJThreadSP();
+  if (!cjthread) {
+    error.SetErrorString("No cjthread in SBCJThread::StepOver");
+    return;
+  }
   Status new_plan_status;
   if (cjthread->GetCJThreadState() != CJThreadState::eRunning) {
     CJThread::WaitUntilCJThreadScheduled(exe_ctx.GetTargetRef(), cjthread, new_plan_status);
   }
-  ThreadSP thread = exe_ctx.GetProcessSP()->GetThreadList().GetSelectedThread();
+  ProcessSP process_sp = exe_ctx.GetProcessSP();
+  if (!process_sp) {
+    error.SetErrorString("No process in SBCJThread::StepOver");
+    return;
+  }
+  ThreadSP thread = process_sp->GetThreadList().GetSelectedThread();
+  if (!thread) {
+    error.SetErrorString("No thread in SBCJThread::StepOver");
+    return;
+  }
   bool abort_other_plans = false;
   StackFrameSP frame_sp(thread->GetStackFrameAtIndex(0));
 
@@ -206,7 +231,11 @@ void SBCJThread::StepOver(lldb::RunMode stop_other_threads, SBError &error) {
           true, abort_other_plans, stop_other_threads, new_plan_status);
     }
   }
-  error = ResumeNewPlan(exe_ctx, new_plan_sp.get());
+  if (new_plan_sp) {
+    error = ResumeNewPlan(exe_ctx, new_plan_sp.get());
+  } else {
+    error.SetErrorString("Failed to create thread plan");
+  }
 }
 
 void SBCJThread::StepInto(lldb::RunMode stop_other_threads) {
@@ -236,13 +265,25 @@ void SBCJThread::StepInto(const char *target_name, uint32_t end_line,
   }
 
   bool abort_other_plans = false;
-
   CJThreadSP cjthread = exe_ctx.GetCJThreadSP();
+  if (!cjthread) {
+    error.SetErrorString("No cjthread in SBCJThread::StepInto");
+    return;
+  }
   Status new_plan_status;
   if (cjthread->GetCJThreadState() != CJThreadState::eRunning) {
     CJThread::WaitUntilCJThreadScheduled(exe_ctx.GetTargetRef(), cjthread, new_plan_status);
   }
-  ThreadSP thread = exe_ctx.GetProcessSP()->GetThreadList().GetSelectedThread();
+  ProcessSP process_sp = exe_ctx.GetProcessSP();
+  if (!process_sp) {
+    error.SetErrorString("No process in SBCJThread::StepInto");
+    return;
+  }
+  ThreadSP thread = process_sp->GetThreadList().GetSelectedThread();
+  if (!thread) {
+    error.SetErrorString("No thread in SBCJThread::StepInto");
+    return;
+  }
   StackFrameSP frame_sp(thread->GetStackFrameAtIndex(0));
   ThreadPlanSP new_plan_sp;
 
@@ -269,10 +310,15 @@ void SBCJThread::StepInto(const char *target_name, uint32_t end_line,
         false, abort_other_plans, stop_other_threads, new_plan_status);
   }
 
-  if (new_plan_status.Success())
-    error = ResumeNewPlan(exe_ctx, new_plan_sp.get());
-  else
+  if (new_plan_status.Success()) {
+    if (new_plan_sp) {
+      error = ResumeNewPlan(exe_ctx, new_plan_sp.get());
+    } else {
+      error.SetErrorString("Failed to create thread plan");
+    }
+  } else {
     error.SetErrorString(new_plan_status.AsCString());
+  }
 }
 
 void SBCJThread::StepOut() {
@@ -301,7 +347,16 @@ void SBCJThread::StepOut(SBError &error) {
   if (cjthread->GetCJThreadState() != CJThreadState::eRunning) {
     CJThread::WaitUntilCJThreadScheduled(exe_ctx.GetTargetRef(), cjthread, new_plan_status);
   }
-  ThreadSP thread = exe_ctx.GetProcessSP()->GetThreadList().GetSelectedThread();
+  ProcessSP process_sp = exe_ctx.GetProcessSP();
+  if (!process_sp) {
+    error.SetErrorString("No process in SBCJThread::StepOut");
+    return;
+  }
+  ThreadSP thread = process_sp->GetThreadList().GetSelectedThread();
+  if (!thread) {
+    error.SetErrorString("No thread in SBCJThread::StepOut");
+    return;
+  }
 
   const LazyBool avoid_no_debug = eLazyBoolCalculate;
   ThreadPlanSP new_plan_sp(thread->QueueThreadPlanForStepOut(
@@ -322,8 +377,12 @@ uint32_t SBCJThread::GetNumFrames() {
   ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
 
   if (exe_ctx.HasCJThreadScope()) {
+    Process *process = exe_ctx.GetProcessPtr();
+    if (!process) {
+      return num_frames;
+    }
     Process::StopLocker stop_locker;
-    if (stop_locker.TryLock(&exe_ctx.GetProcessPtr()->GetRunLock())) {
+    if (stop_locker.TryLock(&process->GetRunLock())) {
       num_frames = exe_ctx.GetCJThreadPtr()->GetStackFrameCount();
     }
   }
@@ -340,8 +399,12 @@ SBFrame SBCJThread::GetFrameAtIndex(uint32_t idx) {
   ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
 
   if (exe_ctx.HasCJThreadScope()) {
+    Process *process = exe_ctx.GetProcessPtr();
+    if (!process) {
+      return sb_frame;
+    }
     Process::StopLocker stop_locker;
-    if (stop_locker.TryLock(&exe_ctx.GetProcessPtr()->GetRunLock())) {
+    if (stop_locker.TryLock(&process->GetRunLock())) {
       frame_sp = exe_ctx.GetCJThreadPtr()->GetStackFrameAtIndex(idx);
       sb_frame.SetFrameSP(frame_sp);
     }
@@ -359,8 +422,12 @@ lldb::SBFrame SBCJThread::GetSelectedFrame() {
   ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
 
   if (exe_ctx.HasCJThreadScope()) {
+    Process *process = exe_ctx.GetProcessPtr();
+    if (!process) {
+      return sb_frame;
+    }
     Process::StopLocker stop_locker;
-    if (stop_locker.TryLock(&exe_ctx.GetProcessPtr()->GetRunLock())) {
+    if (stop_locker.TryLock(&process->GetRunLock())) {
       frame_sp = exe_ctx.GetCJThreadPtr()->GetSelectedFrame();
       sb_frame.SetFrameSP(frame_sp);
     }
@@ -378,8 +445,12 @@ lldb::SBFrame SBCJThread::SetSelectedFrame(uint32_t idx) {
   ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
 
   if (exe_ctx.HasCJThreadScope()) {
+    Process *process = exe_ctx.GetProcessPtr();
+    if (!process) {
+      return sb_frame;
+    }
     Process::StopLocker stop_locker;
-    if (stop_locker.TryLock(&exe_ctx.GetProcessPtr()->GetRunLock())) {
+    if (stop_locker.TryLock(&process->GetRunLock())) {
       CJThread *cjthread = exe_ctx.GetCJThreadPtr();
       frame_sp = cjthread->GetStackFrameAtIndex(idx);
       if (frame_sp) {
@@ -429,4 +500,3 @@ bool SBCJThread::GetDescription(SBStream &description, bool stop_format) const {
 
   return true;
 }
-

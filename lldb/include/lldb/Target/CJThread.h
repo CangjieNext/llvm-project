@@ -8,7 +8,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-
 #ifndef LLDB_TARGET_CJTHREAD_H
 #define LLDB_TARGET_CJTHREAD_H
 
@@ -37,6 +36,8 @@ inline llvm::StringRef FormatCJThreadState(CJThreadState state) {
     case CJThreadState::eSyscall: return "syscall";
     default: return "unknown";
     }
+  
+  return "unknown";
 }
 
 struct CJThreadInfoOverview {
@@ -54,11 +55,6 @@ struct CJThreadInfoCommon;
 /* The abstraction of cangjie's thread
  */
 class CJThread : public Thread {
-  UnwindLLDB m_unwinder;
-  CJThreadInfoOverview m_cjthread_info;
-  std::shared_ptr<std::map<ConstString, RegisterValue>> m_regvals;
-  std::shared_ptr<CJDynamicRegisterInfo> m_cjreginfo;
-
 public:
   CJThread(Process &process, CJThreadInfoOverview cjtinfo, bool use_invalid_index_id = false);
   ~CJThread();
@@ -97,6 +93,10 @@ public:
 
 private:
   static bool RetrieveRegisterInfo(Process &process, CJDynamicRegisterInfoSP cjreginfo);
+  UnwindLLDB m_unwinder;
+  CJThreadInfoOverview m_cjthread_info;
+  std::shared_ptr<std::map<ConstString, RegisterValue>> m_regvals;
+  std::shared_ptr<CJDynamicRegisterInfo> m_cjreginfo;
 };
 
 }

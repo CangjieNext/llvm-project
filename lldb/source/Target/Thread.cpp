@@ -1715,8 +1715,8 @@ size_t Thread::GetStatus(Stream &strm, uint32_t start_frame,
     strm.Indent();
     bool is_selected = false;
     if (process) {
-      if (process->GetThreadList().GetSelectedThread().get() == this
-        || process->GetCJThreadList().GetSelectedThread().get() == this)
+      if (process->GetThreadList().GetSelectedThread().get() == this ||
+          process->GetCJThreadList().GetSelectedThread().get() == this)
         is_selected = true;
     }
     strm.Printf("%c ", is_selected ? '*' : ' ');
