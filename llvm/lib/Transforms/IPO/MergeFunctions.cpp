@@ -90,12 +90,8 @@
 
 #include "llvm/Transforms/IPO/MergeFunctions.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/STLFunctionalExtras.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/Analysis/InlineCost.h"
-#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constant.h"
@@ -111,7 +107,6 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/PassManager.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
@@ -142,12 +137,6 @@ STATISTIC(NumFunctionsMerged, "Number of functions merged");
 STATISTIC(NumThunksWritten, "Number of thunks generated");
 STATISTIC(NumAliasesWritten, "Number of aliases generated");
 STATISTIC(NumDoubleWeak, "Number of new functions created");
-STATISTIC(NumCangjieThunkProfitChecks,
-          "Number of Cangjie thunk profitability checks");
-STATISTIC(NumCangjieThunkProfitAccepted,
-          "Number of profitable Cangjie thunk candidates");
-STATISTIC(NumCangjieThunkProfitRejected,
-          "Number of unprofitable Cangjie thunk candidates");
 
 static cl::opt<unsigned> NumFunctionsForVerificationCheck(
     "mergefunc-verify",
@@ -183,19 +172,6 @@ static cl::opt<bool>
 
 namespace {
 
-struct ThunkCostInfo {
-  InstructionCost BodyCost = 0;
-  InstructionCost ReplacementCost = 0;
-
-  bool isValid() const {
-    return BodyCost.isValid() && ReplacementCost.isValid();
-  }
-
-  InstructionCost getNetSavings() const {
-    return BodyCost - ReplacementCost;
-  }
-};
-
 class FunctionNode {
   mutable AssertingVH<Function> F;
   FunctionComparator::FunctionHash Hash;
@@ -221,9 +197,7 @@ public:
 /// bitcast of the other.
 class MergeFunctions {
 public:
-  MergeFunctions(function_ref<TargetTransformInfo &(Function &)> GetTTI)
-      : FnTree(FunctionNodeCmp(&GlobalNumbers)),
-        GetTTIForFunction(GetTTI) {
+  MergeFunctions() : FnTree(FunctionNodeCmp(&GlobalNumbers)) {
   }
 
   bool runOnModule(Module &M);
@@ -308,29 +282,6 @@ private:
   // Returns false if neither is the case.
   bool writeThunkOrAlias(Function *F, Function *G);
 
-  /// Estimate the profitability-model cost of a basic block using the same
-  /// instruction-cost vocabulary as LLVM's outlining/inlining heuristics.
-  InstructionCost estimateBasicBlockCost(BasicBlock &BB,
-                                         TargetTransformInfo &TTI,
-                                         const DataLayout &DL);
-
-  /// Estimate the profitability-model cost of a function body.
-  InstructionCost estimateFunctionBodyCost(Function &F);
-
-  /// Estimate the cost of the thunk body that writeThunk() would emit when G
-  /// forwards to F.
-  InstructionCost estimateThunkBodyCost(Function &F, Function &G);
-
-  /// Compute the savings of replacing G's body with a thunk to F.
-  ThunkCostInfo analyzeSingleThunkProfitability(Function &F, Function &G);
-
-  /// Whether this function may be replaced by a forwarding thunk.
-  bool canCreateThunkFor(Function *F, Function *G);
-
-  /// Whether replacing two weak/interposable symbols with thunks is still a
-  /// net win for the Cangjie profitability model.
-  bool isDoubleWeakThunkProfitable(Function *F, Function *G);
-
   /// Replace function F with function G in the function tree.
   void replaceFunctionInTree(const FunctionNode &FN, Function *G);
 
@@ -344,8 +295,6 @@ private:
   // dangling iterators into FnTree. The invariant that preserves this is that
   // there is exactly one mapping F -> FN for each FunctionNode FN in FnTree.
   DenseMap<AssertingVH<Function>, FnTreeType::iterator> FNodesInTree;
-
-  function_ref<TargetTransformInfo &(Function &)> GetTTIForFunction;
 };
 
 class MergeFunctionsLegacyPass : public ModulePass {
@@ -360,27 +309,16 @@ public:
     if (skipModule(M))
       return false;
 
-    auto GetTTI = [this](Function &F) -> TargetTransformInfo & {
-      return this->getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
-    };
-
-    MergeFunctions MF(GetTTI);
+    MergeFunctions MF;
     return MF.runOnModule(M);
-  }
-
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.addRequired<TargetTransformInfoWrapperPass>();
   }
 };
 
 } // end anonymous namespace
 
 char MergeFunctionsLegacyPass::ID = 0;
-INITIALIZE_PASS_BEGIN(MergeFunctionsLegacyPass, "mergefunc",
-                      "Merge Functions", false, false)
-INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
-INITIALIZE_PASS_END(MergeFunctionsLegacyPass, "mergefunc",
-                    "Merge Functions", false, false)
+INITIALIZE_PASS(MergeFunctionsLegacyPass, "mergefunc",
+                "Merge Functions", false, false)
 
 ModulePass *llvm::createMergeFunctionsPass() {
   return new MergeFunctionsLegacyPass();
@@ -388,12 +326,7 @@ ModulePass *llvm::createMergeFunctionsPass() {
 
 PreservedAnalyses MergeFunctionsPass::run(Module &M,
                                           ModuleAnalysisManager &AM) {
-  auto &FAM = AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
-  auto GetTTI = [&FAM](Function &F) -> TargetTransformInfo & {
-    return FAM.getResult<TargetIRAnalysis>(F);
-  };
-
-  MergeFunctions MF(GetTTI);
+  MergeFunctions MF;
   if (!MF.runOnModule(M))
     return PreservedAnalyses::all();
   return PreservedAnalyses::none();
@@ -689,38 +622,6 @@ static Value *createCast(IRBuilder<> &Builder, Value *V, Type *DestTy) {
     return Builder.CreateBitCast(V, DestTy);
 }
 
-struct BuiltThunkBody {
-  CallInst *CI = nullptr;
-  ReturnInst *RI = nullptr;
-};
-
-static BuiltThunkBody appendThunkBody(Function &F, Function &G, BasicBlock &BB) {
-  IRBuilder<> Builder(&BB);
-  SmallVector<Value *, 16> Args;
-  unsigned I = 0;
-  FunctionType *FFTy = F.getFunctionType();
-  for (Argument &AI : G.args()) {
-    Args.push_back(createCast(Builder, &AI, FFTy->getParamType(I)));
-    ++I;
-  }
-
-  CallInst *CI = Builder.CreateCall(&F, Args);
-  bool IsSwiftTailCall = F.getCallingConv() == CallingConv::SwiftTail &&
-                         G.getCallingConv() == CallingConv::SwiftTail;
-  CI->setTailCallKind(IsSwiftTailCall ? CallInst::TCK_MustTail
-                                      : CallInst::TCK_Tail);
-  CI->setCallingConv(F.getCallingConv());
-  CI->setAttributes(F.getAttributes());
-
-  ReturnInst *RI = nullptr;
-  if (G.getReturnType()->isVoidTy())
-    RI = Builder.CreateRetVoid();
-  else
-    RI = Builder.CreateRet(createCast(Builder, CI, G.getReturnType()));
-
-  return {CI, RI};
-}
-
 // Erase the instructions in PDIUnrelatedWL as they are unrelated to the
 // parameter debug info, from the entry block.
 void MergeFunctions::eraseInstsUnrelatedToPDI(
@@ -863,180 +764,42 @@ void MergeFunctions::filterInstsUnrelatedToPDI(
   LLVM_DEBUG(dbgs() << " }\n");
 }
 
-static bool canCreateAliasFor(Function *F);
-
-static bool useCangjieThunkProfitabilityModel(const Function &F) {
-  return !MergeFunctionsPDI && F.hasCangjieGC() && F.size() == 1;
-}
-
-#ifndef NDEBUG
-static void printCost(raw_ostream &OS, InstructionCost Cost) {
-  if (auto Value = Cost.getValue())
-    OS << *Value;
-  else
-    OS << "invalid";
-}
-#endif
-
-InstructionCost MergeFunctions::estimateBasicBlockCost(
-    BasicBlock &BB, TargetTransformInfo &TTI, const DataLayout &DL) {
-  InstructionCost Cost = 0;
-  for (Instruction &I : BB.instructionsWithoutDebug()) {
-    switch (I.getOpcode()) {
-    case Instruction::BitCast:
-    case Instruction::AddrSpaceCast:
-    case Instruction::PtrToInt:
-    case Instruction::IntToPtr:
-    case Instruction::Alloca:
-    case Instruction::PHI:
-      continue;
-    case Instruction::GetElementPtr:
-      if (cast<GetElementPtrInst>(&I)->hasAllZeroIndices())
-        continue;
-      break;
-    default:
-      break;
-    }
-
-    if (I.isLifetimeStartOrEnd())
-      continue;
-
-    if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
-      SmallVector<Type *, 4> Tys;
-      FastMathFlags FMF;
-      for (Value *Val : II->args())
-        Tys.push_back(Val->getType());
-
-      if (auto *FPMO = dyn_cast<FPMathOperator>(II))
-        FMF = FPMO->getFastMathFlags();
-
-      IntrinsicCostAttributes ICA(II->getIntrinsicID(), II->getType(), Tys,
-                                  FMF);
-      Cost += TTI.getIntrinsicInstrCost(ICA,
-                                        TargetTransformInfo::TCK_CodeSize);
-      continue;
-    }
-
-    if (auto *CB = dyn_cast<CallBase>(&I)) {
-      Cost += getCallsiteCost(*CB, DL);
-      continue;
-    }
-
-    if (auto *SI = dyn_cast<SwitchInst>(&I)) {
-      Cost += (SI->getNumCases() + 1) * InlineConstants::InstrCost;
-      continue;
-    }
-
-    Cost += InlineConstants::InstrCost;
-  }
-
-  return Cost;
-}
-
-InstructionCost MergeFunctions::estimateFunctionBodyCost(Function &F) {
-  TargetTransformInfo &TTI = GetTTIForFunction(F);
-  const DataLayout &DL = F.getParent()->getDataLayout();
-  InstructionCost Cost = 0;
-  for (BasicBlock &BB : F)
-    Cost += estimateBasicBlockCost(BB, TTI, DL);
-  return Cost;
-}
-
-InstructionCost MergeFunctions::estimateThunkBodyCost(Function &F,
-                                                      Function &G) {
-  Function *SyntheticThunk =
-      Function::Create(G.getFunctionType(), GlobalValue::PrivateLinkage,
-                       G.getAddressSpace(), "", G.getParent());
-  SyntheticThunk->setCallingConv(G.getCallingConv());
-  BasicBlock *BB = BasicBlock::Create(G.getContext(), "", SyntheticThunk);
-  appendThunkBody(F, *SyntheticThunk, *BB);
-
-  TargetTransformInfo &TTI = GetTTIForFunction(G);
-  const DataLayout &DL = G.getParent()->getDataLayout();
-  InstructionCost Cost = estimateBasicBlockCost(*BB, TTI, DL);
-  SyntheticThunk->eraseFromParent();
-  return Cost;
-}
-
-ThunkCostInfo MergeFunctions::analyzeSingleThunkProfitability(Function &F,
-                                                              Function &G) {
-  ThunkCostInfo Info;
-  Info.BodyCost = estimateFunctionBodyCost(G);
-  Info.ReplacementCost = estimateThunkBodyCost(F, G);
-  return Info;
-}
-
 /// Whether this function may be replaced by a forwarding thunk.
-bool MergeFunctions::canCreateThunkFor(Function *F, Function *G) {
-  if (G->isVarArg())
+static bool canCreateThunkFor(Function *F) {
+  if (F->isVarArg())
     return false;
-
-  if (useCangjieThunkProfitabilityModel(*G)) {
-    ++NumCangjieThunkProfitChecks;
-    ThunkCostInfo Info = analyzeSingleThunkProfitability(*F, *G);
-    LLVM_DEBUG(dbgs() << "canCreateThunkFor: " << G->getName()
-                      << " body cost=");
-    LLVM_DEBUG(printCost(dbgs(), Info.BodyCost));
-    LLVM_DEBUG(dbgs() << ", thunk cost=");
-    LLVM_DEBUG(printCost(dbgs(), Info.ReplacementCost));
-    LLVM_DEBUG(dbgs() << ", net savings=");
-    LLVM_DEBUG(printCost(dbgs(), Info.getNetSavings()));
-    LLVM_DEBUG(dbgs() << '\n');
-    if (!Info.isValid() || Info.BodyCost <= Info.ReplacementCost) {
-      ++NumCangjieThunkProfitRejected;
-      LLVM_DEBUG(dbgs() << "canCreateThunkFor: " << G->getName()
-                        << " thunk is not profitable for Cangjie\n");
-      return false;
-    }
-    ++NumCangjieThunkProfitAccepted;
-    return true;
-  }
 
   // Don't merge tiny functions using a thunk, since it can just end up
   // making the function larger.
-  if (G->size() == 1 && G->front().size() <= 2) {
-    LLVM_DEBUG(dbgs() << "canCreateThunkFor: " << G->getName()
-                      << " is too small to bother creating a thunk for\n");
-    return false;
+  if (F->size() == 1) {
+    // For a single external function in the standard library, a conservative
+    // strategy is adopted to replace it with a thunk function.
+    if (F->hasCangjieGC() && F->use_empty() && F->hasExternalLinkage()) {
+      uint32_t ExternalFuncThrd = 30;
+      if (F->front().size() <= ExternalFuncThrd) {
+        LLVM_DEBUG(dbgs() << "canCreateThunkFor: " << F->getName()
+                          << "External function is too small to bother "
+                             "creating a thunk for\n");
+        return false;
+      }
+    }
+    // Considering the overhead introduced by GC operations and the number of
+    // lines of code.
+    uint32_t CangjieFuncThrd = 10;
+    if (F->hasCangjieGC() && F->front().size() <= CangjieFuncThrd) {
+      LLVM_DEBUG(
+          dbgs()
+          << "canCreateThunkFor: " << F->getName()
+          << "Cangjie function is too small to bother creating a thunk for\n");
+      return false;
+    }
+    if (F->front().size() <= 2) {
+      LLVM_DEBUG(dbgs() << "canCreateThunkFor: " << F->getName()
+                        << " is too small to bother creating a thunk for\n");
+      return false;
+    }
   }
-
   return true;
-}
-
-bool MergeFunctions::isDoubleWeakThunkProfitable(Function *F, Function *G) {
-  assert(F->isInterposable() && G->isInterposable() &&
-         "Only weak/interposable merges need a double-thunk profitability "
-         "check");
-
-  if (!useCangjieThunkProfitabilityModel(*F))
-    return true;
-
-  ThunkCostInfo Info;
-  Info.BodyCost = estimateFunctionBodyCost(*G);
-
-  InstructionCost ReplacementCostForF = 0;
-  if (!canCreateAliasFor(F)) {
-    if (!canCreateThunkFor(F, F))
-      return false;
-    ReplacementCostForF = estimateThunkBodyCost(*F, *F);
-  }
-
-  InstructionCost ReplacementCostForG = 0;
-  if (!canCreateAliasFor(G)) {
-    if (!canCreateThunkFor(F, G))
-      return false;
-    ReplacementCostForG = estimateThunkBodyCost(*F, *G);
-  }
-
-  Info.ReplacementCost = ReplacementCostForF + ReplacementCostForG;
-  LLVM_DEBUG(dbgs() << "double weak thunk profitability: removed body cost=");
-  LLVM_DEBUG(printCost(dbgs(), Info.BodyCost));
-  LLVM_DEBUG(dbgs() << ", replacement cost=");
-  LLVM_DEBUG(printCost(dbgs(), Info.ReplacementCost));
-  LLVM_DEBUG(dbgs() << ", net savings=");
-  LLVM_DEBUG(printCost(dbgs(), Info.getNetSavings()));
-  LLVM_DEBUG(dbgs() << '\n');
-  return Info.isValid() && Info.BodyCost > Info.ReplacementCost;
 }
 
 // Replace G with a simple tail call to bitcast(F). Also (unless
@@ -1071,10 +834,29 @@ void MergeFunctions::writeThunk(Function *F, Function *G) {
     BB = BasicBlock::Create(F->getContext(), "", NewG);
   }
 
+  IRBuilder<> Builder(BB);
   Function *H = MergeFunctionsPDI ? G : NewG;
-  BuiltThunkBody Body = appendThunkBody(*F, *H, *BB);
-  CallInst *CI = Body.CI;
-  ReturnInst *RI = Body.RI;
+  SmallVector<Value *, 16> Args;
+  unsigned i = 0;
+  FunctionType *FFTy = F->getFunctionType();
+  for (Argument &AI : H->args()) {
+    Args.push_back(createCast(Builder, &AI, FFTy->getParamType(i)));
+    ++i;
+  }
+
+  CallInst *CI = Builder.CreateCall(F, Args);
+  ReturnInst *RI = nullptr;
+  bool isSwiftTailCall = F->getCallingConv() == CallingConv::SwiftTail &&
+                         G->getCallingConv() == CallingConv::SwiftTail;
+  CI->setTailCallKind(isSwiftTailCall ? llvm::CallInst::TCK_MustTail
+                                      : llvm::CallInst::TCK_Tail);
+  CI->setCallingConv(F->getCallingConv());
+  CI->setAttributes(F->getAttributes());
+  if (H->getReturnType()->isVoidTy()) {
+    RI = Builder.CreateRetVoid();
+  } else {
+    RI = Builder.CreateRet(createCast(Builder, CI, H->getReturnType()));
+  }
 
   if (MergeFunctionsPDI) {
     DISubprogram *DIS = G->getSubprogram();
@@ -1145,7 +927,7 @@ bool MergeFunctions::writeThunkOrAlias(Function *F, Function *G) {
     writeAlias(F, G);
     return true;
   }
-  if (canCreateThunkFor(F, G)) {
+  if (canCreateThunkFor(F)) {
     writeThunk(F, G);
     return true;
   }
@@ -1158,14 +940,10 @@ void MergeFunctions::mergeTwoFunctions(Function *F, Function *G) {
     assert(G->isInterposable());
 
     // Both writeThunkOrAlias() calls below must succeed, either because we can
-    // create aliases for G and the renamed copy of F, or because the
-    // double-thunk plan is profitable. For Cangjie single-block functions we
-    // explicitly compute the total savings of replacing one body with two
-    // symbol-preserving wrappers.
-    if (!isDoubleWeakThunkProfitable(F, G))
-      return;
-    if ((!canCreateAliasFor(F) && !canCreateThunkFor(F, F)) ||
-        (!canCreateAliasFor(G) && !canCreateThunkFor(F, G)))
+    // create aliases for G and NewF, or because a thunk for F is profitable.
+    // F here has the same signature as NewF below, so that's what we check.
+    if (!canCreateThunkFor(F) &&
+        (!canCreateAliasFor(F) || !canCreateAliasFor(G)))
       return;
 
     // Make them both thunks to the same internal function.
