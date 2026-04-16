@@ -153,7 +153,16 @@ void SBCJThread::StepInstruction(bool step_over, SBError &error) {
   if (cjthread->GetCJThreadState() != CJThreadState::eRunning) {
     CJThread::WaitUntilCJThreadScheduled(exe_ctx.GetTargetRef(), cjthread, new_plan_status);
   }
-  ThreadSP thread = exe_ctx.GetProcessSP()->GetThreadList().GetSelectedThread();
+  ProcessSP process_sp = exe_ctx.GetProcessSP();
+  if (!process_sp) {
+    error.SetErrorString("No process in SBCJThread::StepInstruction");
+    return;
+  }
+  ThreadSP thread = process_sp->GetThreadList().GetSelectedThread();
+  if (!thread) {
+    error.SetErrorString("No thread in SBCJThread::StepInstruction");
+    return;
+  }
   ThreadPlanSP new_plan_sp(thread->QueueThreadPlanForStepSingleInstruction(
       step_over, true, true, new_plan_status));
 
@@ -189,7 +198,16 @@ void SBCJThread::StepOver(lldb::RunMode stop_other_threads, SBError &error) {
   if (cjthread->GetCJThreadState() != CJThreadState::eRunning) {
     CJThread::WaitUntilCJThreadScheduled(exe_ctx.GetTargetRef(), cjthread, new_plan_status);
   }
-  ThreadSP thread = exe_ctx.GetProcessSP()->GetThreadList().GetSelectedThread();
+  ProcessSP process_sp = exe_ctx.GetProcessSP();
+  if (!process_sp) {
+    error.SetErrorString("No process in SBCJThread::StepOver");
+    return;
+  }
+  ThreadSP thread = process_sp->GetThreadList().GetSelectedThread();
+  if (!thread) {
+    error.SetErrorString("No thread in SBCJThread::StepOver");
+    return;
+  }
   bool abort_other_plans = false;
   StackFrameSP frame_sp(thread->GetStackFrameAtIndex(0));
 
@@ -242,7 +260,16 @@ void SBCJThread::StepInto(const char *target_name, uint32_t end_line,
   if (cjthread->GetCJThreadState() != CJThreadState::eRunning) {
     CJThread::WaitUntilCJThreadScheduled(exe_ctx.GetTargetRef(), cjthread, new_plan_status);
   }
-  ThreadSP thread = exe_ctx.GetProcessSP()->GetThreadList().GetSelectedThread();
+  ProcessSP process_sp = exe_ctx.GetProcessSP();
+  if (!process_sp) {
+    error.SetErrorString("No process in SBCJThread::StepInto");
+    return;
+  }
+  ThreadSP thread = process_sp->GetThreadList().GetSelectedThread();
+  if (!thread) {
+    error.SetErrorString("No thread in SBCJThread::StepInto");
+    return;
+  }
   StackFrameSP frame_sp(thread->GetStackFrameAtIndex(0));
   ThreadPlanSP new_plan_sp;
 
@@ -301,7 +328,16 @@ void SBCJThread::StepOut(SBError &error) {
   if (cjthread->GetCJThreadState() != CJThreadState::eRunning) {
     CJThread::WaitUntilCJThreadScheduled(exe_ctx.GetTargetRef(), cjthread, new_plan_status);
   }
-  ThreadSP thread = exe_ctx.GetProcessSP()->GetThreadList().GetSelectedThread();
+  ProcessSP process_sp = exe_ctx.GetProcessSP();
+  if (!process_sp) {
+    error.SetErrorString("No process in SBCJThread::StepOut");
+    return;
+  }
+  ThreadSP thread = process_sp->GetThreadList().GetSelectedThread();
+  if (!thread) {
+    error.SetErrorString("No thread in SBCJThread::StepOut");
+    return;
+  }
 
   const LazyBool avoid_no_debug = eLazyBoolCalculate;
   ThreadPlanSP new_plan_sp(thread->QueueThreadPlanForStepOut(
@@ -322,8 +358,12 @@ uint32_t SBCJThread::GetNumFrames() {
   ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
 
   if (exe_ctx.HasCJThreadScope()) {
+    Process *process = exe_ctx.GetProcessPtr();
+    if (!process) {
+      return num_frames;
+    }
     Process::StopLocker stop_locker;
-    if (stop_locker.TryLock(&exe_ctx.GetProcessPtr()->GetRunLock())) {
+    if (stop_locker.TryLock(&process->GetRunLock())) {
       num_frames = exe_ctx.GetCJThreadPtr()->GetStackFrameCount();
     }
   }
@@ -340,8 +380,12 @@ SBFrame SBCJThread::GetFrameAtIndex(uint32_t idx) {
   ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
 
   if (exe_ctx.HasCJThreadScope()) {
+    Process *process = exe_ctx.GetProcessPtr();
+    if (!process) {
+      return sb_frame;
+    }
     Process::StopLocker stop_locker;
-    if (stop_locker.TryLock(&exe_ctx.GetProcessPtr()->GetRunLock())) {
+    if (stop_locker.TryLock(&process->GetRunLock())) {
       frame_sp = exe_ctx.GetCJThreadPtr()->GetStackFrameAtIndex(idx);
       sb_frame.SetFrameSP(frame_sp);
     }
@@ -359,8 +403,12 @@ lldb::SBFrame SBCJThread::GetSelectedFrame() {
   ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
 
   if (exe_ctx.HasCJThreadScope()) {
+    Process *process = exe_ctx.GetProcessPtr();
+    if (!process) {
+      return sb_frame;
+    }
     Process::StopLocker stop_locker;
-    if (stop_locker.TryLock(&exe_ctx.GetProcessPtr()->GetRunLock())) {
+    if (stop_locker.TryLock(&process->GetRunLock())) {
       frame_sp = exe_ctx.GetCJThreadPtr()->GetSelectedFrame();
       sb_frame.SetFrameSP(frame_sp);
     }
@@ -378,8 +426,12 @@ lldb::SBFrame SBCJThread::SetSelectedFrame(uint32_t idx) {
   ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
 
   if (exe_ctx.HasCJThreadScope()) {
+    Process *process = exe_ctx.GetProcessPtr();
+    if (!process) {
+      return sb_frame;
+    }
     Process::StopLocker stop_locker;
-    if (stop_locker.TryLock(&exe_ctx.GetProcessPtr()->GetRunLock())) {
+    if (stop_locker.TryLock(&process->GetRunLock())) {
       CJThread *cjthread = exe_ctx.GetCJThreadPtr();
       frame_sp = cjthread->GetStackFrameAtIndex(idx);
       if (frame_sp) {
@@ -429,4 +481,3 @@ bool SBCJThread::GetDescription(SBStream &description, bool stop_format) const {
 
   return true;
 }
-
