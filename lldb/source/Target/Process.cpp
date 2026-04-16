@@ -6173,7 +6173,9 @@ lldb::CJThreadSP Process::FindCJThreadByOSThreadID(lldb::tid_t tid, bool can_upd
   if (can_update) {
     RefreshCJThreadList(error, true);
   }
-
+  if (error.Fail()) {
+    return nullptr;
+  }
   for (lldb::ThreadSP thread_sp : CJThreads()) {
     lldb::CJThreadSP cjthread_sp = std::static_pointer_cast<CJThread>(thread_sp);
     if (cjthread_sp != nullptr && cjthread_sp->GetHostThreadID() == tid) {

@@ -125,28 +125,6 @@ struct CJThreadInfo { \
 }; \
 ";
 
-
-lldb::ValueObjectSP eval(Process *process, llvm::StringRef expr, Status &error) {
-  Target &target = process->GetTarget();
-  ThreadList &thlist = process->GetThreadList();
-  lldb::ThreadSP thread = thlist.GetSelectedThread();
-
-  if (!thread)
-    error.SetErrorString("(SafeUserExpr) failed to get a nonsynthetic thread");
-  ExecutionContext exe_ctx(process, thread.get(), nullptr);
-
-  lldb::ValueObjectSP result;
-  lldb_private::EvaluateExpressionOptions options;
-  options.SetUseDynamic(target.GetPreferDynamicValue());
-  options.SetUnwindOnError(true);
-  options.SetIgnoreBreakpoints(true);
-  options.SetLanguage(target.GetLanguage());
-  options.SetCangjieUserExpr(false);
-
-  UserExpression::Evaluate(exe_ctx, options, expr, "", result, error);
-  return error.Fail() ? nullptr : result;
-}
-
 template <class T>
 void ValueObjectCopyData(lldb::ValueObjectSP valobj, T *to, Status &error) {
   if (!valobj || !to) {
@@ -601,7 +579,9 @@ bool CJThread::RetrieveRegisterInfo(Process &process, CJDynamicRegisterInfoSP cj
     ThreadList &tlist = process.GetThreadList();
     if (!tlist.GetSize()) return false;
     lldb::ThreadSP firstThread = tlist.GetThreadAtIndex(0);
+    if (!firstThread) return false;
     lldb::RegisterContextSP reg_ctx = firstThread->GetRegisterContext();
+    if (!reg_ctx) return false;
 
     for (int i = 0, n = reg_ctx->GetRegisterCount(); i < n; i ++) {
         const RegisterInfo *reg_info = reg_ctx->GetRegisterInfoAtIndex(i);
@@ -820,7 +800,11 @@ public:
         }
     }
 
-    lldb::addr_t break_addr = cjthread->GetStackFrameAtIndex(0)->GetRegisterContext()->GetPC();
+    lldb::StackFrameSP frame = cjthread->GetStackFrameAtIndex(0);
+    if (!frame) return;
+    lldb::RegisterContextSP reg_ctx = frame->GetRegisterContext();
+    if (!reg_ctx) return;
+    lldb::addr_t break_addr = reg_ctx->GetPC();
     if (break_addr != LLDB_INVALID_ADDRESS) {
       lldb::BreakpointSP until_bp = target.CreateBreakpoint(break_addr, true, false);
       if (until_bp != nullptr) {
