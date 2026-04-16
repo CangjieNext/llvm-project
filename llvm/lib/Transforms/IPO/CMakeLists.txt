@@ -32,6 +32,7 @@ add_llvm_component_library(LLVMipo
   MergeFunctions.cpp
   ModuleInliner.cpp
   OpenMPOpt.cpp
+  ParamMergeFunctions.cpp
   PartialInlining.cpp
   PassManagerBuilder.cpp
   PruneEH.cpp
