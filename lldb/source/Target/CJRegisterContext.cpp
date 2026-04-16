@@ -223,7 +223,8 @@ const RegisterSet *CJRegisterContext::GetRegisterSet(size_t reg_set) {
 }
 
 lldb::ByteOrder CJRegisterContext::GetByteOrderForValues() const {
-  if (ProcessSP process_sp = m_thread.GetProcess())
+  ProcessSP process_sp = m_thread.GetProcess();
+  if (process_sp)
     return process_sp->GetByteOrder();
   return endian::InlHostByteOrder();
 }
@@ -512,6 +513,11 @@ bool CJRegisterContext::ReadRegister(const RegisterInfo *reg_info,
   }
 
   ProcessSP process_sp = GetThread().GetProcess();
+  if (!process_sp) {
+    value.SetValueToInvalid();
+    return false;
+  }
+
   const llvm::Triple triple = process_sp->GetSystemArchitecture().GetTriple();
 
   bool ok = false;

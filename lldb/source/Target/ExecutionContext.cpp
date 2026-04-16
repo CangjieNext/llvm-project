@@ -711,7 +711,6 @@ lldb::CJThreadSP ExecutionContextRef::GetCJThreadSP() const {
 
   // Check that we aren't about to return an invalid thread sp.  We might
   // return a nullptr thread_sp, but don't return an invalid one.
-
   if (cjthread_sp && !cjthread_sp->IsValid())
     cjthread_sp.reset();
 

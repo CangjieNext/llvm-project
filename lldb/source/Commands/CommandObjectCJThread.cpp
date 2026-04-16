@@ -86,16 +86,20 @@ public:
 protected:
   bool DoExecute(Args &command, CommandReturnObject &result) override {
     Status error;
-    m_exe_ctx.GetProcessPtr()->RefreshCJThreadList(error);
+    Process *process = m_exe_ctx.GetProcessPtr();
+    if (!process) {
+      result.AppendError("no process");
+      return false;
+    }
+    process->RefreshCJThreadList(error);
     if (error.Fail()) return false;
 
     Stream &strm = result.GetOutputStream();
     result.SetStatus(eReturnStatusSuccessFinishNoResult);
-    Process *process = m_exe_ctx.GetProcessPtr();
     ThreadList &cjthread_list = process->GetCJThreadList();
     std::vector<lldb::tid_t> thread_id_array;
 
-    for (uint64_t i = 0; i < command.GetArgumentCount(); i ++) {
+    for (uint64_t i = 0; i < command.GetArgumentCount(); i++) {
       uint32_t cjt_id;
       if (!llvm::to_integer(command.GetArgumentAtIndex(i), cjt_id)) {
         result.AppendErrorWithFormat("invalid cjthread index '%s'",
@@ -106,7 +110,12 @@ protected:
     }
 
     if (thread_id_array.empty()) {
-      thread_id_array.push_back(cjthread_list.GetSelectedThread()->GetID());
+      ThreadSP selected_thread = cjthread_list.GetSelectedThread();
+      if (!selected_thread) {
+        result.AppendError("no selected thread");
+        return false;
+      }
+      thread_id_array.push_back(selected_thread->GetID());
     }
 
     for (uint32_t thread_id : thread_id_array) {
@@ -115,12 +124,13 @@ protected:
         thread_sp->GetStatus(strm, 0, 1, 0, false);
       } else {
         Log *log = GetLog(LLDBLog::Process);
-        LLDB_LOGF(log, "Process::GetThreadStatus - cjthread 0x" PRIu64
-                       " vanished while running Thread::GetStatus.");
+        if (log) {
+          LLDB_LOGF(log, "Process::GetThreadStatus - cjthread 0x" PRIu64
+                         " vanished while running Thread::GetStatus.");
+        }
       }
     }
 
-    result.SetStatus(eReturnStatusSuccessFinishNoResult);
     return result.Succeeded();
   }
 };
@@ -249,30 +259,39 @@ public:
   }
 
   bool DoExecute(Args &command, CommandReturnObject &result) override {
-    Status error;
-    ThreadList &cjtlist = m_exe_ctx.GetProcessPtr()->GetCJThreadList();
+    Process *process = m_exe_ctx.GetProcessPtr();
+    if (!process) {
+      result.AppendError("no process");
+      return false;
+    }
+    ThreadList &cjtlist = process->GetCJThreadList();
     CJThreadSP selected_cjthread = std::dynamic_pointer_cast<CJThread>(cjtlist.GetSelectedThread());
     if (!selected_cjthread) {
       result.AppendError("Unknown error, cjthread list contains a non cjthread element");
       return false;
     }
 
+    Status error;
     if (selected_cjthread->GetCJThreadState() != CJThreadState::eRunning &&
         !CJThread::WaitUntilCJThreadScheduled(GetSelectedTarget(), selected_cjthread, error)) {
       return false;
     }
 
-    auto thread = m_exe_ctx.GetProcessPtr()->GetThreadList().GetSelectedThread();
+    ThreadSP thread = process->GetThreadList().GetSelectedThread();
+    if (!thread) {
+      result.AppendError("no selected thread");
+      return false;
+    }
     ThreadPlanSP new_plan_sp = GetPlanWithType(thread);
     if (error.Fail()) {
-      result.AppendErrorWithFormatv("failed to refresh cjthread list: `{0}'", error.AsCString());
+      result.AppendErrorWithFormatv("failed to refresh cjthread list: `{0}`", error.AsCString());
       return false;
     }
     if (new_plan_sp) {
       new_plan_sp->SetIsControllingPlan(true);
       new_plan_sp->SetOkayToDiscard(false);
       unsigned cjt_id = selected_cjthread->GetID();
-      ThreadSP thread = cjtlist.FindThreadByID(cjt_id);
+      thread = cjtlist.FindThreadByID(cjt_id);
       if (!thread) {
         result.AppendError("cjthread vanished when stepping inst");
         return false;
@@ -284,9 +303,9 @@ public:
         return false;
       }
 
-      m_exe_ctx.GetProcessPtr()->GetCJThreadList().SetSelectedThreadByID(cjt_id);
-      m_exe_ctx.GetProcessPtr()->GetThreadList().SetSelectedThreadByID(cjthread->GetHostThreadID());
-      m_exe_ctx.GetProcessPtr()->ResumeSynchronous(&result.GetOutputStream());
+      process->GetCJThreadList().SetSelectedThreadByID(cjt_id);
+      process->GetThreadList().SetSelectedThreadByID(cjthread->GetHostThreadID());
+      process->ResumeSynchronous(&result.GetOutputStream());
     }
     return result.Succeeded();
   }
@@ -332,12 +351,16 @@ public:
 protected:
   bool DoExecute(Args &command, CommandReturnObject &result) override {
     Status error;
-    m_exe_ctx.GetProcessPtr()->RefreshCJThreadList(error);
+    Process *process = m_exe_ctx.GetProcessPtr();
+    if (!process) {
+      result.AppendError("no process");
+      return false;
+    }
+    process->RefreshCJThreadList(error);
     if (error.Fail()) return false;
 
     Stream &strm = result.GetOutputStream();
     result.SetStatus(eReturnStatusSuccessFinishNoResult);
-    Process *process = m_exe_ctx.GetProcessPtr();
     const bool only_threads_with_stop_reason = false;
     const uint32_t start_frame = 0;
     const uint32_t num_frames = 0;
@@ -362,8 +385,12 @@ protected:
       num_threads = curr_thread_list.GetSize();
       uint32_t idx;
       thread_id_array.resize(num_threads);
-      for (idx = 0; idx < num_threads; ++idx)
-        thread_id_array[idx] = curr_thread_list.GetThreadAtIndex(idx)->GetID();
+      for (idx = 0; idx < num_threads; ++idx) {
+        ThreadSP thread = curr_thread_list.GetThreadAtIndex(idx);
+        if (thread) {
+          thread_id_array[idx] = thread->GetID();
+        }
+      }
     }
 
     for (uint32_t i = 0; i < num_threads; i++) {
@@ -378,8 +405,10 @@ protected:
                              num_frames_with_source, false);
       } else {
         Log *log = GetLog(LLDBLog::Process);
-        LLDB_LOGF(log, "Process::GetThreadStatus - cjthread 0x" PRIu64
-                       " vanished while running Thread::GetStatus.");
+        if (log) {
+          LLDB_LOGF(log, "Process::GetThreadStatus - cjthread 0x" PRIu64
+                         " vanished while running Thread::GetStatus.");
+        }
       }
     }
 
@@ -403,10 +432,15 @@ public:
 
   bool DoExecute(Args &command, CommandReturnObject &result) override {
     Status error;
-    m_exe_ctx.GetProcessPtr()->RefreshCJThreadList(error);
+    Process *process = m_exe_ctx.GetProcessPtr();
+    if (!process) {
+      result.AppendError("no process");
+      return false;
+    }
+    process->RefreshCJThreadList(error);
     if (error.Fail()) return false;
 
-    ThreadList &cjlist = m_exe_ctx.GetProcessPtr()->GetCJThreadList();
+    ThreadList &cjlist = process->GetCJThreadList();
     m_exe_ctx.SetCJThreadSP(std::dynamic_pointer_cast<CJThread>(cjlist.GetSelectedThread()));
     return CommandObjectFrameSelect::DoExecute(command, result);
   }
@@ -484,19 +518,19 @@ CommandObjectMultiwordCJThread::CommandObjectMultiwordCJThread(
                   eStepTypeTraceOver)));
   LoadSubCommand("s",
                  CommandObjectSP(new CommandObjectCJThreadStepWithType(
-                  interpreter, "cjthread step-inst",
+                  interpreter, "cjthread step-in",
                   "Source level single step, stepping into calls.  "
                   "Defaults to current cjthread unless specified.",
                   eStepTypeInto)));
   LoadSubCommand("n",
                  CommandObjectSP(new CommandObjectCJThreadStepWithType(
-                  interpreter, "cjthread step-inst",
+                  interpreter, "cjthread step-over",
                   "Source level single step, stepping over calls.  "
                   "Defaults to current cjthread unless specified.",
                   eStepTypeOver)));
   LoadSubCommand("finish",
                  CommandObjectSP(new CommandObjectCJThreadStepWithType(
-                  interpreter, "cjthread step-inst",
+                  interpreter, "cjthread step-out",
                   "Finish executing the current stack frame and stop after "
                   "returning.  Defaults to current cjthread unless specified.",
                   eStepTypeOut)));

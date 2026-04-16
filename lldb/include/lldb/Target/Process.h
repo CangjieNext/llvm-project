@@ -2887,7 +2887,7 @@ protected:
   ThreadList m_thread_list; ///< The threads for this process as the user will
                             ///see them. This is usually the same as
   ThreadList m_cjthread_list; ///< The threads for this process as the user will
-                            ///see them. This is usually the same as
+                              ///see them. This is usually the same as
   ///< m_thread_list_real, but might be different if there is an OS plug-in
   ///creating memory threads
   ThreadPlanStackMap m_thread_plans; ///< This is the list of thread plans for
