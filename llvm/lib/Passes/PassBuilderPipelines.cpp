@@ -1432,11 +1432,13 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   if (EnableIROutliner)
     MPM.addPass(IROutlinerPass());
 
-  // Merge functions if requested.
-  if (PTO.MergeFunctions)
+  // Merge functions if requested. Keep the parameterized merge immediately
+  // after mergefunc, and enable both by default for the Cangjie pipeline.
+  if (PTO.MergeFunctions || CJPipeline) {
     MPM.addPass(MergeFunctionsPass());
-  if (EnableParamMergeFunctions)
-    MPM.addPass(ParamMergeFunctionsPass());
+    if (EnableParamMergeFunctions || CJPipeline)
+      MPM.addPass(ParamMergeFunctionsPass());
+  }
 
   if (!LTOPreLink && CJPipeline) {
     MPM.addPass(EliminateAvailableExternallyPass());
@@ -1956,10 +1958,11 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
 
   // It will conflict with VFE, so it is necessary to ensure that VFE is not
   // executed after MergeFunction.
-  if (PTO.MergeFunctions || CJPipeline)
+  if (PTO.MergeFunctions || CJPipeline) {
     MPM.addPass(MergeFunctionsPass());
-  if (EnableParamMergeFunctions)
-    MPM.addPass(ParamMergeFunctionsPass());
+    if (EnableParamMergeFunctions || CJPipeline)
+      MPM.addPass(ParamMergeFunctionsPass());
+  }
 
   if (PTO.CallGraphProfile)
     MPM.addPass(CGProfilePass());
@@ -2011,10 +2014,11 @@ ModulePassManager PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
   MPM.addPass(AlwaysInlinerPass(
       /*InsertLifetimeIntrinsics=*/false));
 
-  if (PTO.MergeFunctions)
+  if (PTO.MergeFunctions || CJPipeline) {
     MPM.addPass(MergeFunctionsPass());
-  if (EnableParamMergeFunctions)
-    MPM.addPass(ParamMergeFunctionsPass());
+    if (EnableParamMergeFunctions || CJPipeline)
+      MPM.addPass(ParamMergeFunctionsPass());
+  }
 
   if (EnableMatrix)
     MPM.addPass(
