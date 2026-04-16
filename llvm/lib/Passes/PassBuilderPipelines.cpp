@@ -61,6 +61,7 @@
 #include "llvm/Transforms/IPO/MergeFunctions.h"
 #include "llvm/Transforms/IPO/ModuleInliner.h"
 #include "llvm/Transforms/IPO/OpenMPOpt.h"
+#include "llvm/Transforms/IPO/ParamMergeFunctions.h"
 #include "llvm/Transforms/IPO/PartialInlining.h"
 #include "llvm/Transforms/IPO/SCCP.h"
 #include "llvm/Transforms/IPO/SampleProfile.h"
@@ -194,6 +195,10 @@ static cl::opt<bool> EnableNoRerunSimplificationPipeline(
 static cl::opt<bool> EnableMergeFunctions(
     "enable-merge-functions", cl::init(false), cl::Hidden,
     cl::desc("Enable function merging as part of the optimization pipeline"));
+
+static cl::opt<bool> EnableParamMergeFunctions(
+    "enable-param-merge-functions", cl::init(false), cl::Hidden,
+    cl::desc("Run conservative parameterized merging after mergefunc"));
 
 static cl::opt<bool> EnableCJDevirtual("enable-cj-devirtual", cl::init(true),
                                        cl::Hidden,
@@ -1445,6 +1450,8 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   // Merge functions if requested.
   if (PTO.MergeFunctions)
     MPM.addPass(MergeFunctionsPass());
+  if (EnableParamMergeFunctions)
+    MPM.addPass(ParamMergeFunctionsPass());
 
   if (!LTOPreLink && CJPipeline) {
     MPM.addPass(EliminateAvailableExternallyPass());
@@ -1966,6 +1973,8 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   // executed after MergeFunction.
   if (PTO.MergeFunctions || CJPipeline)
     MPM.addPass(MergeFunctionsPass());
+  if (EnableParamMergeFunctions)
+    MPM.addPass(ParamMergeFunctionsPass());
 
   if (PTO.CallGraphProfile)
     MPM.addPass(CGProfilePass());
@@ -2019,6 +2028,8 @@ ModulePassManager PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
 
   if (PTO.MergeFunctions)
     MPM.addPass(MergeFunctionsPass());
+  if (EnableParamMergeFunctions)
+    MPM.addPass(ParamMergeFunctionsPass());
 
   if (EnableMatrix)
     MPM.addPass(
