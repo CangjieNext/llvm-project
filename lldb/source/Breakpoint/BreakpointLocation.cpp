@@ -395,6 +395,9 @@ bool BreakpointLocation::ValidForThisCJThread(Thread &thread) {
   if (m_owner.GetCJThreadID() != UINT64_MAX) {
     Status error;
     thread.GetProcess()->RefreshCJThreadList(error);
+    if (error.Fail()) {
+      return false;
+    }
     auto cjthreads = thread.GetProcess()->GetCJThreadList();
     for (size_t i = 0; i < cjthreads.GetSize(); i++) {
       auto cjthread = std::dynamic_pointer_cast<CJThread>(cjthreads.GetThreadAtIndex(i));
