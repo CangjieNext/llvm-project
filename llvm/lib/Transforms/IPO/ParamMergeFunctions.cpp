@@ -113,6 +113,8 @@ static bool canParameterizeCallOperand(const CallBase *CB, unsigned OpIdx) {
                                CB->getCalledOperand()->stripPointerCasts())
                          : nullptr;
   if (Callee) {
+    if (Callee->isIntrinsic())
+      return false;
     StringRef Name = Callee->getName();
     if (Name.startswith("objc_msgSend$") || Name.startswith("__dtrace"))
       return false;
