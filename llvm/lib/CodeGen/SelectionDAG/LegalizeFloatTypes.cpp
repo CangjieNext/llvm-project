@@ -2251,6 +2251,7 @@ void DAGTypeLegalizer::PromoteFloatResult(SDNode *N, unsigned ResNo) {
     case ISD::EXTRACT_VECTOR_ELT:
                           R = PromoteFloatRes_EXTRACT_VECTOR_ELT(N); break;
     case ISD::FCOPYSIGN:  R = PromoteFloatRes_FCOPYSIGN(N); break;
+    case ISD::FREEZE:     R = PromoteFloatRes_FREEZE(N); break;
 
     // Unary FP Operations
     case ISD::FABS:
@@ -2346,6 +2347,25 @@ SDValue DAGTypeLegalizer::PromoteFloatRes_ConstantFP(SDNode *N) {
   // of it from the object code
   EVT NVT = TLI.getTypeToTransformTo(*DAG.getContext(), VT);
   return DAG.getNode(GetPromotionOpcode(VT, NVT), DL, NVT, C);
+}
+
+SDValue DAGTypeLegalizer::PromoteFloatRes_FREEZE(SDNode *N) {
+  EVT VT = N->getValueType(0);
+  EVT NVT = TLI.getTypeToTransformTo(*DAG.getContext(), VT);
+  SDLoc DL(N);
+
+  // For 16-bit floating-point types, freeze the original bit representation
+  // before promotion. This preserves freeze semantics on the source type and
+  // avoids widening the set of arbitrary values that freeze may choose.
+  if (VT == MVT::f16 || VT == MVT::bf16) {
+    SDValue Bits = BitConvertToInteger(N->getOperand(0));
+    SDValue FrozenBits =
+        DAG.getNode(ISD::FREEZE, DL, Bits.getValueType(), Bits);
+    return DAG.getNode(GetPromotionOpcode(VT, NVT), DL, NVT, FrozenBits);
+  }
+
+  SDValue Promoted = GetPromotedFloat(N->getOperand(0));
+  return DAG.getNode(ISD::FREEZE, DL, Promoted.getValueType(), Promoted);
 }
 
 // If the Index operand is a constant, try to redirect the extract operation to
