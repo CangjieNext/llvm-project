@@ -54,6 +54,10 @@ using namespace llvm;
 
 #define DEBUG_TYPE "asm-printer"
 
+namespace llvm {
+extern cl::opt<bool> CJPipeline;
+}
+
 ARMAsmPrinter::ARMAsmPrinter(TargetMachine &TM,
                              std::unique_ptr<MCStreamer> Streamer)
     : AsmPrinter(TM, std::move(Streamer)), Subtarget(nullptr), AFI(nullptr),
@@ -1519,6 +1523,54 @@ bool ARMAsmPrinter::tryEmitCangjieSpecificCallByMOSym(
 // instructions) auto-generated.
 #include "ARMGenMCPseudoLowering.inc"
 
+void ARMAsmPrinter::emitCJStackCheck(const MachineInstr &MI) {
+  using namespace ARM;
+  MCContext &Ctx = MF->getContext();
+MCSymbol *StackGrowStubFunc = Ctx.getOrCreateSymbol("CJ_MCC_StackGrowStub");
+  MCInst BLStackGrowStub= MCInstBuilder(ARM::BL)
+      .addExpr(MCSymbolRefExpr::create(StackGrowStubFunc, MCSymbolRefExpr::VK_None, Ctx));
+  EmitToStreamer(*OutStreamer, BLStackGrowStub);
+}
+
+void ARMAsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
+                                        const MachineInstr &MI) {
+  StatepointOpers SOpers(&MI);
+  const MachineOperand &CallTarget = SOpers.getCallTarget();
+  if (CJPipeline) {
+    uint64_t ID = SOpers.getID();
+    if (ID == Cangjie::CJStatepointID::StackCheck) {
+      emitCangjieStackCheck(MI);
+      return;
+    }
+  }
+  MCOperand CallTargetMCOp;
+  unsigned CallOpcode;
+  switch (CallTarget.getType()) {
+  default:
+    llvm_unreachable("Unsupported operand type in statepoint call target");
+    break;
+  case MachineOperand::MO_GlobalAddress:
+  case MachineOperand::MO_ExternalSymbol:
+    CallOpcode = ARM::BL;
+    if (tryEmitCangjieSpecificCallByMOSym(&MI, CallTarget, CallOpcode)) {
+      return;
+    }
+    lowerOperand(CallTarget, CallTargetMCOp);
+    break;
+  case MachineOperand::MO_Immediate:
+    CallTargetMCOp = MCOperand::createImm(CallTarget.getImm());
+    CallOpcode = ARM::BL;
+    break;
+  case MachineOperand::MO_Register:
+    CallTargetMCOp = MCOperand::createReg(CallTarget.getReg());
+    CallOpcode = ARM::BLX;
+    break;
+  }
+  EmitToStreamer(OutStreamer, MCInstBuilder(CallOpcode).addOperand(CallTargetMCOp));
+  SM.recordCJStackMap(MI);
+  return;
+}
+
 void ARMAsmPrinter::emitInstruction(const MachineInstr *MI) {
   // TODOD FIXME: Enable feature predicate checks once all the test pass.
   // ARM_MC::verifyInstructionPredicates(MI->getOpcode(),
@@ -2510,36 +2562,8 @@ void ARMAsmPrinter::emitInstruction(const MachineInstr *MI) {
     ATS.emitARMWinCFIEpilogEnd();
     return;
 
-  case TargetOpcode::STATEPOINT: {
-    StatepointOpers SOpers(MI);
-    const MachineOperand &CallTarget = SOpers.getCallTarget();
-    MCOperand CallTargetMCOp;
-    unsigned CallOpcode;
-    switch (CallTarget.getType()) {
-    default:
-      llvm_unreachable("Unsupported operand type in statepoint call target");
-      break;
-    case MachineOperand::MO_GlobalAddress:
-    case MachineOperand::MO_ExternalSymbol:
-      CallOpcode = ARM::BL;
-      if (tryEmitCangjieSpecificCallByMOSym(MI, CallTarget, CallOpcode)) {
-        return;
-      }
-      lowerOperand(CallTarget, CallTargetMCOp);
-      break;
-    case MachineOperand::MO_Immediate:
-      CallTargetMCOp = MCOperand::createImm(CallTarget.getImm());
-      CallOpcode = ARM::BL;
-      break;
-    case MachineOperand::MO_Register:
-      CallTargetMCOp = MCOperand::createReg(CallTarget.getReg());
-      CallOpcode = ARM::BLX;
-      break;
-    }
-    EmitToStreamer(*OutStreamer, MCInstBuilder(CallOpcode).addOperand(CallTargetMCOp));
-    SM.recordCJStackMap(*MI);
-    return;
-  }
+  case TargetOpcode::STATEPOINT:
+    return LowerSTATEPOINT(*OutStreamer, SM, *MI);
   }
 
   MCInst TmpInst;
