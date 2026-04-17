@@ -79,6 +79,8 @@ static bool sameDiffLocs(const DiffLocs &LHS, const DiffLocs &RHS) {
 static bool isEligibleFunction(Function *F) {
   if (F->isDeclaration())
     return false;
+  if (!F->hasLocalLinkage())
+    return false;
   if (F->hasFnAttribute(Attribute::NoMerge) ||
       F->hasFnAttribute(Attribute::AlwaysInline))
     return false;
@@ -367,8 +369,8 @@ static void createThunk(Function &Thunk, ArrayRef<Constant *> Params,
                         Function &Target) {
   DebugLoc DL = getInsertionDebugLoc(Thunk);
   Optional<Function::ProfileCount> EC = Thunk.getEntryCount();
-  if (!Thunk.empty())
-    Thunk.deleteBody();
+  while (!Thunk.empty())
+    Thunk.begin()->eraseFromParent();
 
   BasicBlock *BB = BasicBlock::Create(Thunk.getContext(), "", &Thunk);
   IRBuilder<> Builder(BB);
