@@ -166,6 +166,9 @@ public:
   /// EmitMachineConstantPoolValue - Print a machine constantpool value to
   /// the .s file.
   void emitMachineConstantPoolValue(MachineConstantPoolValue *MCPV) override;
+  void LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
+                       const MachineInstr &MI);
+  void emitCJStackCheck(const MachineInstr &MI) override;
 };
 } // end namespace llvm
 
