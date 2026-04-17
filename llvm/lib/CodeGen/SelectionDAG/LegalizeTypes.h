@@ -686,6 +686,7 @@ private:
   SDValue PromoteFloatRes_ConstantFP(SDNode *N);
   SDValue PromoteFloatRes_EXTRACT_VECTOR_ELT(SDNode *N);
   SDValue PromoteFloatRes_FCOPYSIGN(SDNode *N);
+  SDValue PromoteFloatRes_FREEZE(SDNode *N);
   SDValue PromoteFloatRes_FMAD(SDNode *N);
   SDValue PromoteFloatRes_FPOWI(SDNode *N);
   SDValue PromoteFloatRes_FP_ROUND(SDNode *N);

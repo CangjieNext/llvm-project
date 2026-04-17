@@ -1419,13 +1419,25 @@ void ARMAsmPrinter::emitCangjieCallStubInstImpl(const MachineInstr *MI,
               ->getValue())
           ->getSExtValue();
 
-  // mov r12 , #CallFrameSize
-  EmitToStreamer(*OutStreamer, MCInstBuilder(ARM::MOVi)
+  assert(Subtarget->hasV6T2Ops() &&
+         "CallFrameSize materialization requires MOVW/MOVT support");
+  unsigned MovLoOpc = Subtarget->isThumb() ? ARM::t2MOVi16 : ARM::MOVi16;
+  unsigned MovHiOpc = Subtarget->isThumb() ? ARM::t2MOVTi16 : ARM::MOVTi16;
+
+  // movw r12, #lo16(CallFrameSize)
+  EmitToStreamer(*OutStreamer, MCInstBuilder(MovLoOpc)
                                    .addReg(ARM::R12)
-                                   .addImm(CallFrameSize)
+                                   .addImm(CallFrameSize & 0xffff)
                                    .addImm(ARMCC::AL)
-                                   .addReg(0)
                                    .addReg(0));
+  // movt r12, #hi16(CallFrameSize)
+  if ((CallFrameSize >> 16) != 0)
+    EmitToStreamer(*OutStreamer, MCInstBuilder(MovHiOpc)
+                                     .addReg(ARM::R12)
+                                     .addReg(ARM::R12)
+                                     .addImm((CallFrameSize >> 16) & 0xffff)
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
   // str R12, [sp, #4]
   EmitToStreamer(*OutStreamer, MCInstBuilder(ARM::STRi12)
                                    .addReg(ARM::R12)
