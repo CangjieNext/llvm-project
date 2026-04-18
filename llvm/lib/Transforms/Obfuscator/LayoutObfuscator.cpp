@@ -357,6 +357,10 @@ bool LayoutObfuscator::needObfuse(const Function &F) {
     return false;
   }
 
+  if (F.getName().endswith(".exception_outlined_func")) {
+    return false;
+  }
+
   if (!EnableObfExportSymol && isPublicFunction(F)) {
     return false;
   }

@@ -486,6 +486,13 @@ static void getInputArgs(llvm::BasicBlock *BB, SetVector<Value *> &ArgInputs) {
   }
 }
 
+static void clearOutlinedDebugLocs(Function *Func) {
+  for (BasicBlock &BB : *Func) {
+    for (Instruction &Inst : BB)
+      Inst.setDebugLoc(DebugLoc());
+  }
+}
+
 static Function* generateFunc(BasicBlock *BB, Function *OrigF) {
   SmallVector<BasicBlock *> BE;
   BE.push_back(BB);
@@ -496,6 +503,11 @@ static Function* generateFunc(BasicBlock *BB, Function *OrigF) {
   getInputArgs(BB, ArgInputs);
   CodeExtractorAnalysisCache CEAC(*OrigF);
   Function *Func = CE.extractCodeRegion(CEAC, ArgInputs, Outputs);
+  if (!Func)
+    return nullptr;
+
+  // Keep outlined exception helpers out of user-visible line tables.
+  clearOutlinedDebugLocs(Func);
   return Func;
 }
 
