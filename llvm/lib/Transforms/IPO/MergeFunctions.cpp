@@ -410,6 +410,24 @@ static bool isEligibleForMerging(Function &F) {
   return !F.isDeclaration() && !F.hasAvailableExternallyLinkage();
 }
 
+static bool hasGCOVCoverage(const Module &M) {
+  if (M.getNamedMetadata("llvm.gcov"))
+    return true;
+
+  for (const GlobalVariable &GV : M.globals()) {
+    if (GV.getName().startswith("__llvm_gcov"))
+      return true;
+  }
+
+  for (const Function &F : M) {
+    if (F.getName().startswith("__llvm_gcov") ||
+        F.getName().startswith("llvm_gcov_"))
+      return true;
+  }
+
+  return false;
+}
+
 static bool isBBEligibleForOutline(llvm::BasicBlock *BB) {
   if (!BB)
     return false;
@@ -486,6 +504,13 @@ static void getInputArgs(llvm::BasicBlock *BB, SetVector<Value *> &ArgInputs) {
   }
 }
 
+static void clearOutlinedDebugLocs(Function *Func) {
+  for (BasicBlock &BB : *Func) {
+    for (Instruction &Inst : BB)
+      Inst.setDebugLoc(DebugLoc());
+  }
+}
+
 static Function* generateFunc(BasicBlock *BB, Function *OrigF) {
   SmallVector<BasicBlock *> BE;
   BE.push_back(BB);
@@ -496,6 +521,11 @@ static Function* generateFunc(BasicBlock *BB, Function *OrigF) {
   getInputArgs(BB, ArgInputs);
   CodeExtractorAnalysisCache CEAC(*OrigF);
   Function *Func = CE.extractCodeRegion(CEAC, ArgInputs, Outputs);
+  if (!Func)
+    return nullptr;
+
+  // Keep outlined exception helpers out of user-visible line tables.
+  clearOutlinedDebugLocs(Func);
   return Func;
 }
 
@@ -520,6 +550,11 @@ void MergeFunctions::doExceptionOutline(Module &M) {
 }
 
 bool MergeFunctions::runOnModule(Module &M) {
+  if (hasGCOVCoverage(M)) {
+    LLVM_DEBUG(dbgs() << "Skipping MergeFunctions for GCOV coverage module\n");
+    return false;
+  }
+
   bool Changed = false;
   doExceptionOutline(M);
   SmallVector<GlobalValue *, 4> UsedV;

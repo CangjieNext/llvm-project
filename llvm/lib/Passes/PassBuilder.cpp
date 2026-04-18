@@ -85,6 +85,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/Regex.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/AggressiveInstCombine/AggressiveInstCombine.h"
 #include "llvm/Transforms/CJCFI/PtrAuthBackwardCFI.h"
@@ -331,6 +332,7 @@ cl::opt<bool> PrintPipelinePasses(
     "print-pipeline-passes",
     cl::desc("Print a '-passes' compatible string describing the pipeline "
              "(best-effort only)."));
+bool CangjieCoveragePipeline = false;
 extern cl::opt<bool> CJPipeline;
 extern cl::opt<bool> EnableCJBarrierSplit;
 extern cl::opt<bool> EnableCJGCInstrTransform;
@@ -1148,6 +1150,16 @@ PassBuilder::parsePipelineText(StringRef Text) {
   return {std::move(ResultPipeline)};
 }
 
+static bool hasPassInPipeline(ArrayRef<PassBuilder::PipelineElement> Pipeline,
+                              StringRef PassName) {
+  for (const PassBuilder::PipelineElement &Element : Pipeline) {
+    if (Element.Name == PassName ||
+        hasPassInPipeline(Element.InnerPipeline, PassName))
+      return true;
+  }
+  return false;
+}
+
 Error PassBuilder::parseModulePass(ModulePassManager &MPM,
                                    const PipelineElement &E) {
   auto &Name = E.Name;
@@ -1767,6 +1779,11 @@ Error PassBuilder::parsePassPipeline(ModulePassManager &MPM,
     return make_error<StringError>(
         formatv("invalid pipeline '{0}'", PipelineText).str(),
         inconvertibleErrorCode());
+
+  SaveAndRestore<bool> SavedCangjieCoveragePipeline(CangjieCoveragePipeline);
+  if (CJPipeline)
+    CangjieCoveragePipeline =
+        hasPassInPipeline(*Pipeline, "insert-gcov-profiling");
 
   // If the first name isn't at the module layer, wrap the pipeline up
   // automatically.

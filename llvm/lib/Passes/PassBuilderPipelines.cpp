@@ -250,6 +250,7 @@ extern cl::opt<bool> DisablePreInliner;
 extern cl::opt<int> PreInlineThreshold;
 
 extern cl::opt<bool> CJPipeline;
+extern bool CangjieCoveragePipeline;
 extern cl::opt<bool> CJLTOOpt;
 extern cl::opt<bool> CJDisableEscapeAnalysis;
 extern cl::opt<bool> EnableCJBarrierSplit;
@@ -266,6 +267,10 @@ void PassBuilder::invokePeepholeEPCallbacks(FunctionPassManager &FPM,
 // Helper to add AnnotationRemarksPass.
 static void addAnnotationRemarksPass(ModulePassManager &MPM) {
   MPM.addPass(createModuleToFunctionPassAdaptor(AnnotationRemarksPass()));
+}
+
+static bool shouldAddMergeFunctions(const PipelineTuningOptions &PTO) {
+  return (PTO.MergeFunctions || CJPipeline) && !CangjieCoveragePipeline;
 }
 
 // Helper to check if the current compilation phase is preparing for LTO
@@ -1434,7 +1439,7 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
 
   // Merge functions if requested. Keep the parameterized merge immediately
   // after mergefunc, and enable both by default for the Cangjie pipeline.
-  if (PTO.MergeFunctions || CJPipeline) {
+  if (shouldAddMergeFunctions(PTO)) {
     MPM.addPass(MergeFunctionsPass());
     if (EnableParamMergeFunctions || CJPipeline)
       MPM.addPass(ParamMergeFunctionsPass());
@@ -1958,7 +1963,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
 
   // It will conflict with VFE, so it is necessary to ensure that VFE is not
   // executed after MergeFunction.
-  if (PTO.MergeFunctions || CJPipeline) {
+  if (shouldAddMergeFunctions(PTO)) {
     MPM.addPass(MergeFunctionsPass());
     if (EnableParamMergeFunctions || CJPipeline)
       MPM.addPass(ParamMergeFunctionsPass());
@@ -2014,7 +2019,7 @@ ModulePassManager PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
   MPM.addPass(AlwaysInlinerPass(
       /*InsertLifetimeIntrinsics=*/false));
 
-  if (PTO.MergeFunctions || CJPipeline) {
+  if (shouldAddMergeFunctions(PTO)) {
     MPM.addPass(MergeFunctionsPass());
     if (EnableParamMergeFunctions || CJPipeline)
       MPM.addPass(ParamMergeFunctionsPass());
