@@ -86,6 +86,8 @@ static bool isEligibleFunction(Function *F) {
     return false;
   if (F->hasAvailableExternallyLinkage() || F->getFunctionType()->isVarArg())
     return false;
+  if (F->hasAddressTaken())
+    return false;
   if (F->getCallingConv() == CallingConv::SwiftTail)
     return false;
   if (!F->hasName() || F->size() != 1 || F->hasComdat())
@@ -365,6 +367,42 @@ static Function *createMergedFunction(Function &Root, const DiffLocs &Diffs,
   return Merged;
 }
 
+static void clearTailCalls(Function &F) {
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : BB) {
+      if (CallInst *CI = dyn_cast<CallInst>(&I))
+        CI->setTailCallKind(CallInst::TCK_NoTail);
+    }
+  }
+}
+
+static bool needsConservativeMerging(Function &Merged, unsigned NumOrigArgs) {
+  if (Merged.hasGC() || Merged.hasPersonalityFn())
+    return true;
+
+  for (unsigned I = NumOrigArgs, E = Merged.arg_size(); I != E; ++I) {
+    Type *Ty = Merged.getArg(I)->getType();
+    PointerType *PTy = dyn_cast<PointerType>(Ty);
+    if (!PTy)
+      continue;
+    if (isa<FunctionType>(PTy->getPointerElementType()))
+      return true;
+  }
+
+  for (BasicBlock &BB : Merged) {
+    for (Instruction &I : BB) {
+      CallBase *CB = dyn_cast<CallBase>(&I);
+      if (!CB)
+        continue;
+      Value *Callee = CB->getCalledOperand()->stripPointerCasts();
+      if (isa<Argument>(Callee))
+        return true;
+    }
+  }
+
+  return false;
+}
+
 static void createThunk(Function &Thunk, ArrayRef<Constant *> Params,
                         Function &Target) {
   DebugLoc DL = getInsertionDebugLoc(Thunk);
@@ -390,7 +428,16 @@ static void createThunk(Function &Thunk, ArrayRef<Constant *> Params,
   }
 
   CallInst *CI = Builder.CreateCall(&Target, Args);
-  CI->setTailCallKind(CallInst::TCK_Tail);
+  bool NeedsConservativeThunk =
+      Thunk.hasGC() || Target.hasGC() || Thunk.hasPersonalityFn() ||
+      Target.hasPersonalityFn() ||
+      Target.hasFnAttribute("disable-tail-calls");
+  if (NeedsConservativeThunk) {
+    Thunk.addFnAttr("disable-tail-calls", "true");
+    CI->setTailCallKind(CallInst::TCK_NoTail);
+  } else {
+    CI->setTailCallKind(CallInst::TCK_Tail);
+  }
   CI->setCallingConv(Target.getCallingConv());
   CI->setAttributes(Target.getAttributes());
 
@@ -418,6 +465,10 @@ static bool mergeGroup(SmallVectorImpl<Function *> &Group,
     ParamTypes.push_back(ParamsPerFunction.front()[I]->getType());
 
   Function *Merged = createMergedFunction(*Group.front(), Diffs, ParamTypes);
+  if (needsConservativeMerging(*Merged, Group.front()->arg_size())) {
+    Merged->addFnAttr("disable-tail-calls", "true");
+    clearTailCalls(*Merged);
+  }
   ++NumParamMergedBodies;
 
   for (unsigned I = 0, E = Group.size(); I != E; ++I) {
