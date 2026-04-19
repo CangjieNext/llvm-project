@@ -122,6 +122,91 @@ static bool rewriteCJThrowException(Module &M);
 
 static bool deleteUnusedBlackHole(Module &M);
 
+static Instruction *skipDebugInstructionsForward(Instruction *I) {
+  while (isa_and_nonnull<DbgInfoIntrinsic>(I))
+    I = I->getNextNode();
+  return I;
+}
+
+static FunctionType *getActualCalledFunctionType(GCStatepointInst &Statepoint) {
+  if (Function *Callee = Statepoint.getActualCalledFunction())
+    return Callee->getFunctionType();
+
+  Type *TargetElemType =
+      Statepoint.getParamElementType(GCStatepointInst::CalledFunctionPos);
+  if (TargetElemType == nullptr) {
+    TargetElemType = Statepoint.getActualCalledOperand()
+                         ->getType()
+                         ->getNonOpaquePointerElementType();
+  }
+  return cast<FunctionType>(TargetElemType);
+}
+
+static AttributeList getTailCallAttrsForStatepoint(GCStatepointInst &Statepoint) {
+  LLVMContext &Ctx = Statepoint.getContext();
+  AttributeList CallAttrs;
+  for (unsigned I = 0, E = Statepoint.actual_arg_size(); I != E; ++I) {
+    AttributeSet AS = Statepoint.getAttributes().getParamAttrs(
+        GCStatepointInst::CallArgsBeginPos + I);
+    if (!AS.hasAttributes())
+      continue;
+    CallAttrs = CallAttrs.addParamAttributes(Ctx, I, AttrBuilder(Ctx, AS));
+  }
+  return CallAttrs;
+}
+
+static bool canSimplifyTailStatepoint(GCStatepointInst &Statepoint) {
+  if (!isa<CallInst>(&Statepoint) || !Statepoint.isTailCall())
+    return false;
+
+  if (Statepoint.getActualReturnType() != Type::getVoidTy(Statepoint.getContext()))
+    return false;
+
+  if (Statepoint.getID() != Cangjie::CJStatepointID::Default)
+    return false;
+
+  if (Statepoint.getNumPatchBytes() != 0 || Statepoint.getFlags() != 0)
+    return false;
+
+  if (!Statepoint.gc_args().empty() || !Statepoint.struct_args().empty() ||
+      !Statepoint.gc_transition_args().empty() ||
+      !Statepoint.deopt_operands().empty())
+    return false;
+
+  if (!Statepoint.use_empty() || !Statepoint.getGCRelocates().empty())
+    return false;
+
+  Instruction *Next = skipDebugInstructionsForward(Statepoint.getNextNode());
+  return isa_and_nonnull<ReturnInst>(Next) &&
+         cast<ReturnInst>(Next)->getReturnValue() == nullptr;
+}
+
+static bool simplifyTailStatepoints(Function &F) {
+  SmallVector<GCStatepointInst *, 8> SimplifyCandidates;
+  for (Instruction &I : instructions(F))
+    if (auto *Statepoint = dyn_cast<GCStatepointInst>(&I))
+      if (canSimplifyTailStatepoint(*Statepoint))
+        SimplifyCandidates.push_back(Statepoint);
+
+  for (GCStatepointInst *Statepoint : SimplifyCandidates) {
+    SmallVector<Value *, 8> CallArgs;
+    llvm::append_range(CallArgs, Statepoint->actual_args());
+    FunctionType *FT = getActualCalledFunctionType(*Statepoint);
+    auto *StatepointCall = cast<CallInst>(Statepoint);
+    CallInst *TailCall = CallInst::Create(FT, Statepoint->getActualCalledOperand(),
+                                          CallArgs, "", Statepoint);
+    TailCall->setTailCallKind(StatepointCall->getTailCallKind());
+    TailCall->setCallingConv(Statepoint->getCallingConv());
+    TailCall->setDebugLoc(Statepoint->getDebugLoc());
+    AttributeList CallAttrs = getTailCallAttrsForStatepoint(*Statepoint);
+    if (!CallAttrs.isEmpty())
+      TailCall->setAttributes(CallAttrs);
+    Statepoint->eraseFromParent();
+  }
+
+  return !SimplifyCandidates.empty();
+}
+
 PreservedAnalyses CJRewriteStatepoint::run(Module &M,
                                            ModuleAnalysisManager &AM) {
   if (DisableCJRewrite) {
@@ -3057,6 +3142,8 @@ bool CJRewriteStatepoint::runOnFunction(Function &F, DominatorTree &DT,
   if (!ParsePointNeeded.empty())
     MadeChange |= insertParsePoints(F, DT, PostDT, TTI, ParsePointNeeded,
                                     DVCache, KnownBases, OptLevel);
+
+  MadeChange |= simplifyTailStatepoints(F);
 
   return MadeChange;
 }
