@@ -450,11 +450,10 @@ void GCLiveAnalysis::findLiveSetAtInst(Instruction *Inst,
   auto BI = InstLiveSetCache.count(BB)
                 ? InstLiveSetCache[BB].first->getIterator().getReverse()
                 : BB->rbegin();
-  // We want to handle the statepoint itself oddly.  It's
-  // call result is not live (normal), nor are it's arguments
-  // (unless they're used again later).  This adjustment is
-  // specifically what we need to relocate
-  computeLiveInValues(BI, ++Inst->getIterator().getReverse(), LiveOut);
+  // For statepoints, we want liveness immediately after the current call.
+  // That excludes values which are only consumed by this instruction, while
+  // still keeping values that are used again later in the block.
+  computeLiveInValues(BI, Inst->getIterator().getReverse(), LiveOut);
   LiveOut.remove(Inst);
   Out.insert(LiveOut.begin(), LiveOut.end());
   InstLiveSetCache[BB] = {Inst, Out};
@@ -867,10 +866,9 @@ void StructLiveAnalysis::findLiveSetAtInst(Instruction *Inst,
   auto BI = InstLiveSetCache.count(BB)
                 ? InstLiveSetCache[BB].first->getIterator().getReverse()
                 : BB->rbegin();
-  // We want to handle the statepoint itself oddly.  It's
-  // call result is not live (normal), nor are it's arguments
-  // (unless they're used again later).  This adjustment is
-  // specifically what we need to relocate
+  // Be conservative for struct-live at the current call.  Struct values such
+  // as Array slices may be passed to the callee only once, but their internal
+  // references still need relocation at this statepoint.
   computeFieldLiveInValues(BI, ++Inst->getIterator().getReverse(), LiveOut);
   Out.insert(LiveOut.begin(), LiveOut.end());
   InstLiveSetCache[BB] = {Inst, Out};
