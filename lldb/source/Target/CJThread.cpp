@@ -28,7 +28,10 @@
 #include "lldb/Symbol/Variable.h"
 #include "lldb/Core/ValueObjectVariable.h"
 #include "lldb/Utility/LLDBLog.h"
+<<<<<<< HEAD
 #include <set>
+=======
+>>>>>>> ba326dda2bc4b0da46f2a866d4261990cc6822e1
 #include "lldb/Utility/Log.h"
 
 using namespace lldb_private;
@@ -300,6 +303,7 @@ bool Process::RefreshCJThreadList(Status &error, bool forceRefresh) {
   if (error.Fail()) return false;
 
   ThreadList &cjtlist = GetCJThreadList();
+<<<<<<< HEAD
 
   std::set<lldb::tid_t> new_ids;
   for (unsigned i = 0; i < info_snap.size(); i++) {
@@ -325,6 +329,12 @@ bool Process::RefreshCJThreadList(Status &error, bool forceRefresh) {
     if (new_ids.find(old_id) == new_ids.end()) {
       cjtlist.RemoveThreadByID(old_id, false);
     }
+=======
+  cjtlist.Clear();
+  for (unsigned i = 0; i < info_snap.size(); i ++) {
+    auto cjth = std::make_shared<CJThread>(*this, info_snap[i]);
+    cjtlist.AddThread(cjth);
+>>>>>>> ba326dda2bc4b0da46f2a866d4261990cc6822e1
   }
 
   m_cjthreadlist_state = CJThreadListState::HasBeenRefreshed;
