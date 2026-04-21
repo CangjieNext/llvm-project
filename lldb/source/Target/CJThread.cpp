@@ -325,6 +325,10 @@ bool Process::RefreshCJThreadList(Status &error, bool forceRefresh) {
     if (new_ids.find(old_id) == new_ids.end()) {
       cjtlist.RemoveThreadByID(old_id, false);
     }
+  cjtlist.Clear();
+  for (unsigned i = 0; i < info_snap.size(); i ++) {
+    auto cjth = std::make_shared<CJThread>(*this, info_snap[i]);
+    cjtlist.AddThread(cjth);
   }
 
   m_cjthreadlist_state = CJThreadListState::HasBeenRefreshed;
