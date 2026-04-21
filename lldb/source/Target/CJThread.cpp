@@ -28,6 +28,7 @@
 #include "lldb/Symbol/Variable.h"
 #include "lldb/Core/ValueObjectVariable.h"
 #include "lldb/Utility/LLDBLog.h"
+#include <set>
 #include "lldb/Utility/Log.h"
 
 using namespace lldb_private;
@@ -299,6 +300,31 @@ bool Process::RefreshCJThreadList(Status &error, bool forceRefresh) {
   if (error.Fail()) return false;
 
   ThreadList &cjtlist = GetCJThreadList();
+
+  std::set<lldb::tid_t> new_ids;
+  for (unsigned i = 0; i < info_snap.size(); i++) {
+    new_ids.insert(info_snap[i].id);
+
+    auto existing = cjtlist.FindThreadByID(info_snap[i].id, false);
+    auto existing_cjthread = std::dynamic_pointer_cast<CJThread>(existing);
+
+    if (existing_cjthread) {
+      existing_cjthread->UpdateInfo(info_snap[i]);
+    } else {
+      auto cjth = std::make_shared<CJThread>(*this, info_snap[i]);
+      cjtlist.AddThread(cjth);
+    }
+  }
+
+  std::set<lldb::tid_t> old_ids;
+  for (size_t i = 0; i < cjtlist.GetSize(); i++) {
+    old_ids.insert(cjtlist.GetThreadAtIndex(i)->GetID());
+  }
+
+  for (lldb::tid_t old_id : old_ids) {
+    if (new_ids.find(old_id) == new_ids.end()) {
+      cjtlist.RemoveThreadByID(old_id, false);
+    }
   cjtlist.Clear();
   for (unsigned i = 0; i < info_snap.size(); i ++) {
     auto cjth = std::make_shared<CJThread>(*this, info_snap[i]);
@@ -389,6 +415,34 @@ CJThread::CJThread(Process &process, CJThreadInfoOverview cjtinfo, bool use_inva
 
 CJThread::~CJThread() {
   DestroyThread();
+}
+
+void CJThread::UpdateInfo(const CJThreadInfoOverview &info) {
+  m_cjthread_info = info;
+
+  Status error;
+  llvm::Triple triple = GetProcess()->GetSystemArchitecture().GetTriple();
+  m_regvals = std::make_shared<std::map<ConstString, RegisterValue>>();
+  if (triple.getArch() == llvm::Triple::ArchType::x86_64 &&
+      triple.getOS() == llvm::Triple::OSType::Win32) {
+    CJThreadContext_Windows_X64 ctx{};
+    size_t n = GetProcess()->ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
+    if (!error.Fail() && n == sizeof(ctx))
+      ctx.CopyTo(*m_regvals, GetProcess()->GetByteOrder());
+  } else if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
+    CJThreadContext_Linux_X64 ctx{};
+    size_t n = GetProcess()->ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
+    if (!error.Fail() && n == sizeof(ctx))
+      ctx.CopyTo(*m_regvals, GetProcess()->GetByteOrder());
+  } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
+    CJThreadContext_Arm64 ctx{};
+    size_t n = GetProcess()->ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
+    if (!error.Fail() && n == sizeof(ctx))
+      ctx.CopyTo(*m_regvals, GetProcess()->GetByteOrder());
+  }
+
+  m_reg_context_sp =
+      std::make_shared<CJRegisterContext>(*this, m_cjreginfo, m_regvals);
 }
 
 lldb::user_id_t CJThread::GetProtocolID() const {

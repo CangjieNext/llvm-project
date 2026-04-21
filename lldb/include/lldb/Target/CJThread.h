@@ -84,6 +84,8 @@ public:
 
   bool UnBindCJThreadToOSThread(Process &process);
 
+  void UpdateInfo(const CJThreadInfoOverview &info);
+
   static bool WaitUntilCJThreadScheduled(Target &target, lldb::CJThreadSP selected_thread, Status error);
 
   static llvm::StringRef type_decl_of_cjcontext_x86_linux;
