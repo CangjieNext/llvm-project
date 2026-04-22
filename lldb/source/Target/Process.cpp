@@ -4086,17 +4086,22 @@ void Process::ProcessEventData::DoOnRemoval(Event *event_ptr) {
     }
   }
 
-  if (process_sp->GetBindCJThreadID() != UINT64_MAX) {
-    auto cjthread = std::dynamic_pointer_cast<CJThread>(
-      process_sp->GetCJThreadList().FindThreadByID(process_sp->GetBindCJThreadID(), false));
-    if (cjthread) {
-      cjthread->UnBindCJThreadToOSThread(*process_sp);
-    }
+  lldb::tid_t selected_thread_id = process_sp->GetThreadList().GetSelectedThread()->GetID();
+  lldb::CJThreadSP old_cjthread = process_sp->GetBindCJThread();
+
+  if (old_cjthread && old_cjthread->GetHostThreadID() == selected_thread_id) {
+    return;
   }
-  auto cjthread = process_sp->FindCJThreadByOSThreadID(process_sp->GetThreadList().GetSelectedThread()->GetID());
-  if (cjthread) {
-    cjthread->BindCJThreadToOSThread(*process_sp);
+
+  if (old_cjthread) {
+    old_cjthread->UnBindCJThreadToOSThread(*process_sp);
   }
+
+  lldb::CJThreadSP new_cjthread = process_sp->FindCJThreadByOSThreadID(selected_thread_id, false);
+  if (new_cjthread) {
+    new_cjthread->BindCJThreadToOSThread(*process_sp);
+  }
+  process_sp->SetBindCJThread(new_cjthread);
 }
 
 void Process::ProcessEventData::Dump(Stream *s) const {

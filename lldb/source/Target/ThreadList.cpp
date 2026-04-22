@@ -663,15 +663,14 @@ bool ThreadList::SetSelectedThreadByID(lldb::tid_t tid, bool notify) {
   std::lock_guard<std::recursive_mutex> guard(GetMutex());
   ThreadSP selected_thread_sp(FindThreadByID(tid));
   if (std::dynamic_pointer_cast<CJThread>(selected_thread_sp) == nullptr) {
-    auto unbind = m_process->GetCJThreadList().FindThreadByID(m_process->GetBindCJThreadID(), false);
-    auto cjthread = std::dynamic_pointer_cast<CJThread>(unbind);
-    if (cjthread) {
-      cjthread->UnBindCJThreadToOSThread(*m_process);
+    lldb::CJThreadSP old_cjthread = m_process->GetBindCJThread();
+    if (old_cjthread) {
+      old_cjthread->UnBindCJThreadToOSThread(*m_process);
     }
-    auto bind = m_process->FindCJThreadByOSThreadID(tid, false);
-    if (bind) {
-      bind->BindCJThreadToOSThread(*m_process);
-      m_process->GetCJThreadList().SetSelectedThreadByID(bind->GetID());
+    lldb::CJThreadSP new_cjthread = m_process->FindCJThreadByOSThreadID(tid, false);
+    if (new_cjthread) {
+      new_cjthread->BindCJThreadToOSThread(*m_process);
+      m_process->GetCJThreadList().SetSelectedThreadByID(new_cjthread->GetID());
     }
   }
   if (selected_thread_sp) {

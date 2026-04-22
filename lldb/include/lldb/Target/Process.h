@@ -397,9 +397,9 @@ public:
     m_cjthreadRegCtx.clear();
   }
 
-  lldb::tid_t GetBindCJThreadID() { return m_bind_cjthread_ID; };
+  lldb::CJThreadSP GetBindCJThread() { return m_bind_cjthread_sp; };
 
-  void SetBindCJThreadID(lldb::tid_t id) { m_bind_cjthread_ID = id; };
+  void SetBindCJThread(lldb::CJThreadSP cjthread_sp) { m_bind_cjthread_sp = cjthread_sp; };
 /// A notification structure that can be used by clients to listen
 /// for changes in a process's lifetime.
 ///
@@ -3076,7 +3076,7 @@ private:
   Process(const Process &) = delete;
   const Process &operator=(const Process &) = delete;
   std::map <lldb_private::ConstString, uint64_t> m_cjthreadRegCtx;
-  lldb::tid_t m_bind_cjthread_ID = UINT64_MAX;
+  lldb::CJThreadSP m_bind_cjthread_sp;
 
   enum class CJThreadListState {
     Uninitialized,

@@ -29,6 +29,7 @@
 #include "lldb/Core/ValueObjectVariable.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
+#include <set>
 
 using namespace lldb_private;
 
@@ -299,10 +300,32 @@ bool Process::RefreshCJThreadList(Status &error, bool forceRefresh) {
   if (error.Fail()) return false;
 
   ThreadList &cjtlist = GetCJThreadList();
-  cjtlist.Clear();
-  for (unsigned i = 0; i < info_snap.size(); i ++) {
-    auto cjth = std::make_shared<CJThread>(*this, info_snap[i]);
-    cjtlist.AddThread(cjth);
+
+  std::set<lldb::tid_t> new_ids;
+  for (unsigned i = 0; i < info_snap.size(); i++) {
+    new_ids.insert(info_snap[i].id);
+
+    auto existing = cjtlist.FindThreadByID(info_snap[i].id, false);
+    auto existing_cjthread = std::dynamic_pointer_cast<CJThread>(existing);
+
+    if (existing_cjthread) {
+      existing_cjthread->UpdateInfo(info_snap[i]);
+    } else {
+      auto cjth = std::make_shared<CJThread>(*this, info_snap[i]);
+      cjtlist.AddThread(cjth);
+    }
+  }
+
+  std::vector<lldb::tid_t> ids_to_remove;
+  for (size_t i = 0; i < cjtlist.GetSize(false); i++) {
+    lldb::tid_t old_id = cjtlist.GetThreadAtIndex(i, false)->GetID();
+    if (new_ids.find(old_id) == new_ids.end()) {
+      ids_to_remove.push_back(old_id);
+    }
+  }
+
+  for (lldb::tid_t old_id : ids_to_remove) {
+    cjtlist.RemoveThreadByID(old_id, false);
   }
 
   m_cjthreadlist_state = CJThreadListState::HasBeenRefreshed;
@@ -391,6 +414,38 @@ CJThread::~CJThread() {
   DestroyThread();
 }
 
+void CJThread::UpdateInfo(const CJThreadInfoOverview &info) {
+  m_cjthread_info = info;
+
+  Status error;
+  lldb::ProcessSP process = GetProcess();
+  if (!process)
+    return;
+
+  llvm::Triple triple = process->GetSystemArchitecture().GetTriple();
+  m_regvals = std::make_shared<std::map<ConstString, RegisterValue>>();
+  if (triple.getArch() == llvm::Triple::ArchType::x86_64 &&
+      triple.getOS() == llvm::Triple::OSType::Win32) {
+    CJThreadContext_Windows_X64 ctx{};
+    size_t n = process->ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
+    if (!error.Fail() && n == sizeof(ctx))
+      ctx.CopyTo(*m_regvals, process->GetByteOrder());
+  } else if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
+    CJThreadContext_Linux_X64 ctx{};
+    size_t n = process->ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
+    if (!error.Fail() && n == sizeof(ctx))
+      ctx.CopyTo(*m_regvals, process->GetByteOrder());
+  } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
+    CJThreadContext_Arm64 ctx{};
+    size_t n = process->ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
+    if (!error.Fail() && n == sizeof(ctx))
+      ctx.CopyTo(*m_regvals, process->GetByteOrder());
+  }
+
+  m_reg_context_sp =
+      std::make_shared<CJRegisterContext>(*this, m_cjreginfo, m_regvals);
+}
+
 lldb::user_id_t CJThread::GetProtocolID() const {
   return static_cast<lldb::user_id_t>(GetHostThreadID());
 }
@@ -477,7 +532,7 @@ bool CJThread::BindCJThreadToOSThread(Process &process) {
                       &m_cjthread_info.cjthread_ptr, sizeof(lldb::addr_t), error);
   if (error.Fail())
     return false;
-  process.SetBindCJThreadID(GetCJThreadID());
+  process.SetBindCJThread(std::dynamic_pointer_cast<CJThread>(shared_from_this()));
   Log *log = GetLog(LLDBLog::Step);
   if (log) {
     LLDB_LOGF(log, "bind cjthread %lld to os thread %lld", GetCJThreadID(), GetHostThreadID());
@@ -519,7 +574,7 @@ bool CJThread::UnBindCJThreadToOSThread(Process &process) {
                       &addr, sizeof(lldb::addr_t), error);
   if (error.Fail())
     return false;
-  process.SetBindCJThreadID(UINT64_MAX);
+  process.SetBindCJThread(nullptr);
   Log *log = GetLog(LLDBLog::Step);
   if (log) {
     LLDB_LOGF(log, "Unbind cjthread %lld", GetCJThreadID());
