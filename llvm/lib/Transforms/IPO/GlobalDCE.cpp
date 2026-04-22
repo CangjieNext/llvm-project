@@ -1007,10 +1007,8 @@ void CangjieDCE::rewriteExtensions(Module &M) {
       continue;
     ArrayType *AT = ArrayType::get(ATy, LiveGVs.size());
     Constant *NewC = ConstantArray::get(AT, LiveGVs);
-    GlobalVariable *NewGV = cast<GlobalVariable>(
-        M.getOrInsertGlobal(GV->getName().str() + ".new", AT));
-    NewGV->setLinkage(GlobalVariable::PrivateLinkage);
-    NewGV->setInitializer(NewC);
+    GlobalVariable *NewGV = new GlobalVariable(
+        M, AT, false, GlobalVariable::PrivateLinkage, NewC, GV->getName());
     NewGV->copyAttributesFrom(GV);
     NewGV->copyMetadata(GV, /*Offset=*/0);
     // Replace GV
