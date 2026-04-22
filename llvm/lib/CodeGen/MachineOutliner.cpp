@@ -60,23 +60,34 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
+#include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineOptimizationRemarkEmitter.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Mangler.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/SuffixTree.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/MC/MCStreamer.h"
 #include <functional>
 #include <tuple>
 #include <vector>
+
+namespace llvm {
+extern cl::opt<bool> CJPipeline;
+} // namespace llvm
 
 #define DEBUG_TYPE "machine-outliner"
 
@@ -350,6 +361,16 @@ struct MachineOutliner : public ModulePass {
 
   static char ID;
 
+  raw_null_ostream NullStream;
+
+  std::unique_ptr<StackMaps> SM;
+
+  std::unique_ptr<MCStreamer> MCS;
+
+  std::unique_ptr<AsmPrinter> ASM;
+
+  std::unique_ptr<TargetMachine> TM;
+
   /// Set to true if the outliner should consider functions with
   /// linkonceodr linkage.
   bool OutlineFromLinkOnceODRs = false;
@@ -372,7 +393,7 @@ struct MachineOutliner : public ModulePass {
     ModulePass::getAnalysisUsage(AU);
   }
 
-  MachineOutliner() : ModulePass(ID) {
+  MachineOutliner() : ModulePass(ID), SM(nullptr) {
     initializeMachineOutlinerPass(*PassRegistry::getPassRegistry());
   }
 
@@ -457,7 +478,7 @@ char MachineOutliner::ID = 0;
 namespace llvm {
 ModulePass *createMachineOutlinerPass(bool RunOnAllFunctions) {
   MachineOutliner *OL = new MachineOutliner();
-  OL->RunOnAllFunctions = RunOnAllFunctions;
+  OL->RunOnAllFunctions = RunOnAllFunctions || CJPipeline;
   return OL;
 }
 
@@ -525,6 +546,64 @@ void MachineOutliner::emitOutlinedFunctionRemark(OutlinedFunction &OF) {
   MORE.emit(R);
 }
 
+static bool hasStatePointBeforeEnd(MachineBasicBlock::iterator StartIt, MachineBasicBlock::iterator EndIt) {
+  for (auto It = StartIt; It != EndIt; ++It) {
+    if (It->getOpcode() == TargetOpcode::STATEPOINT)
+      return true;
+  }
+  return false;
+}
+
+static bool isCangjieSpecificCallee(const MachineInstr *MI, const Function *Callee) {
+  if (Callee == nullptr) {
+    return false;
+  }
+
+  const auto &CallerFunc = MI->getParent()->getParent()->getFunction();
+
+  StringRef FuncName = Callee->getName();
+
+  return FuncName.isGetGCPhase() 
+      || FuncName.isSetDebugLocation() 
+      || FuncName.equals("CJ_MRT_PreInitializePackage")
+      || FuncName.equals("CJ_MCC_ThrowException")
+      || FuncName.equals("CJ_MCC_NewObject") 
+      || FuncName.equals("CJ_MCC_NewFinalizer")
+      || FuncName.equals("CJ_MCC_HandleSafepoint")
+      || Callee->isGetCJThreadId()
+      || Callee->isCangjieNativeStub(CallerFunc);
+}
+
+static bool isCangjieSpecificCall(const MachineInstr *MI) {
+  if (!MI->isCall()) {
+    return false;
+  }
+  unsigned Opcode = MI->getOpcode();
+  if (Opcode == TargetOpcode::STATEPOINT) {
+    StatepointOpers SO(MI);
+    if (SO.getID() == Cangjie::CJStatepointID::StackCheck)
+      return true;
+
+    const auto *Callee = SO.getCalledFunction();
+    if (SO.getID() == Cangjie::CJStatepointID::Default && Callee && Callee->getName().startswith("CJ_MCC_NewArray"))
+      return true;
+    return isCangjieSpecificCallee(MI, Callee);
+  }
+
+  if (MI->getNumOperands() == 0) {
+    return false;
+  }
+
+  const MachineOperand &MOSym = MI->getOperand(0);
+  if (!MOSym.isGlobal()) {
+    return false;
+  }
+
+  const auto *Callee = dyn_cast<const Function>(MOSym.getGlobal());
+  return isCangjieSpecificCallee(MI, Callee);
+}
+
+
 void MachineOutliner::findCandidates(
     InstructionMapper &Mapper, std::vector<OutlinedFunction> &FunctionList) {
   FunctionList.clear();
@@ -570,6 +649,9 @@ void MachineOutliner::findCandidates(
         MachineBasicBlock::iterator StartIt = Mapper.InstrList[StartIdx];
         MachineBasicBlock::iterator EndIt = Mapper.InstrList[EndIdx];
         MachineBasicBlock *MBB = StartIt->getParent();
+
+        if (hasStatePointBeforeEnd(StartIt, EndIt) || isCangjieSpecificCall(&*EndIt))
+           continue;
 
         CandidatesForRepeatedSeq.emplace_back(StartIdx, StringLen, StartIt,
                                               EndIt, MBB, FunctionList.size(),
@@ -868,7 +950,6 @@ bool MachineOutliner::outline(Module &M,
       NumOutlined++;
     }
   }
-
   LLVM_DEBUG(dbgs() << "OutlinedSomething = " << OutlinedSomething << "\n";);
   return OutlinedSomething;
 }
@@ -1028,6 +1109,15 @@ bool MachineOutliner::runOnModule(Module &M) {
 
 bool MachineOutliner::doOutline(Module &M, unsigned &OutlinedFunctionNum) {
   MachineModuleInfo &MMI = getAnalysis<MachineModuleInfoWrapperPass>().getMMI();
+
+  if (!SM) {
+    auto Target = MMI.getTarget().getTarget();
+    TM = std::unique_ptr<TargetMachine>(Target.createTargetMachine("", "", "", TargetOptions(), None));
+    MCS = std::unique_ptr<MCStreamer>(Target.createNullStreamer(MMI.getContext()));
+    ASM = std::unique_ptr<AsmPrinter>(Target.createAsmPrinter(*TM, std::move(MCS)));
+    SM = std::make_unique<StackMaps>(*ASM);
+  }
+
 
   // If the user passed -enable-machine-outliner=always or
   // -enable-machine-outliner, the pass will run on all functions in the module.

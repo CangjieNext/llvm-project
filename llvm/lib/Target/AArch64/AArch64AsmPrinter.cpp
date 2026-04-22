@@ -111,6 +111,8 @@ public:
                      const MachineInstr &MI);
   void LowerPATCHPOINT(MCStreamer &OutStreamer, StackMaps &SM,
                        const MachineInstr &MI);
+  bool LowerCangjieSpecificTCRETUR(MCStreamer &OutStreamer, StackMaps &SM,
+                                  const MachineInstr &MI);
   void LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
                        const MachineInstr &MI);
   void LowerFAULTING_OP(const MachineInstr &MI);
@@ -252,6 +254,7 @@ private:
                                 unsigned Opcode) override;
   void emitCJNewArrayFastPath(const MachineInstr &MI,
                               const MachineOperand &MOSym) override;
+  void emitCJNewArrayFastPath(const MachineOperand &MOSym);
   void emitCJThrowException(const MachineInstr *MI,
                             const MachineOperand &MOSym,
                             unsigned Opcode) override;
@@ -1336,6 +1339,29 @@ void AArch64AsmPrinter::emitGcStateCheck() {
   }
 }
 
+bool AArch64AsmPrinter::LowerCangjieSpecificTCRETUR(MCStreamer &OutStreamer, StackMaps &SM,
+                                        const MachineInstr &MI) {
+  auto ParentMF = MI.getParent()->getParent();
+  if (ParentMF && !ParentMF->getName().startswith("OUTLINED_FUNCTION"))
+    return false;
+  if (CJPipeline) {
+    const MachineOperand &CalleeOp = MI.getOperand(0);
+    if (CalleeOp.isGlobal()) {
+      auto CalleeName = CalleeOp.getGlobal()->getName();
+      if (CalleeName.equals("CJ_MCC_HandleSafepoint")) {
+        emitCJSafepointOutlineStub();
+        return true;
+      } else if (CalleeName.equals("CJ_MCC_StackCheck")) {
+
+      } else if (CalleeName.startswith("CJ_MCC_NewArray")) {
+        emitCJNewArrayFastPath(CalleeOp);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
                                         const MachineInstr &MI) {
   StatepointOpers SOpers(&MI);
@@ -1343,7 +1369,18 @@ void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
   const MachineOperand &CallTarget = SOpers.getCallTarget();
   if (CJPipeline) {
     uint64_t ID = SOpers.getID();
-    // `call CJ_MCC_HandleSafepoint` in cangjie function.
+    auto CallTargetName = CallTarget.getGlobal()->getName();
+    if (ID != Cangjie::CJStatepointID::Default && CallTargetName.startswith("OUTLINED_FUNCTION")) {
+      MCOperand CallTargetMCOp;
+      MCInstLowering.lowerOperand(CallTarget, CallTargetMCOp);
+      EmitToStreamer(OutStreamer,
+                   MCInstBuilder(AArch64::BL).addOperand(CallTargetMCOp));
+      auto &Ctx = OutStreamer.getContext();
+      MCSymbol *MILabel = Ctx.createTempSymbol();
+      OutStreamer.emitLabel(MILabel);
+      SM.recordStatepoint(*MILabel, MI);
+      return;
+    }
     if (!EnableSafepointOutline && ID == Cangjie::CJStatepointID::Safepoint) {
       emitCJSafepointInlineCheck(MI);
       return;
@@ -1682,6 +1719,8 @@ void AArch64AsmPrinter::emitInstruction(const MachineInstr *MI) {
     return;
   }
   case AArch64::TCRETURNdi: {
+    if (LowerCangjieSpecificTCRETUR(*OutStreamer, SM, *MI))
+      return;
     MCOperand Dest;
     MCInstLowering.lowerOperand(MI->getOperand(0), Dest);
     MCInst TmpInst;
@@ -2192,6 +2231,62 @@ void AArch64AsmPrinter::emitCJNewArrayFastPath(const MachineInstr &MI,
   EmitToStreamer(*OutStreamer, CallNewArraySlowPath);
   OutStreamer->emitLabel(LFinish);
   SM.recordCJStackMap(MI);
+}
+
+void AArch64AsmPrinter::emitCJNewArrayFastPath(const MachineOperand &MOSym) {
+  using namespace AArch64;
+
+  MCSymbol *LFast = OutContext.createTempSymbol("NewArrayFastPath", true);
+  MCSymbol *LSlow = OutContext.createTempSymbol("NewArraySlowPath", true);
+  const MCSymbolRefExpr *SlowExpr = MCSymbolRefExpr::create(LSlow, OutContext);
+
+  // 8: each imm represents 8 In MCInst.
+  MCInst GetAllocBuffer = MCInstBuilder(LDRXui).addReg(X4).addReg(X28).addImm(
+      getAllocBufferOffsetInCJTLS() / 8);
+  // 0: offset of region Ptr in AllocBuffer is 0 bytes
+  MCInst GetRegionPtr = MCInstBuilder(LDRXui).addReg(X4).addReg(X4).addImm(0);
+  MCInst GetAllocPtr = MCInstBuilder(LDRXui).addReg(X5).addReg(X4).addImm(0);
+  // 1: offset of limit in region is 8 bytes
+  MCInst GetLimit = MCInstBuilder(LDRXui).addReg(X6).addReg(X4).addImm(1);
+  MCInst CalNewAllocPtr =
+      MCInstBuilder(ADDXrs).addReg(X7).addReg(X5).addReg(X2).addImm(0);
+  MCInst CmpNewAllocPtrWithLimit =
+      MCInstBuilder(SUBSXrs).addReg(XZR).addReg(X7).addReg(X6).addImm(0);
+  MCInst BranchGToLSLow =
+      MCInstBuilder(Bcc).addImm(AArch64CC::GT).addExpr(SlowExpr);
+  MCInst SetKlass = MCInstBuilder(STRXui).addReg(X0).addReg(X5).addImm(0);
+  MCInst StoreArrayLength =
+      MCInstBuilder(STRXui).addReg(X1).addReg(X5).addImm(1);
+  MCInst StoreNewAllocPtr =
+      MCInstBuilder(STRXui).addReg(X7).addReg(X4).addImm(0);
+  MCInst CopyAllocPtrToX0 =
+      MCInstBuilder(ORRXrs).addReg(X0).addReg(XZR).addReg(X5).addImm(0);
+  MCSymbol *LFinish = OutContext.createTempSymbol("NewArrayFin", true);
+  const MCSymbolRefExpr *FinExpr = MCSymbolRefExpr::create(LFinish, OutContext);
+  MCInst BranchToFin = MCInstBuilder(B).addExpr(FinExpr);
+  MCOperand CallSlowPath;
+  MCInstLowering.lowerOperand(MOSym, CallSlowPath);
+  MCInst CallNewArraySlowPath = MCInstBuilder(B).addOperand(CallSlowPath);
+  OutStreamer->emitLabel(LFast);
+  EmitToStreamer(*OutStreamer, GetAllocBuffer);
+  EmitToStreamer(*OutStreamer, GetRegionPtr);
+  EmitToStreamer(*OutStreamer, GetAllocPtr);
+  EmitToStreamer(*OutStreamer, GetLimit);
+  EmitToStreamer(*OutStreamer, CalNewAllocPtr);
+  EmitToStreamer(*OutStreamer, CmpNewAllocPtrWithLimit);
+  EmitToStreamer(*OutStreamer, BranchGToLSLow);
+  EmitToStreamer(*OutStreamer, SetKlass);
+  EmitToStreamer(*OutStreamer, StoreArrayLength);
+  EmitToStreamer(*OutStreamer, StoreNewAllocPtr);
+  EmitToStreamer(*OutStreamer, CopyAllocPtrToX0);
+  EmitToStreamer(*OutStreamer, BranchToFin);
+  OutStreamer->emitLabel(LSlow);
+  EmitToStreamer(*OutStreamer, CallNewArraySlowPath);
+  OutStreamer->emitLabel(LFinish);
+
+  MCInst RetInst = MCInstBuilder(AArch64::RET)
+                    .addReg(AArch64::LR);
+  EmitToStreamer(*OutStreamer, RetInst);
 }
 
 void AArch64AsmPrinter::emitGetCJThreadId() {

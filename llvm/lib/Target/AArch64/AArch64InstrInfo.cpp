@@ -7370,7 +7370,8 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
 
   else if (LastInstrOpcode == AArch64::BL ||
            ((LastInstrOpcode == AArch64::BLR ||
-             LastInstrOpcode == AArch64::BLRNoIP) &&
+             LastInstrOpcode == AArch64::BLRNoIP) || 
+             LastInstrOpcode == TargetOpcode::STATEPOINT &&
             !HasBTI)) {
     // FIXME: Do we need to check if the code after this uses the value of LR?
     FrameID = MachineOutlinerThunk;
@@ -7637,6 +7638,25 @@ bool AArch64InstrInfo::isMBBSafeToOutlineFrom(MachineBasicBlock &MBB,
   return true;
 }
 
+static bool isCangjieSpecificCallee(const MachineInstr *MI, const Function *Callee) {
+  if (Callee == nullptr) {
+    return false;
+  }
+
+  const auto &CallerFunc = MI->getParent()->getParent()->getFunction();
+
+  StringRef FuncName = Callee->getName();
+
+  return FuncName.isGetGCPhase() 
+      || FuncName.isSetDebugLocation() 
+      || FuncName.equals("CJ_MRT_PreInitializePackage")
+      || FuncName.equals("CJ_MCC_ThrowException")
+      || FuncName.equals("CJ_MCC_NewObject") 
+      || FuncName.equals("CJ_MCC_NewFinalizer")
+      || Callee->isGetCJThreadId()
+      || Callee->isCangjieNativeStub(CallerFunc);
+}
+
 outliner::InstrType
 AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
                                    unsigned Flags) const {
@@ -7669,7 +7689,7 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
   // FIXME: If the proper fixups for the offset are implemented, this should be
   // possible.
   if (MI.isCFIInstruction())
-    return outliner::InstrType::Legal;
+    return outliner::InstrType::Illegal;
 
   // Don't allow debug values to impact outlining type.
   if (MI.isDebugInstr() || MI.isIndirectDebugValue())
@@ -7746,6 +7766,15 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
     if (MI.getOpcode() == AArch64::BLR ||
         MI.getOpcode() == AArch64::BLRNoIP || MI.getOpcode() == AArch64::BL)
       UnknownCallOutlineType = outliner::InstrType::LegalTerminator;
+
+    if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+      StatepointOpers SO(&MI);
+      const MachineOperand *MOSym = &(SO.getCallTarget());
+      const auto *Callee = dyn_cast<const Function>(MOSym->getGlobal());
+      if (!Callee || !Callee->isCangjieStackCheck())
+        UnknownCallOutlineType = outliner::InstrType::LegalTerminator;
+    }
+
 
     if (!Callee)
       return UnknownCallOutlineType;
@@ -7903,17 +7932,31 @@ void AArch64InstrInfo::buildOutlinedFrame(
     // For thunk outlining, rewrite the last instruction from a call to a
     // tail-call.
     MachineInstr *Call = &*--MBB.instr_end();
+    MachineOperand *Callee = &Call->getOperand(0);
     unsigned TailOpcode;
     if (Call->getOpcode() == AArch64::BL) {
       TailOpcode = AArch64::TCRETURNdi;
-    } else {
+    } else if (Call->getOpcode() == AArch64::BLR 
+            || Call->getOpcode() == AArch64::BLRNoIP) {
       assert(Call->getOpcode() == AArch64::BLR ||
              Call->getOpcode() == AArch64::BLRNoIP);
       TailOpcode = AArch64::TCRETURNriALL;
+    } else {
+      assert(Call->getOpcode() == TargetOpcode::STATEPOINT);
+      Callee = &Call->getOperand(Call->getNumDefs() + 3);
+      TailOpcode = Callee->isReg() ? AArch64::TCRETURNriALL : AArch64::TCRETURNdi; 
     }
-    MachineInstr *TC = BuildMI(MF, DebugLoc(), get(TailOpcode))
-                           .add(Call->getOperand(0))
-                           .addImm(0);
+
+    MachineInstr *TC = nullptr;
+    if (Call->getOpcode() != TargetOpcode::STATEPOINT)
+      TC = BuildMI(MF, DebugLoc(), get(TailOpcode))
+                            .add(Call->getOperand(0))
+                            .addImm(0);
+    else 
+      TC = BuildMI(MF, DebugLoc(), get(TailOpcode))
+                            .add(*Callee)
+                            .addImm(0);
+
     MBB.insert(MBB.end(), TC);
     Call->eraseFromParent();
 
@@ -8033,12 +8076,68 @@ MachineBasicBlock::iterator AArch64InstrInfo::insertOutlinedCall(
     Module &M, MachineBasicBlock &MBB, MachineBasicBlock::iterator &It,
     MachineFunction &MF, outliner::Candidate &C) const {
 
+  MachineInstr *StatePointInst = 
+  (C.back()->getOpcode() == TargetOpcode::STATEPOINT) ? 
+  &*C.back() : nullptr;
+
+  MachineInstr *OutlinedStatePoint = nullptr;
+  std::vector<MachineOperand> OSPOperands;
+
+  if (StatePointInst) {
+    OSPOperands.reserve(8);
+    StatepointOpers SOpers(StatePointInst);
+    const TargetRegisterInfo *TRI = MBB.getParent()->getSubtarget().getRegisterInfo();
+
+    unsigned NumArgs = StatePointInst->getOperand(SOpers.getNCallArgsPos()).getImm();
+    SmallSet<Register, 2> ArgSet;
+    SmallSet<Register, 2> DefArgSet;
+
+    for (unsigned i = 0; i < NumArgs; ++i) {
+      const MachineOperand &Arg = StatePointInst->getOperand(4 + i + StatePointInst->getNumDefs());
+      if (Arg.isReg() && Arg.isUse()) {
+        Register Reg = Arg.getReg();
+        if (Register::isPhysicalRegister(Reg))
+          ArgSet.insert(Reg);
+      }
+    }
+    for (auto I = C.front(), E = C.back(); I != E; ++I) {
+      if (I->isDebugInstr() || I->hasImplicitDef())
+        continue;
+      bool IsDefArg = false;
+      for (auto &def: I->defs()) {
+        auto defReg = def.getReg();
+        ArgSet.erase(defReg);
+        for (MCRegAliasIterator Alias(defReg, TRI, true); Alias.isValid(); ++Alias)
+          ArgSet.erase(*Alias);
+      }
+    }
+
+    // Add CC, flags, Num Args.
+    for (unsigned i = 0; i < SOpers.getNCallArgsPos(); ++i)
+      OSPOperands.push_back(StatePointInst->getOperand(i));
+
+    OSPOperands.push_back(MachineOperand::CreateImm(ArgSet.size()));
+    OSPOperands.push_back(MachineOperand::CreateGA(M.getNamedValue(MF.getName()), 0));
+
+    for (auto &Arg: ArgSet) {
+      OSPOperands.push_back(MachineOperand::CreateReg(Arg, false));
+      OSPOperands.back().setIsKill();
+    }
+
+    for (unsigned i = SOpers.getVarIdx(); i < StatePointInst->getNumOperands(); ++i)
+      OSPOperands.push_back(StatePointInst->getOperand(i));
+  }
   // Are we tail calling?
   if (C.CallConstructionID == MachineOutlinerTailCall) {
     // If yes, then we can just branch to the label.
-    It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::TCRETURNdi))
-                            .addGlobalAddress(M.getNamedValue(MF.getName()))
-                            .addImm(0));
+    if (StatePointInst) {
+      It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(TargetOpcode::STATEPOINT)));
+      for (auto &Operand: OSPOperands)
+        It->addOperand(Operand);
+    } else
+      It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::TCRETURNdi))
+                              .addGlobalAddress(M.getNamedValue(MF.getName()))
+                              .addImm(0));
     return It;
   }
 
@@ -8046,8 +8145,13 @@ MachineBasicBlock::iterator AArch64InstrInfo::insertOutlinedCall(
   if (C.CallConstructionID == MachineOutlinerNoLRSave ||
       C.CallConstructionID == MachineOutlinerThunk) {
     // No, so just insert the call.
-    It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::BL))
-                            .addGlobalAddress(M.getNamedValue(MF.getName())));
+    if (StatePointInst) {
+     It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(TargetOpcode::STATEPOINT)));
+      for (auto &Operand: OSPOperands)
+        It->addOperand(Operand);
+    } else
+      It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(AArch64::BL))
+                              .addGlobalAddress(M.getNamedValue(MF.getName())));
     return It;
   }
 
