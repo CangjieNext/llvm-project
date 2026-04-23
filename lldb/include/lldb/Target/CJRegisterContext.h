@@ -90,6 +90,10 @@ protected:
                          RegisterValue &value) const;
   bool WriteRegisterArm64(const RegisterInfo *reg_info,
                           const RegisterValue &value);
+  bool ReadRegisterArm64Linux(const RegisterInfo *reg_info,
+                               RegisterValue &value) const;
+  bool WriteRegisterArm64Linux(const RegisterInfo *reg_info,
+                                const RegisterValue &value);
   void SetZeroRegisterValue(const RegisterInfo *reg_info,
                             RegisterValue &value) const;
   lldb::ByteOrder GetByteOrderForValues() const;
