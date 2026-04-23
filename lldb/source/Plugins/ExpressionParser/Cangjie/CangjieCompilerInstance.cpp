@@ -763,6 +763,9 @@ std::vector<std::string> CangjieCompilerInstance::WalkAndCollectIdentifiers()
 {
   auto exprPkg = this->GetSourcePackages()[0];
   auto findExprResult = [this](Ptr<AST::Node> curNode) -> VisitAction {
+    if (curNode->astKind == AST::ASTKind::EXTEND_DECL) {
+      curNode->EnableAttr(Attribute::PRIVATE);
+    }
     if (curNode->astKind != AST::ASTKind::TRY_EXPR) {
       return AST::VisitAction::WALK_CHILDREN;
     }
