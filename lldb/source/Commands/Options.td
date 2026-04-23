@@ -1042,6 +1042,11 @@ let Command = "cjthread backtrace" in {
   Arg<"FrameIndex">, Desc<"Frame in which to start the backtrace">;
 }
 
+let Command = "cjthread list" in {
+  def cjthread_list_state : Option<"state", "s">, Group<1>, Arg<"None">,
+  Desc<"Filter cjthreads by state. Valid values: idle (0), ready (1), running (2), pending (3), syscall (4).">;
+}
+
 let Command = "thread step scope" in {
   def thread_step_scope_step_in_avoids_no_debug :
     Option<"step-in-avoids-no-debug", "a">, Group<1>, Arg<"Boolean">,
