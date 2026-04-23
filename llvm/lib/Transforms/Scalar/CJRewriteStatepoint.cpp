@@ -1804,6 +1804,12 @@ static void relocationViaAlloca(Function &F, DominatorTree &DT,
       InitialAllocaNum++;
 #endif
 
+  DenseMap<const Instruction *, unsigned> InstOrder;
+  unsigned NextInstOrder = 0;
+  for (BasicBlock &BB : F)
+    for (Instruction &I : BB)
+      InstOrder[&I] = NextInstOrder++;
+
   // TODO-PERF: change data structures, reserve
   DenseMap<Value *, AllocaInst *> AllocaMap;
   SmallVector<AllocaInst *, 200> PromotableAllocas;
@@ -1889,7 +1895,9 @@ static void relocationViaAlloca(Function &F, DominatorTree &DT,
       }
     }
 
-    llvm::sort(Uses);
+    llvm::sort(Uses, [&](Instruction *L, Instruction *R) {
+      return InstOrder.lookup(L) < InstOrder.lookup(R);
+    });
     auto Last = std::unique(Uses.begin(), Uses.end());
     Uses.erase(Last, Uses.end());
 
