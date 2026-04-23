@@ -931,7 +931,12 @@ void CangjieDCE::updateNonExternalExtensionDefs(Module &M) {
     }
   };
   auto ResetBitmap = [](SmallSet<GlobalVariable *, 8> &RewriteTypeInfos) {
-    for (auto *TI : RewriteTypeInfos) {
+    SmallVector<GlobalVariable *, 8> SortedTypeInfos(RewriteTypeInfos.begin(),
+                                                     RewriteTypeInfos.end());
+    llvm::sort(SortedTypeInfos, [](GlobalVariable *L, GlobalVariable *R) {
+      return L->getName() < R->getName();
+    });
+    for (auto *TI : SortedTypeInfos) {
       auto *TIC = TI->getInitializer();
       unsigned Op = ClassInfoFieldType::CIT_ITABLE;
       if (isa<ConstantPointerNull>(TIC->getOperand(Op)))
