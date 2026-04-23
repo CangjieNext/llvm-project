@@ -336,17 +336,77 @@ public:
 
 // CommandObjectCJThreadList
 class CommandObjectCJThreadList : public CommandObjectParsed {
+  class CommandOptions : public Options {
+  public:
+    CommandOptions() = default;
+
+    ~CommandOptions() override = default;
+
+    Status SetOptionValue(uint32_t option_idx, llvm::StringRef option_arg,
+                          ExecutionContext *execution_context) override {
+      Status error;
+      const int short_option = m_getopt_table[option_idx].val;
+
+      if (short_option == 's') {
+        if (option_arg.empty()) {
+          error.SetErrorString("state option requires a value");
+          return error;
+        }
+
+        llvm::StringRef state_str = option_arg.lower();
+        if (state_str == "idle" || state_str == "0") {
+          m_state_filter = CJThreadState::eIdle;
+        } else if (state_str == "ready" || state_str == "1") {
+          m_state_filter = CJThreadState::eReady;
+        } else if (state_str == "running" || state_str == "2") {
+          m_state_filter = CJThreadState::eRunning;
+        } else if (state_str == "pending" || state_str == "3") {
+          m_state_filter = CJThreadState::ePending;
+        } else if (state_str == "syscall" || state_str == "4") {
+          m_state_filter = CJThreadState::eSyscall;
+        } else {
+          error.SetErrorStringWithFormat(
+              "invalid state value '%s'. Valid values: "
+              "idle (0), ready (1), running (2), pending (3), syscall (4)",
+              option_arg.str().c_str());
+          return error;
+        }
+        m_has_state_filter = true;
+      }
+      return error;
+    }
+
+    void OptionParsingStarting(ExecutionContext *execution_context) override {
+      m_has_state_filter = false;
+      m_state_filter = CJThreadState::eUnknown;
+    }
+
+    llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
+      return llvm::makeArrayRef(g_option_table);
+    }
+
+    bool m_has_state_filter = false;
+    CJThreadState m_state_filter = CJThreadState::eUnknown;
+
+    static OptionDefinition g_option_table[];
+  };
+
 public:
   explicit CommandObjectCJThreadList(CommandInterpreter &interpreter)
       : CommandObjectParsed(
             interpreter, "cjthread list",
-            "Show a summary of each cjthread in the current target process.",
-            "cjthread list",
+            "Show a summary of each cjthread in the current target process.\n"
+            "If --state is specified, only cjthreads with the matching state are shown.\n"
+            "Note: cjthreads with 'unknown' state are not displayed.\n"
+            "Valid states: idle (0), ready (1), running (2), pending (3), syscall (4).",
+            "cjthread list [--state=<state>]",
             eCommandRequiresProcess | eCommandTryTargetAPILock |
-            eCommandProcessMustBeLaunched | eCommandProcessMustBePaused)
-      {}
+            eCommandProcessMustBeLaunched | eCommandProcessMustBePaused),
+        m_options() {}
 
   ~CommandObjectCJThreadList() override = default;
+
+  Options *GetOptions() override { return &m_options; }
 
 protected:
   bool DoExecute(Args &command, CommandReturnObject &result) override {
@@ -357,11 +417,10 @@ protected:
       return false;
     }
     process->RefreshCJThreadList(error);
-    if (error.Fail()) return false;
+    if (error.Fail())
+      return false;
 
     Stream &strm = result.GetOutputStream();
-    result.SetStatus(eReturnStatusSuccessFinishNoResult);
-    const bool only_threads_with_stop_reason = false;
     const uint32_t start_frame = 0;
     const uint32_t num_frames = 0;
     const uint32_t num_frames_with_source = 0;
@@ -369,52 +428,71 @@ protected:
 
     ThreadList &cjthread_list = process->GetCJThreadList();
 
-    // size_t num_thread_infos_dumped = 0;
-
-    // You can't hold the thread list lock while calling Thread::GetStatus. That
-    // very well might run code (e.g. if we need it to get return values or
-    // arguments.)  For that to work the process has to be able to acquire it.
-    // So instead copy the thread ID's, and look them up one by one:
-
-    uint32_t num_threads;
     std::vector<lldb::tid_t> thread_id_array;
-    // Scope for thread list locker;
     {
       std::lock_guard<std::recursive_mutex> guard(cjthread_list.GetMutex());
-      ThreadList &curr_thread_list = cjthread_list;
-      num_threads = curr_thread_list.GetSize();
-      uint32_t idx;
-      thread_id_array.resize(num_threads);
-      for (idx = 0; idx < num_threads; ++idx) {
-        ThreadSP thread = curr_thread_list.GetThreadAtIndex(idx);
-        if (thread) {
-          thread_id_array[idx] = thread->GetID();
-        }
+      uint32_t num_threads = cjthread_list.GetSize();
+      thread_id_array.reserve(num_threads);
+      for (uint32_t idx = 0; idx < num_threads; ++idx) {
+        ThreadSP thread = cjthread_list.GetThreadAtIndex(idx);
+        if (thread)
+          thread_id_array.push_back(thread->GetID());
       }
     }
 
-    for (uint32_t i = 0; i < num_threads; i++) {
-      ThreadSP thread_sp(cjthread_list.FindThreadByID(thread_id_array[i]));
-      if (thread_sp) {
-        if (only_threads_with_stop_reason) {
-          StopInfoSP stop_info_sp = thread_sp->GetStopInfo();
-          if (!stop_info_sp || !stop_info_sp->IsValid())
-            continue;
-        }
-        thread_sp->GetStatus(strm, start_frame, num_frames,
-                             num_frames_with_source, false);
-      } else {
+    bool has_state_filter = m_options.m_has_state_filter;
+    CJThreadState state_filter = m_options.m_state_filter;
+    bool any_thread_displayed = false;
+
+    for (lldb::tid_t tid : thread_id_array) {
+      ThreadSP thread_sp = cjthread_list.FindThreadByID(tid);
+      if (!thread_sp) {
         Log *log = GetLog(LLDBLog::Process);
         if (log) {
-          LLDB_LOGF(log, "Process::GetThreadStatus - cjthread 0x" PRIu64
-                         " vanished while running Thread::GetStatus.");
+          LLDB_LOGF(log,
+                    "Process::GetThreadStatus - cjthread %" PRIu64
+                    " vanished while running Thread::GetStatus.",
+                    tid);
         }
+        continue;
       }
+
+      CJThreadSP cjthread_sp = std::dynamic_pointer_cast<CJThread>(thread_sp);
+      if (!cjthread_sp)
+        continue;
+
+      CJThreadState state = cjthread_sp->GetCJThreadState();
+
+      // Skip cjthreads with unknown state
+      if (state == CJThreadState::eUnknown)
+        continue;
+
+      // Apply state filter if specified
+      if (has_state_filter && state != state_filter)
+        continue;
+
+      thread_sp->GetStatus(strm, start_frame, num_frames, num_frames_with_source,
+                           false);
+      any_thread_displayed = true;
+    }
+
+    if (!any_thread_displayed && has_state_filter) {
+      strm.Printf("No cjthreads found with state '%s'.\n",
+                   FormatCJThreadState(state_filter).data());
     }
 
     result.SetStatus(eReturnStatusSuccessFinishNoResult);
-    return result.Succeeded();
+    return true;
   }
+
+  CommandOptions m_options;
+};
+
+OptionDefinition CommandObjectCJThreadList::CommandOptions::g_option_table[] = {
+    {LLDB_OPT_SET_1, false, "state", 's', OptionParser::eRequiredArgument, nullptr,
+     {}, 0, eArgTypeNone,
+     "Filter cjthreads by state. Valid values: idle (0), ready (1), running (2), "
+     "pending (3), syscall (4)."},
 };
 
 // CommandObjectCJThreadFrameSelect
