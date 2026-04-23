@@ -401,10 +401,17 @@ CJThread::CJThread(Process &process, CJThreadInfoOverview cjtinfo, bool use_inva
     if (!error.Fail() && n == sizeof(ctx))
       ctx.CopyTo(*m_regvals, process.GetByteOrder());
   } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
-    CJThreadContext_Arm64 ctx{};
-    size_t n = process.ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
-    if (!error.Fail() && n == sizeof(ctx))
-      ctx.CopyTo(*m_regvals, process.GetByteOrder());
+    if (triple.getOS() == llvm::Triple::OSType::Linux) {
+      CJThreadContext_Arm64_Linux ctx{};
+      size_t n = process.ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
+      if (!error.Fail() && n == sizeof(ctx))
+        ctx.CopyTo(*m_regvals, process.GetByteOrder());
+    } else {
+      CJThreadContext_Arm64_Darwin ctx{};
+      size_t n = process.ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
+      if (!error.Fail() && n == sizeof(ctx))
+        ctx.CopyTo(*m_regvals, process.GetByteOrder());
+    }
   }
   m_reg_context_sp =
       std::make_shared<CJRegisterContext>(*this, m_cjreginfo, m_regvals);
@@ -436,10 +443,17 @@ void CJThread::UpdateInfo(const CJThreadInfoOverview &info) {
     if (!error.Fail() && n == sizeof(ctx))
       ctx.CopyTo(*m_regvals, process->GetByteOrder());
   } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
-    CJThreadContext_Arm64 ctx{};
-    size_t n = process->ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
-    if (!error.Fail() && n == sizeof(ctx))
-      ctx.CopyTo(*m_regvals, process->GetByteOrder());
+    if (triple.getOS() == llvm::Triple::OSType::Linux) {
+      CJThreadContext_Arm64_Linux ctx{};
+      size_t n = process->ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
+      if (!error.Fail() && n == sizeof(ctx))
+        ctx.CopyTo(*m_regvals, process->GetByteOrder());
+    } else {
+      CJThreadContext_Arm64_Darwin ctx{};
+      size_t n = process->ReadMemory(m_cjthread_info.context_ptr, &ctx, sizeof(ctx), error);
+      if (!error.Fail() && n == sizeof(ctx))
+        ctx.CopyTo(*m_regvals, process->GetByteOrder());
+    }
   }
 
   m_reg_context_sp =

@@ -28,6 +28,62 @@
 using namespace lldb;
 using namespace lldb_private;
 
+// Linux aarch64 register enum values from RegisterInfos_arm64.h
+// These differ from Darwin's lldb-arm64-register-enums.h values
+namespace linux_arm64 {
+enum {
+  gpr_x19 = 19,
+  gpr_x20 = 20,
+  gpr_x21 = 21,
+  gpr_x22 = 22,
+  gpr_x23 = 23,
+  gpr_x24 = 24,
+  gpr_x25 = 25,
+  gpr_x26 = 26,
+  gpr_x27 = 27,
+  gpr_x28 = 28,
+  gpr_fp = 29,
+  gpr_lr = 30,
+  gpr_sp = 31,
+  gpr_pc = 32,
+  gpr_w19 = 53,
+  gpr_w20 = 54,
+  gpr_w21 = 55,
+  gpr_w22 = 56,
+  gpr_w23 = 57,
+  gpr_w24 = 58,
+  gpr_w25 = 59,
+  gpr_w26 = 60,
+  gpr_w27 = 61,
+  gpr_w28 = 62,
+  fpu_v8 = 71,
+  fpu_v9 = 72,
+  fpu_v10 = 73,
+  fpu_v11 = 74,
+  fpu_v12 = 75,
+  fpu_v13 = 76,
+  fpu_v14 = 77,
+  fpu_v15 = 78,
+  fpu_s8 = 103,
+  fpu_s9 = 104,
+  fpu_s10 = 105,
+  fpu_s11 = 106,
+  fpu_s12 = 107,
+  fpu_s13 = 108,
+  fpu_s14 = 109,
+  fpu_s15 = 110,
+  fpu_d8 = 135,
+  fpu_d9 = 136,
+  fpu_d10 = 137,
+  fpu_d11 = 138,
+  fpu_d12 = 139,
+  fpu_d13 = 140,
+  fpu_d14 = 141,
+  fpu_d15 = 142,
+  fpu_fpcr = 160,
+};
+}
+
 namespace {
 
 struct RegisterKeyMapping {
@@ -160,6 +216,7 @@ constexpr RegisterSliceMapping kLinuxX64SliceMappings[] = {
     {lldb_r14l_x86_64, "r14", 8, 0, 1},  {lldb_r15l_x86_64, "r15", 8, 0, 1},
 };
 
+// macOS/Darwin arm64 mappings (using lldb-arm64-register-enums.h)
 constexpr RegisterKeyMapping kArm64DirectMappings[] = {
     {gpr_x18_arm64, "x18"},    {gpr_x19_arm64, "x19"},
     {gpr_x20_arm64, "x20"},    {gpr_x21_arm64, "x21"},
@@ -175,6 +232,24 @@ constexpr RegisterKeyMapping kArm64DirectMappings[] = {
     {fpu_d15_arm64, "d15"},    {fpu_fpcr_arm64, "fpcr"},
 };
 
+// Linux aarch64 mappings (using RegisterInfos_arm64.h enum values)
+// These values differ from Darwin arm64 enum values
+constexpr RegisterKeyMapping kLinuxArm64DirectMappings[] = {
+    {linux_arm64::gpr_x19, "x19"},          {linux_arm64::gpr_x20, "x20"},
+    {linux_arm64::gpr_x21, "x21"},          {linux_arm64::gpr_x22, "x22"},
+    {linux_arm64::gpr_x23, "x23"},          {linux_arm64::gpr_x24, "x24"},
+    {linux_arm64::gpr_x25, "x25"},          {linux_arm64::gpr_x26, "x26"},
+    {linux_arm64::gpr_x27, "x27"},          {linux_arm64::gpr_x28, "x28"},
+    {linux_arm64::gpr_fp, "fp"},            {linux_arm64::gpr_lr, "lr"},
+    {linux_arm64::gpr_sp, "sp"},            {linux_arm64::gpr_pc, "pc"},
+    {linux_arm64::fpu_d8, "d8"},            {linux_arm64::fpu_d9, "d9"},
+    {linux_arm64::fpu_d10, "d10"},          {linux_arm64::fpu_d11, "d11"},
+    {linux_arm64::fpu_d12, "d12"},          {linux_arm64::fpu_d13, "d13"},
+    {linux_arm64::fpu_d14, "d14"},          {linux_arm64::fpu_d15, "d15"},
+    {linux_arm64::fpu_fpcr, "fpcr"},
+};
+
+// macOS/Darwin arm64 slice mappings (using lldb-arm64-register-enums.h)
 constexpr RegisterSliceMapping kArm64SliceMappings[] = {
     {gpr_w18_arm64, "x18", 8, 0, 4},   {gpr_w19_arm64, "x19", 8, 0, 4},
     {gpr_w20_arm64, "x20", 8, 0, 4},   {gpr_w21_arm64, "x21", 8, 0, 4},
@@ -188,10 +263,31 @@ constexpr RegisterSliceMapping kArm64SliceMappings[] = {
     {fpu_s15_arm64, "d15", 8, 0, 4},
 };
 
+// Linux aarch64 slice mappings (using RegisterInfos_arm64.h enum values)
+constexpr RegisterSliceMapping kLinuxArm64SliceMappings[] = {
+    {linux_arm64::gpr_w19, "x19", 8, 0, 4},   {linux_arm64::gpr_w20, "x20", 8, 0, 4},
+    {linux_arm64::gpr_w21, "x21", 8, 0, 4},   {linux_arm64::gpr_w22, "x22", 8, 0, 4},
+    {linux_arm64::gpr_w23, "x23", 8, 0, 4},   {linux_arm64::gpr_w24, "x24", 8, 0, 4},
+    {linux_arm64::gpr_w25, "x25", 8, 0, 4},   {linux_arm64::gpr_w26, "x26", 8, 0, 4},
+    {linux_arm64::gpr_w27, "x27", 8, 0, 4},   {linux_arm64::gpr_w28, "x28", 8, 0, 4},
+    {linux_arm64::fpu_s8, "d8", 8, 0, 4},     {linux_arm64::fpu_s9, "d9", 8, 0, 4},
+    {linux_arm64::fpu_s10, "d10", 8, 0, 4},   {linux_arm64::fpu_s11, "d11", 8, 0, 4},
+    {linux_arm64::fpu_s12, "d12", 8, 0, 4},   {linux_arm64::fpu_s13, "d13", 8, 0, 4},
+    {linux_arm64::fpu_s14, "d14", 8, 0, 4},   {linux_arm64::fpu_s15, "d15", 8, 0, 4},
+};
+
+// macOS/Darwin arm64 vector mappings (using lldb-arm64-register-enums.h)
 constexpr RegisterVectorLow64Mapping kArm64VectorMappings[] = {
     {fpu_v8_arm64, "d8"},   {fpu_v9_arm64, "d9"},   {fpu_v10_arm64, "d10"},
     {fpu_v11_arm64, "d11"}, {fpu_v12_arm64, "d12"}, {fpu_v13_arm64, "d13"},
     {fpu_v14_arm64, "d14"}, {fpu_v15_arm64, "d15"},
+};
+
+// Linux aarch64 vector mappings (using RegisterInfos_arm64.h enum values)
+constexpr RegisterVectorLow64Mapping kLinuxArm64VectorMappings[] = {
+    {linux_arm64::fpu_v8, "d8"},   {linux_arm64::fpu_v9, "d9"},   {linux_arm64::fpu_v10, "d10"},
+    {linux_arm64::fpu_v11, "d11"}, {linux_arm64::fpu_v12, "d12"}, {linux_arm64::fpu_v13, "d13"},
+    {linux_arm64::fpu_v14, "d14"}, {linux_arm64::fpu_v15, "d15"},
 };
 
 } // namespace
@@ -449,30 +545,82 @@ bool CJRegisterContext::WriteRegisterX64(const RegisterInfo *reg_info,
 
 bool CJRegisterContext::ReadRegisterArm64(const RegisterInfo *reg_info,
                                           RegisterValue &value) const {
-  const uint32_t reg = GetLLDBRegisterNumber(reg_info);
+  // Use register name directly for matching since CJDynamicRegisterInfo
+  // assigns local register numbers that differ from Darwin arm64 LLDB enum values
+  llvm::StringRef reg_name = reg_info->name;
 
-  if (const RegisterKeyMapping *mapping =
-          FindDirectMapping(kArm64DirectMappings, reg))
-    return GetStoredRegisterValue(mapping->key, value);
+  // Direct register mappings: x18-x28, fp, lr, sp, pc, d8-d15, fpcr
+  static const llvm::StringRef direct_regs[] = {
+      "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
+      "x26", "x27", "x28", "fp",  "lr",  "sp",  "pc",  "d8",
+      "d9",  "d10", "d11", "d12", "d13", "d14", "d15", "fpcr"};
 
-  if (const RegisterSliceMapping *mapping =
-          FindSliceMapping(kArm64SliceMappings, reg))
-    return ReadSubRegister(mapping->base_reg, mapping->base_reg_size,
-                           mapping->slice_offset, mapping->slice_size, reg_info,
-                           value);
+  for (llvm::StringRef direct_reg : direct_regs) {
+    if (reg_name == direct_reg)
+      return GetStoredRegisterValue(reg_name, value);
+  }
 
-  if (const RegisterVectorLow64Mapping *mapping =
-          FindVectorLow64Mapping(kArm64VectorMappings, reg)) {
-    RegisterValue low64_value;
-    if (!GetStoredRegisterValue(mapping->low64_reg, low64_value))
-      return false;
+  // Slice mappings: w18-w28 (lower 32 bits of x18-x28), s8-s15 (lower 32 bits of d8-d15)
+  if (reg_name.size() >= 2) {
+    char base_reg[4] = {0};
+    if (reg_name[0] == 'w') {
+      // w18-w28 are slices of x18-x28
+      base_reg[0] = 'x';
+      if (reg_name[1] == '1' && reg_name.size() == 3) {
+        base_reg[1] = reg_name[1];
+        base_reg[2] = reg_name[2];
+      } else if (reg_name[1] >= '2' && reg_name[1] <= '9') {
+        base_reg[1] = reg_name[1];
+        if (reg_name.size() == 3)
+          base_reg[2] = reg_name[2];
+      }
+      if (base_reg[1] != 0)
+        return ReadSubRegister(base_reg, 8, 0, 4, reg_info, value);
+    }
+    if (reg_name[0] == 's' && reg_name[1] >= '8' && reg_name[1] <= '9') {
+      // s8-s9 are slices of d8-d9
+      base_reg[0] = 'd';
+      base_reg[1] = reg_name[1];
+      if (reg_name.size() == 3)
+        base_reg[2] = reg_name[2];
+      return ReadSubRegister(base_reg, 8, 0, 4, reg_info, value);
+    }
+    if (reg_name[0] == 's' && reg_name[1] == '1' && reg_name.size() == 3 &&
+        reg_name[2] >= '0' && reg_name[2] <= '5') {
+      // s10-s15 are slices of d10-d15
+      base_reg[0] = 'd';
+      base_reg[1] = '1';
+      base_reg[2] = reg_name[2];
+      return ReadSubRegister(base_reg, 8, 0, 4, reg_info, value);
+    }
+  }
 
-    std::vector<uint8_t> bytes;
-    if (!GetRegisterBytes(low64_value, 8, bytes))
-      return false;
-    bytes.resize(reg_info->byte_size, 0);
-    value.SetBytes(bytes.data(), bytes.size(), GetByteOrderForValues());
-    return true;
+  // Vector register v8-v15: lower 64 bits from d registers
+  if (reg_name.size() >= 2 && reg_name[0] == 'v') {
+    char d_reg[4] = {0};
+    d_reg[0] = 'd';
+    if (reg_name[1] >= '8' && reg_name[1] <= '9') {
+      d_reg[1] = reg_name[1];
+      if (reg_name.size() == 3)
+        d_reg[2] = reg_name[2];
+    } else if (reg_name[1] == '1' && reg_name.size() == 3 &&
+               reg_name[2] >= '0' && reg_name[2] <= '5') {
+      d_reg[1] = '1';
+      d_reg[2] = reg_name[2];
+    }
+
+    if (d_reg[1] != 0) {
+      RegisterValue low64_value;
+      if (!GetStoredRegisterValue(d_reg, low64_value))
+        return false;
+
+      std::vector<uint8_t> bytes;
+      if (!GetRegisterBytes(low64_value, 8, bytes))
+        return false;
+      bytes.resize(reg_info->byte_size, 0);
+      value.SetBytes(bytes.data(), bytes.size(), GetByteOrderForValues());
+      return true;
+    }
   }
 
   return false;
@@ -480,26 +628,230 @@ bool CJRegisterContext::ReadRegisterArm64(const RegisterInfo *reg_info,
 
 bool CJRegisterContext::WriteRegisterArm64(const RegisterInfo *reg_info,
                                            const RegisterValue &value) {
-  const uint32_t reg = GetLLDBRegisterNumber(reg_info);
+  // Use register name directly for matching since CJDynamicRegisterInfo
+  // assigns local register numbers that differ from Darwin arm64 LLDB enum values
+  llvm::StringRef reg_name = reg_info->name;
 
-  if (const RegisterKeyMapping *mapping =
-          FindDirectMapping(kArm64DirectMappings, reg))
-    return StoreRegisterValue(mapping->key, value);
+  // Direct register mappings: x18-x28, fp, lr, sp, pc, d8-d15, fpcr
+  static const llvm::StringRef direct_regs[] = {
+      "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
+      "x26", "x27", "x28", "fp",  "lr",  "sp",  "pc",  "d8",
+      "d9",  "d10", "d11", "d12", "d13", "d14", "d15", "fpcr"};
 
-  if (const RegisterSliceMapping *mapping =
-          FindSliceMapping(kArm64SliceMappings, reg))
-    return WriteSubRegister(mapping->base_reg, mapping->base_reg_size,
-                            mapping->slice_offset, value);
+  for (llvm::StringRef direct_reg : direct_regs) {
+    if (reg_name == direct_reg)
+      return StoreRegisterValue(reg_name, value);
+  }
 
-  if (const RegisterVectorLow64Mapping *mapping =
-          FindVectorLow64Mapping(kArm64VectorMappings, reg)) {
-    std::vector<uint8_t> bytes;
-    if (!GetRegisterBytes(value, reg_info->byte_size, bytes) || bytes.size() < 8)
-      return false;
+  // Slice mappings: w18-w28 (lower 32 bits of x18-x28), s8-s15 (lower 32 bits of d8-d15)
+  if (reg_name.size() >= 2) {
+    char base_reg[4] = {0};
+    if (reg_name[0] == 'w') {
+      // w18-w28 are slices of x18-x28
+      base_reg[0] = 'x';
+      if (reg_name[1] == '1' && reg_name.size() == 3) {
+        base_reg[1] = reg_name[1];
+        base_reg[2] = reg_name[2];
+      } else if (reg_name[1] >= '2' && reg_name[1] <= '9') {
+        base_reg[1] = reg_name[1];
+        if (reg_name.size() == 3)
+          base_reg[2] = reg_name[2];
+      }
+      if (base_reg[1] != 0)
+        return WriteSubRegister(base_reg, 8, 0, value);
+    }
+    if (reg_name[0] == 's' && reg_name[1] >= '8' && reg_name[1] <= '9') {
+      // s8-s9 are slices of d8-d9
+      base_reg[0] = 'd';
+      base_reg[1] = reg_name[1];
+      if (reg_name.size() == 3)
+        base_reg[2] = reg_name[2];
+      return WriteSubRegister(base_reg, 8, 0, value);
+    }
+    if (reg_name[0] == 's' && reg_name[1] == '1' && reg_name.size() == 3 &&
+        reg_name[2] >= '0' && reg_name[2] <= '5') {
+      // s10-s15 are slices of d10-d15
+      base_reg[0] = 'd';
+      base_reg[1] = '1';
+      base_reg[2] = reg_name[2];
+      return WriteSubRegister(base_reg, 8, 0, value);
+    }
+  }
 
-    RegisterValue low64_value;
-    low64_value.SetBytes(bytes.data(), 8, GetByteOrderForValues());
-    return StoreRegisterValue(mapping->low64_reg, low64_value);
+  // Vector register v8-v15: lower 64 bits stored in d registers
+  if (reg_name.size() >= 2 && reg_name[0] == 'v') {
+    char d_reg[4] = {0};
+    d_reg[0] = 'd';
+    if (reg_name[1] >= '8' && reg_name[1] <= '9') {
+      d_reg[1] = reg_name[1];
+      if (reg_name.size() == 3)
+        d_reg[2] = reg_name[2];
+    } else if (reg_name[1] == '1' && reg_name.size() == 3 &&
+               reg_name[2] >= '0' && reg_name[2] <= '5') {
+      d_reg[1] = '1';
+      d_reg[2] = reg_name[2];
+    }
+
+    if (d_reg[1] != 0) {
+      std::vector<uint8_t> bytes;
+      if (!GetRegisterBytes(value, reg_info->byte_size, bytes) || bytes.size() < 8)
+        return false;
+
+      RegisterValue low64_value;
+      low64_value.SetBytes(bytes.data(), 8, GetByteOrderForValues());
+      return StoreRegisterValue(d_reg, low64_value);
+    }
+  }
+
+  return false;
+}
+
+bool CJRegisterContext::ReadRegisterArm64Linux(const RegisterInfo *reg_info,
+                                                RegisterValue &value) const {
+  // Use register name directly for matching since CJDynamicRegisterInfo
+  // assigns local register numbers that differ from Linux arm64 LLDB enum values
+  llvm::StringRef reg_name = reg_info->name;
+
+  // Direct register mappings: x18-x28, fp, lr, sp, pc, d8-d15, fpcr
+  static const llvm::StringRef direct_regs[] = {
+      "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
+      "x26", "x27", "x28", "fp",  "lr",  "sp",  "pc",  "d8",
+      "d9",  "d10", "d11", "d12", "d13", "d14", "d15", "fpcr"};
+
+  for (llvm::StringRef direct_reg : direct_regs) {
+    if (reg_name == direct_reg)
+      return GetStoredRegisterValue(reg_name, value);
+  }
+
+  // Slice mappings: w19-w28 (lower 32 bits of x19-x28), s8-s15 (lower 32 bits of d8-d15)
+  if (reg_name.size() >= 2) {
+    char base_reg[4] = {0};
+    if (reg_name[0] == 'w' && reg_name[1] >= '1' && reg_name[1] <= '9') {
+      // w19-w28 are slices of x19-x28
+      base_reg[0] = 'x';
+      base_reg[1] = reg_name[1];
+      if (reg_name.size() == 3)
+        base_reg[2] = reg_name[2];
+      return ReadSubRegister(base_reg, 8, 0, 4, reg_info, value);
+    }
+    if (reg_name[0] == 's' && reg_name[1] >= '8' && reg_name[1] <= '9') {
+      // s8-s15 are slices of d8-d15
+      base_reg[0] = 'd';
+      base_reg[1] = reg_name[1];
+      if (reg_name.size() == 3)
+        base_reg[2] = reg_name[2];
+      return ReadSubRegister(base_reg, 8, 0, 4, reg_info, value);
+    }
+    if (reg_name[0] == 's' && reg_name[1] == '1' && reg_name.size() == 3 &&
+        reg_name[2] >= '0' && reg_name[2] <= '5') {
+      // s10-s15 are slices of d10-d15
+      base_reg[0] = 'd';
+      base_reg[1] = '1';
+      base_reg[2] = reg_name[2];
+      return ReadSubRegister(base_reg, 8, 0, 4, reg_info, value);
+    }
+  }
+
+  // Vector register v8-v15: lower 64 bits from d registers
+  if (reg_name.size() >= 2 && reg_name[0] == 'v') {
+    char d_reg[4] = {0};
+    d_reg[0] = 'd';
+    if (reg_name[1] >= '8' && reg_name[1] <= '9') {
+      d_reg[1] = reg_name[1];
+      if (reg_name.size() == 3)
+        d_reg[2] = reg_name[2];
+    } else if (reg_name[1] == '1' && reg_name.size() == 3 &&
+               reg_name[2] >= '0' && reg_name[2] <= '5') {
+      d_reg[1] = '1';
+      d_reg[2] = reg_name[2];
+    }
+
+    if (d_reg[1] != 0) {
+      RegisterValue low64_value;
+      if (!GetStoredRegisterValue(d_reg, low64_value))
+        return false;
+
+      std::vector<uint8_t> bytes;
+      if (!GetRegisterBytes(low64_value, 8, bytes))
+        return false;
+      bytes.resize(reg_info->byte_size, 0);
+      value.SetBytes(bytes.data(), bytes.size(), GetByteOrderForValues());
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool CJRegisterContext::WriteRegisterArm64Linux(const RegisterInfo *reg_info,
+                                                 const RegisterValue &value) {
+  // Use register name directly for matching since CJDynamicRegisterInfo
+  // assigns local register numbers that differ from Linux arm64 LLDB enum values
+  llvm::StringRef reg_name = reg_info->name;
+
+  // Direct register mappings: x18-x28, fp, lr, sp, pc, d8-d15, fpcr
+  static const llvm::StringRef direct_regs[] = {
+      "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
+      "x26", "x27", "x28", "fp",  "lr",  "sp",  "pc",  "d8",
+      "d9",  "d10", "d11", "d12", "d13", "d14", "d15", "fpcr"};
+
+  for (llvm::StringRef direct_reg : direct_regs) {
+    if (reg_name == direct_reg)
+      return StoreRegisterValue(reg_name, value);
+  }
+
+  // Slice mappings: w19-w28 (lower 32 bits of x19-x28), s8-s15 (lower 32 bits of d8-d15)
+  if (reg_name.size() >= 2) {
+    char base_reg[4] = {0};
+    if (reg_name[0] == 'w' && reg_name[1] >= '1' && reg_name[1] <= '9') {
+      // w19-w28 are slices of x19-x28
+      base_reg[0] = 'x';
+      base_reg[1] = reg_name[1];
+      if (reg_name.size() == 3)
+        base_reg[2] = reg_name[2];
+      return WriteSubRegister(base_reg, 8, 0, value);
+    }
+    if (reg_name[0] == 's' && reg_name[1] >= '8' && reg_name[1] <= '9') {
+      // s8-s9 are slices of d8-d9
+      base_reg[0] = 'd';
+      base_reg[1] = reg_name[1];
+      if (reg_name.size() == 3)
+        base_reg[2] = reg_name[2];
+      return WriteSubRegister(base_reg, 8, 0, value);
+    }
+    if (reg_name[0] == 's' && reg_name[1] == '1' && reg_name.size() == 3 &&
+        reg_name[2] >= '0' && reg_name[2] <= '5') {
+      // s10-s15 are slices of d10-d15
+      base_reg[0] = 'd';
+      base_reg[1] = '1';
+      base_reg[2] = reg_name[2];
+      return WriteSubRegister(base_reg, 8, 0, value);
+    }
+  }
+
+  // Vector register v8-v15: lower 64 bits stored in d registers
+  if (reg_name.size() >= 2 && reg_name[0] == 'v') {
+    char d_reg[4] = {0};
+    d_reg[0] = 'd';
+    if (reg_name[1] >= '8' && reg_name[1] <= '9') {
+      d_reg[1] = reg_name[1];
+      if (reg_name.size() == 3)
+        d_reg[2] = reg_name[2];
+    } else if (reg_name[1] == '1' && reg_name.size() == 3 &&
+               reg_name[2] >= '0' && reg_name[2] <= '5') {
+      d_reg[1] = '1';
+      d_reg[2] = reg_name[2];
+    }
+
+    if (d_reg[1] != 0) {
+      std::vector<uint8_t> bytes;
+      if (!GetRegisterBytes(value, reg_info->byte_size, bytes) || bytes.size() < 8)
+        return false;
+
+      RegisterValue low64_value;
+      low64_value.SetBytes(bytes.data(), 8, GetByteOrderForValues());
+      return StoreRegisterValue(d_reg, low64_value);
+    }
   }
 
   return false;
@@ -527,7 +879,11 @@ bool CJRegisterContext::ReadRegister(const RegisterInfo *reg_info,
   } else if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
     ok = ReadRegisterX64(reg_info, value);
   } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
-    ok = ReadRegisterArm64(reg_info, value);
+    // Linux uses RegisterInfos_arm64.h enum values, macOS uses lldb-arm64-register-enums.h
+    if (triple.getOS() == llvm::Triple::OSType::Linux)
+      ok = ReadRegisterArm64Linux(reg_info, value);
+    else
+      ok = ReadRegisterArm64(reg_info, value);
   } else {
     ok = GetStoredRegisterValue(reg_info->name, value) ||
          (reg_info->alt_name && GetStoredRegisterValue(reg_info->alt_name, value));
@@ -553,7 +909,11 @@ bool CJRegisterContext::WriteRegister(const RegisterInfo *reg_info,
   } else if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
     ok = WriteRegisterX64(reg_info, value);
   } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
-    ok = WriteRegisterArm64(reg_info, value);
+    // Linux uses RegisterInfos_arm64.h enum values, macOS uses lldb-arm64-register-enums.h
+    if (triple.getOS() == llvm::Triple::OSType::Linux)
+      ok = WriteRegisterArm64Linux(reg_info, value);
+    else
+      ok = WriteRegisterArm64(reg_info, value);
   }
 
   if (!ok && triple.getArch() != llvm::Triple::ArchType::x86_64 &&

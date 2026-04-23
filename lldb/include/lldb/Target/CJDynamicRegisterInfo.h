@@ -131,7 +131,8 @@ struct CJThreadContext_Windows_X64 : CJThreadContext_Linux_X64 {
     }
 };
 
-struct CJThreadContext_Arm64 {
+// macOS/Darwin arm64 context structure
+struct CJThreadContext_Arm64_Darwin {
     unsigned long long x18; /* 0x0 */
     unsigned long long x19; /* 0x8 */
     unsigned long long x20; /* 0x10 */
@@ -186,6 +187,64 @@ struct CJThreadContext_Arm64 {
       regValMap[ConstString("d15")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d15, byte_order));
     }
 };
+
+// Linux aarch64 context structure (different layout from Darwin)
+// x18 is platform register on Linux, typically not saved as callee-saved
+struct CJThreadContext_Arm64_Linux {
+    unsigned long long x19; /* 0x0 */
+    unsigned long long x20; /* 0x8 */
+    unsigned long long x21; /* 0x10 */
+    unsigned long long x22; /* 0x18 */
+    unsigned long long x23; /* 0x20 */
+    unsigned long long x24; /* 0x28 */
+    unsigned long long x25; /* 0x30 */
+    unsigned long long x26; /* 0x38 */
+    unsigned long long x27; /* 0x40 */
+    unsigned long long x28; /* 0x48 */
+    unsigned long long fp;  /* 0x50 */  // x29
+    unsigned long long lr;  /* 0x58 */  // x30
+    unsigned long long sp;  /* 0x60 */
+    unsigned long long pc;  /* 0x68 */
+    unsigned long long d8;  /* 0x70 */
+    unsigned long long d9;  /* 0x78 */
+    unsigned long long d10; /* 0x80 */
+    unsigned long long d11; /* 0x88 */
+    unsigned long long d12; /* 0x90 */
+    unsigned long long d13; /* 0x98 */
+    unsigned long long d14; /* 0xa0 */
+    unsigned long long d15; /* 0xa8 */
+
+    unsigned int fpcr;      /* 0xb0 */
+
+    void CopyTo(std::map<ConstString, RegisterValue> &regValMap, lldb::ByteOrder byte_order) {
+      regValMap[ConstString("x19")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->x19, byte_order));
+      regValMap[ConstString("x20")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->x20, byte_order));
+      regValMap[ConstString("x21")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->x21, byte_order));
+      regValMap[ConstString("x22")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->x22, byte_order));
+      regValMap[ConstString("x23")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->x23, byte_order));
+      regValMap[ConstString("x24")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->x24, byte_order));
+      regValMap[ConstString("x25")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->x25, byte_order));
+      regValMap[ConstString("x26")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->x26, byte_order));
+      regValMap[ConstString("x27")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->x27, byte_order));
+      regValMap[ConstString("x28")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->x28, byte_order));
+      regValMap[ConstString("fp")]  = RegisterValue(ReadWithByteOrder<uint64_t>(&this->fp, byte_order));
+      regValMap[ConstString("lr")]  = RegisterValue(ReadWithByteOrder<uint64_t>(&this->lr, byte_order));
+      regValMap[ConstString("sp")]  = RegisterValue(ReadWithByteOrder<uint64_t>(&this->sp, byte_order));
+      regValMap[ConstString("pc")]  = RegisterValue(ReadWithByteOrder<uint64_t>(&this->pc, byte_order));
+
+      regValMap[ConstString("d8")]  = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d8, byte_order));
+      regValMap[ConstString("d9")]  = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d9, byte_order));
+      regValMap[ConstString("d10")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d10, byte_order));
+      regValMap[ConstString("d11")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d11, byte_order));
+      regValMap[ConstString("d12")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d12, byte_order));
+      regValMap[ConstString("d13")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d13, byte_order));
+      regValMap[ConstString("d14")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d14, byte_order));
+      regValMap[ConstString("d15")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d15, byte_order));
+    }
+};
+
+// Alias for backward compatibility (Darwin version)
+using CJThreadContext_Arm64 = CJThreadContext_Arm64_Darwin;
 
 struct CJThreadInfoCommon {
     char name[CJTHREAD_NAME_SIZE];              /* cjthread name */
