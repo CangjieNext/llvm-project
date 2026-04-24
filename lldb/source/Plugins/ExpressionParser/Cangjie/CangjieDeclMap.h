@@ -147,6 +147,7 @@ private:
     void LookUpTypeByName(const std::string& id, std::vector<CompilerTypeInfo>& decls);
     lldb::VariableSP GetVariableByName(const std::string& sname, VariableKind kind);
     CompilerType GetVariableType(lldb::VariableSP var);
+    lldb::ValueObjectSP GetValueObject(lldb::VariableSP var);
     void CollectVarDecl(const std::string& sname, CompilerType& type, VariableKind kind,
                                     std::vector<CompilerTypeInfo>& m_translate_decls);
     CompilerType LookUpVariable(const std::string& name, VariableKind kind);
