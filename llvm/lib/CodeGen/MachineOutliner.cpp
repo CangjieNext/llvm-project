@@ -920,15 +920,17 @@ bool MachineOutliner::outline(Module &M,
 
         for (const Register &I : DefRegs)
           // If it's a def, add it to the call instruction.
-          CallInst->addOperand(
-              MachineOperand::CreateReg(I, true, /* isDef = true */
-                                        true /* isImp = true */));
+          if (!CallInst->definesRegister(I))
+            CallInst->addOperand(
+                MachineOperand::CreateReg(I, true, /* isDef = true */
+                                          true /* isImp = true */));
 
         for (const Register &I : UseRegs)
           // If it's a exposed use, add it to the call instruction.
-          CallInst->addOperand(
-              MachineOperand::CreateReg(I, false, /* isDef = false */
-                                        true /* isImp = true */));
+          if (!CallInst->readsRegister(I))
+            CallInst->addOperand(
+                MachineOperand::CreateReg(I, false, /* isDef = false */
+                                          true /* isImp = true */));
       }
 
       // Erase from the point after where the call was inserted up to, and
