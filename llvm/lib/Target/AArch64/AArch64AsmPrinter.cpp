@@ -44,6 +44,7 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
@@ -74,6 +75,30 @@ extern cl::opt<bool> EnableStackGrow;
 extern cl::opt<bool> EnableSafepointOutline;
 }
 namespace {
+
+static bool isOutlinedFunctionCallTarget(const MachineOperand &MO) {
+  if (!MO.isGlobal())
+    return false;
+
+  const auto *F = dyn_cast<Function>(MO.getGlobal());
+  return F != nullptr && F->getName().startswith("OUTLINED_FUNCTION_");
+}
+
+static StringRef getCallTargetName(const MachineOperand &MO) {
+  if (MO.isGlobal()) {
+    const auto *F = dyn_cast<Function>(MO.getGlobal());
+    return F != nullptr ? F->getName() : StringRef();
+  }
+
+  if (MO.isSymbol())
+    return MO.getSymbolName();
+
+  return StringRef();
+}
+
+static bool isSafepointCallTarget(const MachineOperand &MO) {
+  return getCallTargetName(MO) == "CJ_MCC_HandleSafepoint";
+}
 
 class AArch64AsmPrinter : public AsmPrinter {
   AArch64MCInstLower MCInstLowering;
@@ -250,6 +275,9 @@ private:
   void emitMccNewObjectFastPath(const MachineInstr *MI,
                                 const MachineOperand &MOSym,
                                 unsigned Opcode) override;
+  bool tryEmitCangjieSpecificCallByMOSym(const MachineInstr *MI,
+                                         const MachineOperand &MOSym,
+                                         unsigned Opcode) override;
   void emitCJNewArrayFastPath(const MachineInstr &MI,
                               const MachineOperand &MOSym) override;
   void emitCJThrowException(const MachineInstr *MI,
@@ -260,7 +288,7 @@ private:
   void emitSubSP(unsigned Size);
   void emitCJStackCheck(const MachineInstr &MI) override;
   int emitStackOverflowCall(const MachineInstr &MI);
-  void emitSafepoint(const MachineInstr &MI);
+  void emitSafepoint(const MachineInstr &MI, bool TailCall = false);
   void emitCJSafepointInlineCheck(const MachineInstr &MI);
   int emitCJSafepointInlineCall(unsigned Index) override;
   void emitGcStateCheck() override;
@@ -1344,7 +1372,8 @@ void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
   if (CJPipeline) {
     uint64_t ID = SOpers.getID();
     // `call CJ_MCC_HandleSafepoint` in cangjie function.
-    if (!EnableSafepointOutline && ID == Cangjie::CJStatepointID::Safepoint) {
+    if (!EnableSafepointOutline && ID == Cangjie::CJStatepointID::Safepoint &&
+        !isOutlinedFunctionCallTarget(CallTarget)) {
       emitCJSafepointInlineCheck(MI);
       return;
     }
@@ -1682,6 +1711,11 @@ void AArch64AsmPrinter::emitInstruction(const MachineInstr *MI) {
     return;
   }
   case AArch64::TCRETURNdi: {
+    if ((MI->getOperand(0).isGlobal() || MI->getOperand(0).isSymbol()) &&
+        tryEmitCangjieSpecificCallByMOSym(MI, MI->getOperand(0),
+                                          AArch64::TCRETURNdi))
+      return;
+
     MCOperand Dest;
     MCInstLowering.lowerOperand(MI->getOperand(0), Dest);
     MCInst TmpInst;
@@ -2109,6 +2143,18 @@ void AArch64AsmPrinter::emitMccNewObjectFastPath(const MachineInstr *MI,
   SM.recordCJStackMap(*MI);
 }
 
+bool AArch64AsmPrinter::tryEmitCangjieSpecificCallByMOSym(
+    const MachineInstr *MI, const MachineOperand &MOSym, unsigned Opcode) {
+  if (Opcode == AArch64::TCRETURNdi) {
+    if (isSafepointCallTarget(MOSym)) {
+      emitCJSafepointOutlineStub();
+      return true;
+    }
+  }
+
+  return AsmPrinter::tryEmitCangjieSpecificCallByMOSym(MI, MOSym, Opcode);
+}
+
 void AArch64AsmPrinter::emitCJThrowException(const MachineInstr *MI,
                                              const MachineOperand &MOSym,
                                              unsigned Opcode) {
@@ -2366,7 +2412,7 @@ int AArch64AsmPrinter::emitCJSafepointInlineCall(unsigned Index) {
 //  adrp  x9, CJ_MCC_HandleSafepoint.CJStubGV
 //  ldr x9, [x9, :lo12:CJ_MCC_HandleSafepoint.CJStubGV]
 //  blr x9
-void AArch64AsmPrinter::emitSafepoint(const MachineInstr &MI) {
+void AArch64AsmPrinter::emitSafepoint(const MachineInstr &MI, bool TailCall) {
   using namespace AArch64;
 
   auto *AddrGV = MF->getFunction().getParent()->getGlobalVariable(
@@ -2386,9 +2432,10 @@ void AArch64AsmPrinter::emitSafepoint(const MachineInstr &MI) {
                    .addImm(0);
   EmitToStreamer(*OutStreamer, Ldr);
 
-  MCInst CallReg = MCInstBuilder(BLR).addReg(X9);
+  MCInst CallReg = MCInstBuilder(TailCall ? BR : BLR).addReg(X9);
   EmitToStreamer(*OutStreamer, CallReg);
-  SM.recordCJStackMap(MI, true);
+  if (!TailCall)
+    SM.recordCJStackMap(MI, true);
 }
 
 void AArch64AsmPrinter::emitCJSafepointOutlineStub() {
