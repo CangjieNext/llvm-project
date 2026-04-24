@@ -7035,6 +7035,16 @@ AArch64InstrInfo::getSerializableMachineMemOperandTargetFlags() const {
 /// * Frame construction overhead: 0
 /// * Requires stack fixups? No
 ///
+/// \p MachineOutlinerStatepointThunk implies that the function is being
+/// created from a sequence of instructions ending in a STATEPOINT. The caller
+/// keeps the safepoint metadata by calling the outlined function with a new
+/// STATEPOINT, and the outlined function tail-branches to the original
+/// statepoint call destination.
+///
+/// * Call construction overhead: 1 (STATEPOINT lowering to BL)
+/// * Frame construction overhead: 0
+/// * Requires stack fixups? No
+///
 /// \p MachineOutlinerRegSave implies that the function should be called with a
 /// save and restore of LR to an available register. This allows us to avoid
 /// stack fixups. Note that this outlining variant is compatible with the
@@ -7056,6 +7066,7 @@ enum MachineOutlinerClass {
   MachineOutlinerTailCall, /// Only emit a branch.
   MachineOutlinerNoLRSave, /// Emit a call and return.
   MachineOutlinerThunk,    /// Emit a call and tail-call.
+  MachineOutlinerStatepointThunk, /// Emit a STATEPOINT and tail-call.
   MachineOutlinerRegSave,  /// Same as default, but save to a register.
   /// Cangjie prologue outlining. The caller keeps the ADR/ADRP/ADD prefix,
   /// branches to the outlined prologue body, and the outlined function returns
@@ -7322,6 +7333,33 @@ static bool isAllowedCangjiePrologueLRUse(MachineInstr &MI) {
 
   return isCangjieFrameRecordStore(MI) &&
          hasCangjiePrologueAddressPrefixAtBlockBegin(*MI.getParent());
+}
+
+static bool isSupportedStatepointForOutlining(const MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+    return false;
+
+  StatepointOpers SO(&MI);
+  if (SO.getID() != Cangjie::CJStatepointID::Default ||
+      SO.getNumPatchBytes() != 0)
+    return false;
+
+  switch (SO.getCallTarget().getType()) {
+  case MachineOperand::MO_GlobalAddress:
+  case MachineOperand::MO_ExternalSymbol:
+  case MachineOperand::MO_Register:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool canOutlineStatepointAsThunk(const MachineInstr &MI, bool HasBTI) {
+  if (!isSupportedStatepointForOutlining(MI))
+    return false;
+
+  StatepointOpers SO(&MI);
+  return SO.getCallTarget().getType() != MachineOperand::MO_Register || !HasBTI;
 }
 
 Register
@@ -7652,6 +7690,14 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
     SetCandidateCallInfo(MachineOutlinerTailCall, 4);
   }
 
+  else if (LastInstrOpcode == TargetOpcode::STATEPOINT &&
+           canOutlineStatepointAsThunk(*RepeatedSequenceLocs[0].back(),
+                                       HasBTI)) {
+    FrameID = MachineOutlinerStatepointThunk;
+    NumBytesToCreateFrame = 0;
+    SetCandidateCallInfo(MachineOutlinerStatepointThunk, 4);
+  }
+
   else if (LastInstrOpcode == AArch64::BL ||
            ((LastInstrOpcode == AArch64::BLR ||
              LastInstrOpcode == AArch64::BLRNoIP) &&
@@ -7799,6 +7845,7 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
     // it being valid to tail call this sequence. We should consider this as
     // well.
     else if (FrameID != MachineOutlinerThunk &&
+             FrameID != MachineOutlinerStatepointThunk &&
              FrameID != MachineOutlinerTailCall && FirstCand.back()->isCall())
       ModStackToSaveLR = true;
 
@@ -8017,6 +8064,11 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
   // We should be able to compute the memory usage based on the IR calling
   // convention, even if we can't see the definition.
   if (MI.isCall()) {
+    if (MI.getOpcode() == TargetOpcode::STATEPOINT)
+      return isSupportedStatepointForOutlining(MI)
+                 ? outliner::InstrType::LegalTerminator
+                 : outliner::InstrType::Illegal;
+
     // Get the function associated with the call. Look at each operand and find
     // the one that represents the callee and get its name.
     const Function *Callee = nullptr;
@@ -8213,6 +8265,28 @@ void AArch64InstrInfo::buildOutlinedFrame(
     Call->eraseFromParent();
 
     FI->setOutliningStyle("Thunk");
+  } else if (OF.FrameConstructionID == MachineOutlinerStatepointThunk) {
+    MachineInstr *SPCall = &*--MBB.instr_end();
+    StatepointOpers SO(SPCall);
+    unsigned TailOpcode;
+    switch (SO.getCallTarget().getType()) {
+    case MachineOperand::MO_GlobalAddress:
+    case MachineOperand::MO_ExternalSymbol:
+      TailOpcode = AArch64::TCRETURNdi;
+      break;
+    case MachineOperand::MO_Register:
+      TailOpcode = AArch64::TCRETURNriALL;
+      break;
+    default:
+      llvm_unreachable("unsupported outlined statepoint call target");
+    }
+    MachineInstr *TC = BuildMI(MF, DebugLoc(), get(TailOpcode))
+                           .add(SO.getCallTarget())
+                           .addImm(0);
+    MBB.insert(MBB.end(), TC);
+    SPCall->eraseFromParent();
+
+    FI->setOutliningStyle("Statepoint Thunk");
   }
 
   if (OF.FrameConstructionID == MachineOutlinerCangjiePrologueBranch) {
@@ -8267,7 +8341,8 @@ void AArch64InstrInfo::buildOutlinedFrame(
     MachineBasicBlock::iterator Et = MBB.end();
 
     if (OF.FrameConstructionID == MachineOutlinerTailCall ||
-        OF.FrameConstructionID == MachineOutlinerThunk)
+        OF.FrameConstructionID == MachineOutlinerThunk ||
+        OF.FrameConstructionID == MachineOutlinerStatepointThunk)
       Et = std::prev(MBB.end());
 
     // Insert a save before the outlined region
@@ -8319,7 +8394,8 @@ void AArch64InstrInfo::buildOutlinedFrame(
 
   // If this is a tail call outlined function, then there's already a return.
   if (OF.FrameConstructionID == MachineOutlinerTailCall ||
-      OF.FrameConstructionID == MachineOutlinerThunk) {
+      OF.FrameConstructionID == MachineOutlinerThunk ||
+      OF.FrameConstructionID == MachineOutlinerStatepointThunk) {
     signOutlinedFunction(MF, MBB, ShouldSignReturnAddr,
                          ShouldSignReturnAddrWithAKey);
     return;
@@ -8352,6 +8428,46 @@ void AArch64InstrInfo::buildOutlinedFrame(
 MachineBasicBlock::iterator AArch64InstrInfo::insertOutlinedCall(
     Module &M, MachineBasicBlock &MBB, MachineBasicBlock::iterator &It,
     MachineFunction &MF, outliner::Candidate &C) const {
+
+  if (C.CallConstructionID == MachineOutlinerStatepointThunk) {
+    MachineInstr &OrigSP = *C.back();
+    StatepointOpers SO(&OrigSP);
+    MachineInstr *NewMI =
+        MF.CreateMachineInstr(get(TargetOpcode::STATEPOINT),
+                              OrigSP.getDebugLoc(), true);
+    NewMI->setFlags(OrigSP.getFlags());
+    NewMI->cloneInstrSymbols(MF, OrigSP);
+    MachineInstrBuilder MIB(MF, NewMI);
+
+    unsigned NumDefs = OrigSP.getNumDefs();
+    SmallVector<unsigned, 4> NewDefIndices;
+    NewDefIndices.reserve(NumDefs);
+    for (unsigned I = 0; I < NumDefs; ++I) {
+      NewDefIndices.push_back(NewMI->getNumOperands());
+      MIB.add(OrigSP.getOperand(I));
+    }
+
+    MIB.addImm(SO.getID());
+    MIB.addImm(SO.getNumPatchBytes());
+    MIB.addImm(0);
+    MIB.addGlobalAddress(M.getNamedValue(MF.getName()));
+
+    for (unsigned I = SO.getVarIdx(), E = OrigSP.getNumOperands(); I != E;
+         ++I) {
+      MIB.add(OrigSP.getOperand(I));
+      unsigned OldDef;
+      if (OrigSP.isRegTiedToDefOperand(I, &OldDef)) {
+        assert(OldDef < NumDefs && "invalid statepoint def index");
+        MIB->tieOperands(NewDefIndices[OldDef], MIB->getNumOperands() - 1);
+      }
+    }
+
+    NewMI->setMemRefs(MF, OrigSP.memoperands());
+    It = MBB.insert(It, NewMI);
+    if (OrigSP.shouldUpdateCallSiteInfo())
+      MBB.getParent()->moveCallSiteInfo(&OrigSP, NewMI);
+    return It;
+  }
 
   if (C.CallConstructionID == MachineOutlinerCangjiePrologueBranch) {
     MBB.splitAt(*C.back());
