@@ -243,6 +243,8 @@ private:
     }
     case Intrinsic::cj_gcread_struct: {
       Type *ParamType[5] = {I8Ptr, GCPtr, GCPtr, I64, I8Ptr};
+      if (isARM)
+        ParamType[3] = I32;
       FuncType = FunctionType::get(Type::getVoidTy(C), ParamType, false);
       break;
     }
