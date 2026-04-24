@@ -55,6 +55,197 @@ using namespace lldb_private;
 #define LLDB_OPTIONS_thread_backtrace
 #include "CommandOptions.inc"
 
+// CommandObjectCJThreadBacktrace - uses cjthread ID instead of thread index
+class CommandObjectCJThreadBacktrace : public CommandObjectParsed {
+public:
+  class CommandOptions : public Options {
+  public:
+    uint32_t m_count = 0;
+    uint32_t m_start = 0;
+    bool m_extended_backtrace = false;
+
+    Status SetOptionValue(uint32_t option_idx, llvm::StringRef option_arg,
+                          ExecutionContext *execution_context) override {
+      Status error;
+      const int short_option = m_getopt_table[option_idx].val;
+
+      switch (short_option) {
+      case 'c': {
+        int32_t input_count = 0;
+        if (option_arg.getAsInteger(0, m_count)) {
+          m_count = UINT32_MAX;
+          error.SetErrorStringWithFormat(
+              "invalid integer value for option '%c'", short_option);
+        } else if (input_count < 0)
+          m_count = UINT32_MAX;
+      } break;
+      case 's':
+        if (option_arg.getAsInteger(0, m_start))
+          error.SetErrorStringWithFormat(
+              "invalid integer value for option '%c'", short_option);
+        break;
+      case 'e': {
+        bool success;
+        m_extended_backtrace =
+            OptionArgParser::ToBoolean(option_arg, false, &success);
+        if (!success)
+          error.SetErrorStringWithFormat(
+              "invalid boolean value for option '%c'", short_option);
+      } break;
+      default:
+        llvm_unreachable("Unimplemented option");
+      }
+      return error;
+    }
+
+    void OptionParsingStarting(ExecutionContext *execution_context) override {
+      m_count = 0;
+      m_start = 0;
+      m_extended_backtrace = false;
+    }
+
+    llvm::ArrayRef<OptionDefinition> GetDefinitions() override {
+      return llvm::makeArrayRef(g_thread_backtrace_options);
+    }
+  };
+
+  explicit CommandObjectCJThreadBacktrace(CommandInterpreter &interpreter)
+      : CommandObjectParsed(
+            interpreter, "cjthread backtrace",
+            "Show cjthread call stacks. Defaults to the current cjthread, "
+            "cjthread IDs can be specified as arguments.\n"
+            "Use the cjthread ID \"all\" to see all cjthreads.\n"
+            "Use 'settings set frame-format' to customize the printing of "
+            "frames in the backtrace and 'settings set thread-format' to "
+            "customize the thread header.",
+            nullptr,
+            eCommandRequiresProcess | eCommandTryTargetAPILock |
+                eCommandProcessMustBeLaunched | eCommandProcessMustBePaused) {
+    CommandArgumentEntry arg;
+    CommandArgumentData thread_arg{eArgTypeThreadID, eArgRepeatStar};
+    arg.push_back(thread_arg);
+    m_arguments.push_back(arg);
+  }
+
+  ~CommandObjectCJThreadBacktrace() override = default;
+
+  Options *GetOptions() override { return &m_options; }
+
+protected:
+  bool DoExecute(Args &command, CommandReturnObject &result) override {
+    Status error;
+    Process *process = m_exe_ctx.GetProcessPtr();
+    if (!process) {
+      result.AppendError("no process");
+      return false;
+    }
+    process->RefreshCJThreadList(error);
+    if (error.Fail())
+      return false;
+
+    ThreadList &cjthread_list = process->GetCJThreadList();
+    Stream &strm = result.GetOutputStream();
+    result.SetStatus(eReturnStatusSuccessFinishResult);
+
+    bool all_threads = false;
+    if (command.GetArgumentCount() == 0) {
+      ThreadSP thread = cjthread_list.GetSelectedThread();
+      if (!thread) {
+        result.AppendError("no selected cjthread");
+        return false;
+      }
+      return HandleOneCJThread(thread->GetID(), strm, result);
+    } else if (command.GetArgumentCount() == 1) {
+      all_threads = ::strcmp(command.GetArgumentAtIndex(0), "all") == 0;
+    }
+
+    std::vector<lldb::tid_t> tids;
+
+    if (all_threads) {
+      for (ThreadSP thread_sp : process->CJThreads())
+        tids.push_back(thread_sp->GetID());
+    } else {
+      const size_t num_args = command.GetArgumentCount();
+      for (size_t i = 0; i < num_args; i++) {
+        uint32_t cjthread_id;
+        if (!llvm::to_integer(command.GetArgumentAtIndex(i), cjthread_id)) {
+          result.AppendErrorWithFormat("invalid cjthread id '%s'\n",
+                                       command.GetArgumentAtIndex(i));
+          return false;
+        }
+
+        ThreadSP thread = cjthread_list.FindThreadByID(cjthread_id);
+        if (!thread) {
+          result.AppendErrorWithFormat("no cjthread with id: '%s'\n",
+                                       command.GetArgumentAtIndex(i));
+          return false;
+        }
+        tids.push_back(thread->GetID());
+      }
+    }
+
+    for (size_t idx = 0; idx < tids.size(); idx++) {
+      if (idx != 0)
+        strm.EOL();
+
+      if (!HandleOneCJThread(tids[idx], strm, result))
+        return false;
+    }
+
+    return result.Succeeded();
+  }
+
+  bool HandleOneCJThread(lldb::tid_t tid, Stream &strm,
+                         CommandReturnObject &result) {
+    Process *process = m_exe_ctx.GetProcessPtr();
+    ThreadList &cjthread_list = process->GetCJThreadList();
+    ThreadSP thread_sp = cjthread_list.FindThreadByID(tid);
+    if (!thread_sp) {
+      result.AppendErrorWithFormat(
+          "cjthread disappeared while computing backtraces: %" PRIu64 "\n",
+          tid);
+      return false;
+    }
+
+    Thread *thread = thread_sp.get();
+    const uint32_t num_frames_with_source = 0;
+    const bool stop_format = true;
+    const bool only_stacks = false;
+
+    if (!thread->GetStatus(strm, m_options.m_start, m_options.m_count,
+                           num_frames_with_source, stop_format, only_stacks)) {
+      result.AppendErrorWithFormat(
+          "error displaying backtrace for cjthread: \"0x%4.4x\"\n",
+          thread->GetIndexID());
+      return false;
+    }
+
+    if (m_options.m_extended_backtrace) {
+      SystemRuntime *runtime = process->GetSystemRuntime();
+      if (runtime) {
+        const std::vector<ConstString> &types =
+            runtime->GetExtendedBacktraceTypes();
+        for (auto type : types) {
+          ThreadSP ext_thread_sp = runtime->GetExtendedBacktraceThread(
+              thread->shared_from_this(), type);
+          if (ext_thread_sp && ext_thread_sp->IsValid()) {
+            const bool stop_format_ext = false;
+            if (ext_thread_sp->GetStatus(strm, m_options.m_start,
+                                          m_options.m_count,
+                                          num_frames_with_source,
+                                          stop_format_ext)) {
+              // Recursively handle extended backtrace
+            }
+          }
+        }
+      }
+    }
+
+    return true;
+  }
+
+  CommandOptions m_options;
+};
 // CommandObjectCJThreadList
 #define LLDB_OPTIONS_cjthread_list
 #include "CommandOptions.inc"
@@ -314,27 +505,6 @@ public:
   }
 
   StepType m_step_type;
-};
-
-// CommandObjectCJThreadBacktrace
-class CommandObjectCJThreadBacktrace : public CommandObjectThreadBacktrace {
-public:
-  explicit CommandObjectCJThreadBacktrace(CommandInterpreter &interpreter)
-    : CommandObjectThreadBacktrace(
-          interpreter, "cjthread backtrace",
-          "Show thread call stacks.  Defaults to the current thread, thread "
-          "indexes can be specified as arguments.\n"
-          "Use the thread-index \"all\" to see all threads.\n"
-          "Use the thread-index \"unique\" to see threads grouped by unique "
-          "call stacks.\n"
-          "Use 'settings set frame-format' to customize the printing of "
-          "frames in the backtrace and 'settings set thread-format' to "
-          "customize the thread header.",
-          nullptr,
-          eCommandRequiresProcess | eCommandRequiresThread | 
-              eCommandTryTargetAPILock | eCommandProcessMustBeLaunched |
-              eCommandProcessMustBePaused, true) {
-  }
 };
 
 // CommandObjectCJThreadList
