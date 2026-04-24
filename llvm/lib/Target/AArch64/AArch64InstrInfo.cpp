@@ -32,6 +32,7 @@
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DebugLoc.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -109,6 +110,9 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
   // under-estimate risks picking too-narrow jump-table entry width.
   const TargetMachine &TM = MI.getMF()->getTarget();
   const unsigned GotExtra = (TM.getCodeModel() == CodeModel::Large) ? 8 : 0;
+  if (MI.getOpcode() == AArch64::TCRETURNdi && Callee->isCangjieSafePoint()) {
+    return 24; // 24: 24 bytes(6 insts) for outlined safepoint stub
+  }
   if (Callee->isCangjieSafePoint()) {
     // If Jmp size beyond the 19bit, emitting safepoint on following inst
     // instead of emit it at the end of the function.
@@ -7352,9 +7356,23 @@ static bool isSupportedStatepointForOutlining(const MachineInstr &MI) {
     return false;
 
   StatepointOpers SO(&MI);
-  if (SO.getID() != Cangjie::CJStatepointID::Default ||
-      SO.getNumPatchBytes() != 0)
+  if (SO.getNumPatchBytes() != 0)
     return false;
+
+  switch (SO.getID()) {
+  case Cangjie::CJStatepointID::Default:
+    break;
+  case Cangjie::CJStatepointID::Safepoint:
+    switch (SO.getCallTarget().getType()) {
+    case MachineOperand::MO_GlobalAddress:
+    case MachineOperand::MO_ExternalSymbol:
+      return true;
+    default:
+      return false;
+    }
+  default:
+    return false;
+  }
 
   switch (SO.getCallTarget().getType()) {
   case MachineOperand::MO_GlobalAddress:
