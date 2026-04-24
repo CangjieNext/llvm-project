@@ -580,7 +580,9 @@ static bool isCangjieSpecificCall(const MachineInstr *MI) {
   unsigned Opcode = MI->getOpcode();
   if (Opcode == TargetOpcode::STATEPOINT) {
     StatepointOpers SO(MI);
-    if (SO.getID() != Cangjie::CJStatepointID::Default)
+    if (SO.getID() != Cangjie::CJStatepointID::Default &&
+        SO.getID() != Cangjie::CJStatepointID::Safepoint &&
+        SO.getID() != Cangjie::CJStatepointID::NewArrayFast)
       return true;
 
     const auto *Callee = SO.getCalledFunction();

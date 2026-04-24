@@ -32,6 +32,7 @@
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DebugLoc.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -74,6 +75,14 @@ AArch64InstrInfo::AArch64InstrInfo(const AArch64Subtarget &STI)
                           AArch64::CATCHRET),
       RI(STI.getTargetTriple()), Subtarget(STI) {}
 
+static bool isOutlinedFunctionCallTarget(const MachineOperand &MO) {
+  if (!MO.isGlobal())
+    return false;
+
+  const auto *F = dyn_cast<Function>(MO.getGlobal());
+  return F != nullptr && F->getName().startswith("OUTLINED_FUNCTION_");
+}
+
 /// Return the maximum number of bytes of Cangjie Specific CallInst.
 /// 0 means MI is not a Cangjie Specific Call.
 unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
@@ -87,7 +96,8 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
   const MachineOperand *MOSym = nullptr;
   if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
     StatepointOpers SO(&MI);
-    if (SO.getID() == Cangjie::CJStatepointID::NewArrayFast) {
+    if (SO.getID() == Cangjie::CJStatepointID::NewArrayFast &&
+        !isOutlinedFunctionCallTarget(SO.getCallTarget())) {
       return 52; // 52: 52 bytes(13 insts) for new array call
     }
     MOSym = &(SO.getCallTarget());
@@ -100,6 +110,13 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
   const auto *Callee = dyn_cast<const Function>(MOSym->getGlobal());
   if (Callee == nullptr) {
     return 0;
+  }
+  if (MI.getOpcode() == AArch64::TCRETURNdi && Callee->isCangjieSafePoint()) {
+    return 24; // 24: 24 bytes(6 insts) for outlined safepoint stub
+  }
+  if (MI.getOpcode() == AArch64::TCRETURNdi &&
+      Callee->getName().startswith("CJ_MCC_NewArray")) {
+    return 52; // 52: 52 bytes(13 insts) for tail new array fast path
   }
   if (Callee->isCangjieSafePoint()) {
     // If Jmp size beyond the 19bit, emitting safepoint on following inst
@@ -7336,9 +7353,24 @@ static bool isSupportedStatepointForOutlining(const MachineInstr &MI) {
     return false;
 
   StatepointOpers SO(&MI);
-  if (SO.getID() != Cangjie::CJStatepointID::Default ||
-      SO.getNumPatchBytes() != 0)
+  if (SO.getNumPatchBytes() != 0)
     return false;
+
+  switch (SO.getID()) {
+  case Cangjie::CJStatepointID::Default:
+    break;
+  case Cangjie::CJStatepointID::Safepoint:
+  case Cangjie::CJStatepointID::NewArrayFast:
+    switch (SO.getCallTarget().getType()) {
+    case MachineOperand::MO_GlobalAddress:
+    case MachineOperand::MO_ExternalSymbol:
+      return true;
+    default:
+      return false;
+    }
+  default:
+    return false;
+  }
 
   switch (SO.getCallTarget().getType()) {
   case MachineOperand::MO_GlobalAddress:
