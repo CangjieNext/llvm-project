@@ -322,18 +322,112 @@ public:
   explicit CommandObjectCJThreadBacktrace(CommandInterpreter &interpreter)
     : CommandObjectThreadBacktrace(
           interpreter, "cjthread backtrace",
-          "Show thread call stacks.  Defaults to the current thread, thread "
-          "indexes can be specified as arguments.\n"
-          "Use the thread-index \"all\" to see all threads.\n"
-          "Use the thread-index \"unique\" to see threads grouped by unique "
+          "Show cjthread call stacks.  Defaults to the current cjthread, "
+          "cjthread IDs can be specified as arguments.\n"
+          "Use the cjthread-id \"all\" to see all cjthreads.\n"
+          "Use the cjthread-id \"unique\" to see cjthreads grouped by unique "
           "call stacks.\n"
           "Use 'settings set frame-format' to customize the printing of "
           "frames in the backtrace and 'settings set thread-format' to "
           "customize the thread header.",
           nullptr,
-          eCommandRequiresProcess | eCommandRequiresThread | 
-              eCommandTryTargetAPILock | eCommandProcessMustBeLaunched |
-              eCommandProcessMustBePaused, true) {
+          eCommandRequiresProcess | eCommandTryTargetAPILock |
+              eCommandProcessMustBeLaunched | eCommandProcessMustBePaused, true) {
+  }
+
+  bool DoExecute(Args &command, CommandReturnObject &result) override {
+    result.SetStatus(m_success_return);
+
+    Status error;
+    Process *process = m_exe_ctx.GetProcessPtr();
+    if (!process) {
+      result.AppendError("no process");
+      return false;
+    }
+    process->RefreshCJThreadList(error);
+    if (error.Fail()) return false;
+
+    bool all_threads = false;
+    if (command.GetArgumentCount() == 0) {
+      ThreadSP thread = process->GetCJThreadList().GetSelectedThread();
+      if (!thread || !HandleOneThread(thread->GetID(), result))
+        return false;
+      return result.Succeeded();
+    } else if (command.GetArgumentCount() == 1) {
+      all_threads = ::strcmp(command.GetArgumentAtIndex(0), "all") == 0;
+      m_unique_stacks = ::strcmp(command.GetArgumentAtIndex(0), "unique") == 0;
+    }
+
+    std::vector<lldb::tid_t> tids;
+
+    if (all_threads || m_unique_stacks) {
+      for (ThreadSP thread_sp : process->CJThreads())
+        tids.push_back(thread_sp->GetID());
+    } else {
+      const size_t num_args = command.GetArgumentCount();
+
+      ThreadList &cjthread_list = process->GetCJThreadList();
+      std::lock_guard<std::recursive_mutex> guard(cjthread_list.GetMutex());
+
+      for (size_t i = 0; i < num_args; i++) {
+        uint32_t cjthread_id;
+        if (!llvm::to_integer(command.GetArgumentAtIndex(i), cjthread_id)) {
+          result.AppendErrorWithFormat("invalid cjthread id '%s'\n",
+                                       command.GetArgumentAtIndex(i));
+          return false;
+        }
+
+        ThreadSP thread = cjthread_list.FindThreadByID(cjthread_id);
+
+        if (!thread) {
+          result.AppendErrorWithFormat("no cjthread with id: \"%s\"\n",
+                                       command.GetArgumentAtIndex(i));
+          return false;
+        }
+
+        tids.push_back(thread->GetID());
+      }
+    }
+
+    ThreadList &cjthread_list = process->GetCJThreadList();
+    if (m_unique_stacks) {
+      std::set<UniqueStack> unique_stacks;
+      for (const lldb::tid_t &tid : tids) {
+        if (!BucketThread(tid, unique_stacks, result)) {
+          return false;
+        }
+      }
+
+      Stream &strm = result.GetOutputStream();
+      for (const UniqueStack &stack : unique_stacks) {
+        const std::vector<uint32_t> &thread_index_ids =
+            stack.GetUniqueThreadIndexIDs();
+        strm.Format("{0} cangjie thread(s) ", thread_index_ids.size());
+        for (const uint32_t &thread_index_id : thread_index_ids) {
+          strm.Format("#{0} ", thread_index_id);
+        }
+        strm.EOL();
+
+        uint32_t representative_thread_id = stack.GetRepresentativeThread();
+        ThreadSP thread = cjthread_list.FindThreadByIndexID(
+              representative_thread_id);
+        if (!HandleOneThread(thread->GetID(), result)) {
+          return false;
+        }
+      }
+    } else {
+      uint32_t idx = 0;
+      for (const lldb::tid_t &tid : tids) {
+        if (idx != 0 && m_add_return)
+          result.AppendMessage("");
+
+        if (!HandleOneThread(tid, result))
+          return false;
+
+        ++idx;
+      }
+    }
+    return result.Succeeded();
   }
 };
 
