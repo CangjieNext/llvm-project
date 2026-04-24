@@ -322,18 +322,70 @@ public:
   explicit CommandObjectCJThreadBacktrace(CommandInterpreter &interpreter)
     : CommandObjectThreadBacktrace(
           interpreter, "cjthread backtrace",
-          "Show thread call stacks.  Defaults to the current thread, thread "
-          "indexes can be specified as arguments.\n"
-          "Use the thread-index \"all\" to see all threads.\n"
-          "Use the thread-index \"unique\" to see threads grouped by unique "
+          "Show cjthread call stacks.  Defaults to the current cjthread, "
+          "cjthread IDs can be specified as arguments.\n"
+          "Use the cjthread-id \"all\" to see all cjthreads.\n"
+          "Use the cjthread-id \"unique\" to see cjthreads grouped by unique "
           "call stacks.\n"
           "Use 'settings set frame-format' to customize the printing of "
           "frames in the backtrace and 'settings set thread-format' to "
           "customize the thread header.",
           nullptr,
-          eCommandRequiresProcess | eCommandRequiresThread | 
-              eCommandTryTargetAPILock | eCommandProcessMustBeLaunched |
-              eCommandProcessMustBePaused, true) {
+          eCommandRequiresProcess | eCommandTryTargetAPILock |
+              eCommandProcessMustBeLaunched | eCommandProcessMustBePaused, true) {
+  }
+
+  bool DoExecute(Args &command, CommandReturnObject &result) override {
+    result.SetStatus(m_success_return);
+
+    Status error;
+    Process *process = m_exe_ctx.GetProcessPtr();
+    if (!process) {
+      result.AppendError("no process");
+      return false;
+    }
+    process->RefreshCJThreadList(error);
+    if (error.Fail()) return false;
+
+    if (command.GetArgumentCount() == 0) {
+      ThreadSP thread = process->GetCJThreadList().GetSelectedThread();
+      if (!thread || !HandleOneThread(thread->GetID(), result))
+        return false;
+      return result.Succeeded();
+    }
+
+    if (::strcmp(command.GetArgumentAtIndex(0), "all") == 0 ||
+        ::strcmp(command.GetArgumentAtIndex(0), "unique") == 0) {
+      return CommandObjectThreadBacktrace::DoExecute(command, result);
+    }
+
+    ThreadList &cjthread_list = process->GetCJThreadList();
+    std::lock_guard<std::recursive_mutex> guard(cjthread_list.GetMutex());
+
+    const size_t num_args = command.GetArgumentCount();
+    for (size_t i = 0; i < num_args; i++) {
+      uint32_t cjthread_id;
+      if (!llvm::to_integer(command.GetArgumentAtIndex(i), cjthread_id)) {
+        result.AppendErrorWithFormat("invalid cjthread specification: \"%s\"\n",
+                                     command.GetArgumentAtIndex(i));
+        return false;
+      }
+
+      ThreadSP thread = cjthread_list.FindThreadByID(cjthread_id);
+      if (!thread) {
+        result.AppendErrorWithFormat("invalid cjthread index \"%s\"\n",
+                                     command.GetArgumentAtIndex(i));
+        return false;
+      }
+
+      if (i != 0 && m_add_return)
+        result.AppendMessage("");
+
+      if (!HandleOneThread(thread->GetID(), result))
+        return false;
+    }
+
+    return result.Succeeded();
   }
 };
 

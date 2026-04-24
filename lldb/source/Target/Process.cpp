@@ -4097,6 +4097,7 @@ void Process::ProcessEventData::DoOnRemoval(Event *event_ptr) {
   lldb::CJThreadSP new_cjthread = process_sp->FindCJThreadByOSThreadID(selected_thread_id, false);
   if (new_cjthread) {
     new_cjthread->BindCJThreadToOSThread(*process_sp);
+    process_sp->GetCJThreadList().SetSelectedThreadByID(new_cjthread->GetCJThreadID());
   }
 }
 
