@@ -567,8 +567,9 @@ static bool isCangjieSpecificCallee(const MachineInstr *MI, const Function *Call
       || FuncName.isSetDebugLocation() 
       || FuncName.equals("CJ_MRT_PreInitializePackage")
       || FuncName.equals("CJ_MCC_ThrowException")
-      || FuncName.equals("CJ_MCC_NewObject") 
       || FuncName.equals("CJ_MCC_NewFinalizer")
+      || FuncName.startswith("CJ_MCC_NewArray")
+      || FuncName.equals("CJ_MCC_NewObjArray")
       || Callee->isGetCJThreadId()
       || Callee->isCangjieNativeStub(CallerFunc);
 }
@@ -580,7 +581,8 @@ static bool isCangjieSpecificCall(const MachineInstr *MI) {
   unsigned Opcode = MI->getOpcode();
   if (Opcode == TargetOpcode::STATEPOINT) {
     StatepointOpers SO(MI);
-    if (SO.getID() != Cangjie::CJStatepointID::Default)
+    if (SO.getID() != Cangjie::CJStatepointID::Default &&
+        SO.getID() != Cangjie::CJStatepointID::Safepoint)
       return true;
 
     const auto *Callee = SO.getCalledFunction();
