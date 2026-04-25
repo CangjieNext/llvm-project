@@ -42,149 +42,63 @@ static bool isAligned(const Value *Base, const APInt &Offset, Align Alignment,
   return BA >= Alignment && !(Offset & (APAlign - 1));
 }
 
-static void getUses(Value *Base, SetVector<Value *> &Uses,
-                    Value *StopInst = nullptr) {
-  SmallVector<std::pair<Value *, bool>, 8> WorkList = {{Base, false}};
-  auto IsLoad = [](Value *V) {
-    if (isa<LoadInst>(V))
-      return true;
-    auto *II = dyn_cast<IntrinsicInst>(V);
-    if (!II)
-      return false;
-    auto IID = II->getIntrinsicID();
-    return IID == Intrinsic::cj_gcread_ref ||
-           IID == Intrinsic::cj_gcread_static_ref;
-  };
-  while (!WorkList.empty()) {
-    auto [V, L] = WorkList.pop_back_val();
-    for (auto *U : V->users()) {
-      bool Tag = IsLoad(U);
-      // load after load, then stop.
-      if ((L && Tag) || Uses.contains(U) || U == StopInst)
-        continue;
-      Uses.insert(U);
-      WorkList.push_back({U, Tag | L});
-    }
-  }
+static bool isCJUnsafePointer(const Value *V) {
+  const auto *II = dyn_cast<IntrinsicInst>(V);
+  return II && II->getIntrinsicID() == Intrinsic::cj_unsafe_pointer;
 }
 
-static bool checkMaybeLoadFromNullST(Value *V, Value *&BP) {
-  // OptionTy = {i1, ptr}, i1 indicates whether ptr is null.
-  // bb0:
-  //  %0 -> {i1, ptr}
-  //  %1 = load (gep %0, 0, 0)
-  //  %2 = icmp %1, true
-  //  br %2, label unreachable_bb, label bb1
-  // bb1:
-  //  %3 = load (gep %0, 0, 1)
-  //  load %3
-  // V represents %3.
-
-  // Obtains the type V comes from. If tbaa is carried, the type is obtained
-  // from tbaa. Otherwise, the type is obtained from cast instruction.
-  MDNode *TBAAMD = nullptr;
-  if (auto *I = dyn_cast<Instruction>(V);
-      I && I->hasMetadata(LLVMContext::MD_tbaa))
-    TBAAMD = dyn_cast_or_null<MDNode>(
-        I->getMetadata(LLVMContext::MD_tbaa)->getOperand(0));
-  if (TBAAMD) {
-    if (auto *MDStr = dyn_cast_or_null<MDString>(TBAAMD->getOperand(0))) {
-      auto Str = MDStr->getString();
-      if (Str.contains("Option") || Str.contains("Enum"))
-        return true;
-    }
-  }
-  Value *Ptr = nullptr;
-  if (auto *LI = dyn_cast<LoadInst>(V))
-    Ptr = LI->getPointerOperand();
-  else if (auto *II = dyn_cast<IntrinsicInst>(V)) {
-    if (II->getIntrinsicID() == Intrinsic::cj_gcread_ref)
-      Ptr = II->getOperand(1);
-    else if (II->getIntrinsicID() == Intrinsic::cj_gcread_static_ref)
-      Ptr = II->getOperand(0);
-  }
-  if (Ptr) {
-    BP = getUnderlyingObject(Ptr);
-    SmallSet<StructType *, 8> STs;
-    getAllStructTypes(Ptr, STs);
-    for (auto *ST : STs)
-      if (ST && (!ST->hasName() || (ST->getName().contains("Option") ||
-                                    ST->getName().contains("Enum"))))
-        return true;
-  }
-  return false;
-}
-
-static bool isNoNullArgumentOrLoad(const Value *V, const DominatorTree *DT) {
-  Value *BP = const_cast<Value *>(V);
-  if (checkMaybeLoadFromNullST(const_cast<Value *>(V), BP))
+static bool containsCJUnsafePointer(const Value *V,
+                                    SmallPtrSetImpl<const Value *> &Visited,
+                                    unsigned MaxDepth) {
+  if (!V->getType()->isPointerTy())
     return false;
-  SetVector<Value *> Uses;
-  getUses(const_cast<Value *>(BP), Uses);
-  // For i8*, this is correct, based on the premise that if we use a pointer
-  // that might be null, we need to check if it is, like Option<...>.
-  // The judgment here is conservative. If there is an icmp to null, we assume
-  // that the pointer cannot be dereferenced anywhere at will.
-  LLVMContext &Ctx = V->getContext();
-  for (auto *U : Uses) {
-    if (auto *ICI = dyn_cast<ICmpInst>(U)) {
-      bool IsOP0Null = isa<ConstantPointerNull>(ICI->getOperand(0));
-      bool IsOP1Null = isa<ConstantPointerNull>(ICI->getOperand(1));
-      if (IsOP0Null || IsOP1Null)
-        return false;
-      Type *Ty = ICI->getOperand(0)->getType();
-      bool IsI1OrI8 = Ty == Type::getInt1Ty(Ctx) || Ty == Type::getInt8Ty(Ctx);
-      if (auto *CI = dyn_cast<ConstantInt>(ICI->getOperand(0));
-          CI && CI->getSExtValue() == 0 && IsI1OrI8)
-        return false;
-      if (auto *CI = dyn_cast<ConstantInt>(ICI->getOperand(1));
-          CI && CI->getSExtValue() == 0 && IsI1OrI8)
-        return false;
-    }
-    if (auto *SI = dyn_cast<StoreInst>(U);
-        SI && getUnderlyingObject(SI->getPointerOperand()) != BP &&
-        !DT->dominates(V, SI))
-      return false;
-    if (auto *MI = dyn_cast<MemTransferInst>(U);
-        MI && getUnderlyingObject(MI->getDest()) != BP && !DT->dominates(V, MI))
-      return false;
-  }
-  return true;
-}
-
-static bool isNoNullPointer(const Value *V, const DominatorTree *DT) {
-  assert(isa<PointerType>(V->getType()) && "It should be pointer type");
-  if (auto *I = dyn_cast<Instruction>(V);
-      I && I->hasMetadata(LLVMContext::MD_untrusted_ref))
-    return false;
-  if (auto *II = dyn_cast<IntrinsicInst>(V)) {
-    if (II->isCJRefGCRead())
-      return isNoNullArgumentOrLoad(V, DT);
-  } else if (auto *CI = dyn_cast<CallInst>(V)) {
-    auto *F = CI->getCalledFunction();
-    return F && F->hasFnAttribute("cj-heapmalloc");
-  } else if (isa<AllocaInst>(V)) {
+  if (MaxDepth-- == 0)
     return true;
-  } else if (isa<Argument>(V) || isa<LoadInst>(V)) {
-    return isNoNullArgumentOrLoad(V, DT);
+  if (!Visited.insert(V).second)
+    return false;
+
+  if (isCJUnsafePointer(V))
+    return true;
+
+  if (const SelectInst *Sel = dyn_cast<SelectInst>(V))
+    return containsCJUnsafePointer(Sel->getTrueValue(), Visited, MaxDepth) ||
+           containsCJUnsafePointer(Sel->getFalseValue(), Visited, MaxDepth);
+
+  if (const PHINode *PN = dyn_cast<PHINode>(V)) {
+    for (const Value *Incoming : PN->incoming_values())
+      if (containsCJUnsafePointer(Incoming, Visited, MaxDepth))
+        return true;
+    return false;
   }
+
+  if (const BitCastOperator *BC = dyn_cast<BitCastOperator>(V))
+    if (BC->getSrcTy()->isPointerTy())
+      return containsCJUnsafePointer(BC->getOperand(0), Visited, MaxDepth);
+
+  if (const GEPOperator *GEP = dyn_cast<GEPOperator>(V))
+    return containsCJUnsafePointer(GEP->getPointerOperand(), Visited, MaxDepth);
+
+  if (const AddrSpaceCastOperator *ASC = dyn_cast<AddrSpaceCastOperator>(V))
+    return containsCJUnsafePointer(ASC->getOperand(0), Visited, MaxDepth);
+
   return false;
 }
 
-// Determine whether the pointer V can be dereferenced at CtxI, that is,
-// determine whether the pointer V is null and is valid to derefernece.
-static bool isCJDeferenceablePointer(const Value *V, const Instruction *CtxI,
-                                     const DominatorTree *DT) {
-  if (!DT || !CtxI)
+static bool containsCJUnsafePointer(const Value *V) {
+  SmallPtrSet<const Value *, 32> Visited;
+  return containsCJUnsafePointer(V, Visited, 16);
+}
+
+// In Cangjie, pointer values are dereferenceable by default. The
+// llvm.cj.unsafe.pointer intrinsic marks the exceptional values that may not be
+// safe to dereference.
+static bool isCJDereferenceablePointer(const Value *V, const Instruction *CtxI,
+                                       const DominatorTree *DT) {
+  if (!DT || !CtxI || !V->getType()->isPointerTy())
     return false;
-  if (isa<Instruction>(V) && V->getType()->isPointerTy()) {
-    auto *Base = getUnderlyingObject(V);
-    // If Base is a normal instruction, check whether the type of Base is in
-    // stack or Base is cangjie malloc. In the case of Base dominates CtxI, V
-    // can safely dereference at CtxI.
-    return DT->dominates(Base, CtxI) && isNoNullPointer(Base, DT);
-  }
-  return false;
+  if (isa<ConstantPointerNull>(V) || isa<UndefValue>(V))
+    return false;
+  return !containsCJUnsafePointer(V);
 }
 
 /// Test if V is always a pointer to allocated and suitably aligned memory for
@@ -196,7 +110,7 @@ static bool isDereferenceableAndAlignedPointer(
     unsigned MaxDepth) {
   assert(V->getType()->isPointerTy() && "Base must be pointer");
 
-  if (CJPipeline && isCJDeferenceablePointer(V, CtxI, DT))
+  if (CJPipeline && isCJDereferenceablePointer(V, CtxI, DT))
     return true;
 
   // Recursion limit.
