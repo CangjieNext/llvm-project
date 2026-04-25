@@ -300,11 +300,6 @@ private:
   void EnumerateNamedMetadata(const Module &M);
 };
 
-/// Canonicalize use-list order to a deterministic bitcode-writer order before
-/// serialization. This mutates the in-memory module but does not change IR
-/// semantics.
-void CanonicalizeBitcodeWriterUseListOrder(Module &M);
-
 } // end namespace llvm
 
 #endif // LLVM_LIB_BITCODE_WRITER_VALUEENUMERATOR_H

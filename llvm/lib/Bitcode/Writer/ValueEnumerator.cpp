@@ -11,7 +11,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "ValueEnumerator.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Argument.h"
@@ -219,54 +218,6 @@ static void predictValueUseListOrderImpl(const Value *V, const Function *F,
   assert(List.size() == Stack.back().Shuffle.size() && "Wrong size");
   for (size_t I = 0, E = List.size(); I != E; ++I)
     Stack.back().Shuffle[I] = List[I].second;
-}
-
-static bool isBeforeInBitcodeUseListOrder(const Use &L, const Use &R,
-                                          unsigned ID, const OrderMap &OM) {
-  if (&L == &R)
-    return false;
-
-  auto LID = OM.lookup(L.getUser()).first;
-  auto RID = OM.lookup(R.getUser()).first;
-  bool IsGlobalValue = OM.isGlobalValue(ID);
-
-  if (LID < RID) {
-    if (RID <= ID)
-      if (!IsGlobalValue)
-        return true;
-    return false;
-  }
-  if (RID < LID) {
-    if (LID <= ID)
-      if (!IsGlobalValue)
-        return false;
-    return true;
-  }
-
-  if (LID <= ID)
-    if (!IsGlobalValue)
-      return L.getOperandNo() < R.getOperandNo();
-  return L.getOperandNo() > R.getOperandNo();
-}
-
-void llvm::CanonicalizeBitcodeWriterUseListOrder(Module &M) {
-  OrderMap OM = orderModule(M);
-
-  SmallVector<std::pair<Value *, unsigned>, 0> OrderedValues;
-  OrderedValues.reserve(OM.IDs.size());
-  for (const auto &Entry : OM.IDs)
-    OrderedValues.emplace_back(const_cast<Value *>(Entry.first),
-                               Entry.second.first);
-  llvm::sort(OrderedValues, llvm::less_second());
-
-  for (const auto &Entry : OrderedValues) {
-    Value *V = Entry.first;
-    unsigned ID = Entry.second;
-    if (V->use_empty() || std::next(V->use_begin()) == V->use_end())
-      continue;
-    V->sortUseList(
-        [&](const Use &L, const Use &R) { return isBeforeInBitcodeUseListOrder(L, R, ID, OM); });
-  }
 }
 
 static void predictValueUseListOrder(const Value *V, const Function *F,
