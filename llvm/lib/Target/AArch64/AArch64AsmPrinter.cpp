@@ -75,6 +75,65 @@ extern cl::opt<bool> EnableSafepointOutline;
 }
 namespace {
 
+constexpr unsigned StructArgMapInlineCapacity = 8;
+
+/// STATEPOINT carries tail-call intent through its custom flag bits.
+static bool isTailStatepoint(const MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::STATEPOINT) {
+    return false;
+  }
+  StatepointOpers SO(&MI);
+  return (SO.getFlags() & static_cast<uint64_t>(StatepointFlags::TailCall)) !=
+         0;
+}
+
+/// Tail-statepoints are only safe when the callee does not depend on any
+/// caller-frame-backed statepoint operands.  If the statepoint carries stack
+/// allocas, struct-live stack objects, or explicit stack pointers, lowering it
+/// as a real tail jump would pop the caller frame too early.
+static bool canEmitTailStatepoint(const MachineInstr &MI) {
+  if (!isTailStatepoint(MI)) {
+    return false;
+  }
+
+  StatepointOpers SO(&MI);
+  int FirstAllocaIdx = SO.getFirstAllocaIdx();
+  if (FirstAllocaIdx != -1) {
+    return false;
+  }
+
+  // Stack pointer metadata is only serialized when stack growth support is
+  // enabled. With stack growth disabled, StatepointOpers cannot reliably
+  // distinguish a missing stack-pointer section from a real one.
+  if (EnableStackGrow && SO.getFirstStackPtrIdx() != -1) {
+    return false;
+  }
+
+  SmallVector<std::pair<unsigned, signed>, StructArgMapInlineCapacity>
+      StructArgMap;
+  if (SO.getStructArgMap(StructArgMap) != 0) {
+    return false;
+  }
+
+  return true;
+}
+
+/// Only the last call-like STATEPOINT before a return can be turned into a
+/// real tail transfer. Earlier ones still have local work to do in the block.
+static bool isFinalTailStatepoint(const MachineInstr &MI) {
+  auto It = std::next(MI.getIterator());
+  auto End = MI.getParent()->end();
+  for (; It != End; ++It) {
+    if (It->isDebugInstr())
+      continue;
+    if (It->isReturn())
+      return true;
+    if (It->isCall() || It->getOpcode() == TargetOpcode::STATEPOINT)
+      return false;
+  }
+  return false;
+}
+
 class AArch64AsmPrinter : public AsmPrinter {
   AArch64MCInstLower MCInstLowering;
   StackMaps SM;
@@ -82,6 +141,9 @@ class AArch64AsmPrinter : public AsmPrinter {
   FaultMaps FM;
   const AArch64Subtarget *STI;
   bool ShouldEmitWeakSwiftAsyncExtendedFramePointerFlags = false;
+  /// Tail-call statepoints are emitted at the return site after the epilogue,
+  /// so keep the pending pseudo around until we see the matching return.
+  const MachineInstr *PendingTailStatepoint = nullptr;
 
 public:
   AArch64AsmPrinter(TargetMachine &TM, std::unique_ptr<MCStreamer> Streamer)
@@ -113,6 +175,14 @@ public:
                        const MachineInstr &MI);
   void LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
                        const MachineInstr &MI);
+  /// Returns true if the statepoint can be safely deferred for tail emission
+  /// after the epilogue.  This excludes runtime-sensitive callees that the
+  /// GC or thread tracking relies on.
+  bool canDeferTailStatepoint(const MachineInstr &MI) const;
+  /// Emit a statepoint as a real tail transfer (`B/BR`) instead of a normal
+  /// call once we have reached the return site.
+  void LowerTailSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
+                           const MachineInstr &MI);
   void LowerFAULTING_OP(const MachineInstr &MI);
 
   void LowerPATCHABLE_FUNCTION_ENTER(const MachineInstr &MI);
@@ -934,6 +1004,9 @@ void AArch64AsmPrinter::emitJumpTableInfo() {
 }
 
 void AArch64AsmPrinter::emitFunctionEntryLabel() {
+  // Tail-call statepoints are emitted when we later see the return, so each
+  // function starts with a clean pending state.
+  PendingTailStatepoint = nullptr;
   if (MF->getFunction().getCallingConv() == CallingConv::AArch64_VectorCall ||
       MF->getFunction().getCallingConv() ==
           CallingConv::AArch64_SVE_VectorCall ||
@@ -1336,9 +1409,52 @@ void AArch64AsmPrinter::emitGcStateCheck() {
   }
 }
 
+bool AArch64AsmPrinter::canDeferTailStatepoint(const MachineInstr &MI) const {
+  if (!canEmitTailStatepoint(MI) || !isFinalTailStatepoint(MI))
+    return false;
+
+  StatepointOpers SOpers(&MI);
+  if (SOpers.getID() == Cangjie::CJStatepointID::SafepointStub)
+    return false;
+
+  const MachineOperand &CallTarget = SOpers.getCallTarget();
+  if (!CallTarget.isGlobal())
+    return true;
+
+  const auto *Callee = dyn_cast<Function>(CallTarget.getGlobal());
+  if (!Callee)
+    return true;
+
+  if (tryGetCangjieStubCallNativeFunc(&MI, Callee))
+    return true;
+
+  auto &Caller = MI.getMF()->getFunction();
+  StringRef FuncName = Callee->getName();
+  if (FuncName.isGetGCPhase() ||
+      (Caller.isCangjieSafepointStub() && Callee->isCangjieSafePoint()) ||
+      FuncName.isSetDebugLocation() ||
+      FuncName.equals("CJ_MRT_PreInitializePackage") ||
+      FuncName.equals("CJ_MCC_ThrowException") ||
+      FuncName.equals("CJ_MCC_NewObject") ||
+      FuncName.equals("CJ_MCC_NewFinalizer") || Callee->isGetCJThreadId())
+    return false;
+
+  return true;
+}
+
 void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
                                         const MachineInstr &MI) {
   StatepointOpers SOpers(&MI);
+  if (canDeferTailStatepoint(MI)) {
+    if (PendingTailStatepoint) {
+      report_fatal_error("multiple pending tail-call statepoints in one function");
+    }
+    // Defer emission until the matching return so the normal epilogue is
+    // printed before the final tail branch.
+    PendingTailStatepoint = &MI;
+    return;
+  }
+  // Unsafe tail-statepoints fall back to the normal call path.
   // Lower call target and choose correct opcode
   const MachineOperand &CallTarget = SOpers.getCallTarget();
   if (CJPipeline) {
@@ -1403,6 +1519,48 @@ void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
   MCSymbol *MILabel = Ctx.createTempSymbol();
   OutStreamer.emitLabel(MILabel);
   SM.recordStatepoint(*MILabel, MI);
+}
+
+void AArch64AsmPrinter::LowerTailSTATEPOINT(MCStreamer &OutStreamer,
+                                            StackMaps &SM,
+                                            const MachineInstr &MI) {
+  StatepointOpers SOpers(&MI);
+  const MachineOperand &CallTarget = SOpers.getCallTarget();
+
+  // Record the stackmap at the tail-call site itself before we replace the
+  // return with a branch.
+  MCSymbol *MILabel = OutStreamer.getContext().createTempSymbol();
+  OutStreamer.emitLabel(MILabel);
+  SM.recordStatepoint(*MILabel, MI);
+
+  MCOperand CallTargetMCOp;
+  unsigned CallOpcode;
+  switch (CallTarget.getType()) {
+  case MachineOperand::MO_GlobalAddress:
+  case MachineOperand::MO_ExternalSymbol:
+    CallOpcode = AArch64::TCRETURNdi;
+    // Reuse the existing Cangjie stub lowering path.  It already knows how to
+    // turn TCRETURNdi into a direct branch when a call stub is required.
+    if (tryEmitCangjieSpecificCallByMOSym(&MI, CallTarget, CallOpcode)) {
+      return;
+    }
+    MCInstLowering.lowerOperand(CallTarget, CallTargetMCOp);
+    CallOpcode = AArch64::B;
+    break;
+  case MachineOperand::MO_Immediate:
+    CallTargetMCOp = MCOperand::createImm(CallTarget.getImm());
+    CallOpcode = AArch64::B;
+    break;
+  case MachineOperand::MO_Register:
+    CallTargetMCOp = MCOperand::createReg(CallTarget.getReg());
+    CallOpcode = AArch64::BR;
+    break;
+  default:
+    llvm_unreachable("Unsupported operand type in statepoint call target");
+  }
+
+  EmitToStreamer(OutStreamer,
+                 MCInstBuilder(CallOpcode).addOperand(CallTargetMCOp));
 }
 
 void AArch64AsmPrinter::LowerFAULTING_OP(const MachineInstr &FaultingMI) {
@@ -1492,6 +1650,13 @@ void AArch64AsmPrinter::emitInstruction(const MachineInstr *MI) {
   // Do any auto-generated pseudo lowerings.
   if (emitPseudoExpansionLowering(*OutStreamer, MI))
     return;
+
+  if (PendingTailStatepoint && MI->isReturn()) {
+    // The return is replaced by the delayed tail-statepoint emission.
+    LowerTailSTATEPOINT(*OutStreamer, SM, *PendingTailStatepoint);
+    PendingTailStatepoint = nullptr;
+    return;
+  }
 
   if (MI->getOpcode() == AArch64::ADRP) {
     for (auto &Opd : MI->operands()) {
