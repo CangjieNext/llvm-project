@@ -34,6 +34,9 @@ class LLVM_LIBRARY_VISIBILITY X86AsmPrinter : public AsmPrinter {
   std::unique_ptr<MCCodeEmitter> CodeEmitter;
   bool EmitFPOData = false;
   bool ShouldEmitWeakSwiftAsyncExtendedFramePointerFlags = false;
+  /// Tail-call statepoints are emitted when the matching return is seen so the
+  /// normal epilogue can be printed first.
+  const MachineInstr *PendingTailStatepoint = nullptr;
 
   // This utility class tracks the length of a stackmap instruction's 'shadow'.
   // It is used by the X86AsmPrinter to ensure that the stackmap shadow
@@ -85,6 +88,9 @@ class LLVM_LIBRARY_VISIBILITY X86AsmPrinter : public AsmPrinter {
   void LowerSTACKMAP(const MachineInstr &MI);
   void LowerPATCHPOINT(const MachineInstr &MI, X86MCInstLower &MCIL);
   void LowerSTATEPOINT(const MachineInstr &MI, X86MCInstLower &MCIL);
+  /// Emit a STATEPOINT as a real tail transfer once it has been proven safe
+  /// and we have reached the return site.
+  void LowerTailSTATEPOINT(const MachineInstr &MI, X86MCInstLower &MCIL);
   void LowerFAULTING_OP(const MachineInstr &MI, X86MCInstLower &MCIL);
   void LowerPATCHABLE_OP(const MachineInstr &MI, X86MCInstLower &MCIL);
 
@@ -178,6 +184,7 @@ public:
   }
   void emitGetCJTLSData(int64_t Offset);
   void emitCJSafepointOutlineStub() override;
+  bool canDeferTailStatepoint(const MachineInstr &MI) const;
 
 private:
   void emitCangjieCallStubInstImpl(const MachineInstr *MI, const Function *F,
