@@ -172,6 +172,24 @@ static void lowerCJPow(Function &F, CallInst *CI) {
   CI->setCalledFunction(CJPowFunc);
 }
 
+static bool lowerIdentityIntrinsic(Module &M, Intrinsic::ID ID) {
+  SmallVector<CallInst *, 16> ToRemove;
+  for (Function &F : M) {
+    if (F.getIntrinsicID() != ID)
+      continue;
+    for (User *U : F.users()) {
+      if (auto *CI = dyn_cast<CallInst>(U))
+        ToRemove.push_back(CI);
+    }
+  }
+
+  for (CallInst *CI : ToRemove) {
+    CI->replaceAllUsesWith(CI->getArgOperand(0));
+    CI->eraseFromParent();
+  }
+  return !ToRemove.empty();
+}
+
 static void replaceAddrpaceCastUsed(AddrSpaceCastInst *ACI, IntrinsicInst *II) {
   Value *Ptr = ACI->getPointerOperand();
   IRBuilder<> Builder(II);
@@ -437,19 +455,12 @@ static bool processCangjieIR(Module &M, unsigned OptLevel) {
   // Lower @llvm.cj.vfe.info intrinsic calls to their first argument (identity).
   // This intrinsic is used to carry VFE metadata through optimization passes
   // and must be removed before codegen.
-  if (Function *VFEInfoFn = M.getFunction("llvm.cj.vfe.info")) {
-    SmallVector<CallInst *, 16> ToRemove;
-    for (User *U : VFEInfoFn->users()) {
-      if (auto *CI = dyn_cast<CallInst>(U))
-        ToRemove.push_back(CI);
-    }
-    for (auto *CI : ToRemove) {
-      CI->replaceAllUsesWith(CI->getArgOperand(0));
-      CI->eraseFromParent();
-    }
-    if (!ToRemove.empty())
-      Changed = true;
-  }
+  Changed |= lowerIdentityIntrinsic(M, Intrinsic::cj_vfe_info);
+
+  // Lower @llvm.cj.unsafe.pointer intrinsic calls to their first argument
+  // (identity). The intrinsic only marks Cangjie pointers that may be unsafe to
+  // dereference for middle-end analysis and must not reach codegen.
+  Changed |= lowerIdentityIntrinsic(M, Intrinsic::cj_unsafe_pointer);
 
   llvm::Triple T(M.getTargetTriple());
   if (!T.isOSWindows()) {

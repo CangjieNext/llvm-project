@@ -572,6 +572,11 @@ def int_cj_get_fp_state         : Intrinsic<[llvm_i64_ty], [llvm_anyint_ty]>;
 def int_cj_reset_fp_state       : Intrinsic<[], []>;
 def int_cj_set_location         : Intrinsic<[], []>;
 def int_cj_blackhole           : Intrinsic<[llvm_ptr_ty], [llvm_ptr_ty]>;
+def int_cj_unsafe_pointer      : Intrinsic<[llvm_anyptr_ty],
+                                           [LLVMMatchType<0>],
+                                           [IntrNoMem, IntrWillReturn,
+                                            IntrSpeculatable,
+                                            NoCapture<ArgIndex<0>>]>;
 
 //===------------------- Cangjie generic Intrinsics ------------------------===//
 //

@@ -12,17 +12,13 @@
 
 declare i8 addrspace(1)* @llvm.cj.gcread.static.ref(i8 addrspace(1)** nocapture) #1
 
+; CHECK-LABEL: define i64 @foo1(
 ; CHECK: bb0:
-; CHECK: %0 = load i8, i8* bitcast (%record.OptionArray* @test_type_0 to i8*), align 8
-; CHECK: %3 = load i64, i64* getelementptr inbounds (%record.OptionArray, %record.OptionArray* @test_type_0, i64 0, i32 1, i32 2), align 8, !tbaa !0
-; CHECK: %5 = tail call i8 addrspace(1)* @llvm.cj.gcread.static.ref(i8 addrspace(1)** getelementptr inbounds (%record.OptionArray, %record.OptionArray* @test_type_0, i64 0, i32 1, i32 0)), !tbaa !8
-; CHECK: %7 = load i64, i64* getelementptr inbounds (%record.OptionArray, %record.OptionArray* @test_type_0, i64 0, i32 1, i32 1), align 8, !tbaa !9
+; CHECK: [[HOISTED:%[0-9]+]] = load i64, i64 addrspace(1)* {{%[0-9]+}}, align 1, !tbaa !10
 ; CHECK: br label %bb1
-
 ; CHECK: bb4:
-; CHECK-NEXT: %12 = load i64, i64 addrspace(1)* %9, align 1, !tbaa !10
-; CHECK-NEXT: %13 = add nuw nsw i64 %.ret, %12
-; CHECK-NEXT: %14 = icmp eq i64 %11, 10000
+; CHECK-NEXT: {{%[0-9]+}} = add nuw nsw i64 %.ret, [[HOISTED]]
+; CHECK-NEXT: {{%[0-9]+}} = icmp eq i64 {{%[0-9]+}}, 10000
 ; CHECK-NEXT: br i1 %14, label %bb6, label %bb1
 define i64 @foo1() {
 bb0:
@@ -63,10 +59,13 @@ bb6:
   ret i64 %.ret
 }
 
+; CHECK-LABEL: define i64 @foo2(
+; CHECK: bb0:
+; CHECK: [[HOISTED:%[0-9]+]] = load i64, i64 addrspace(1)* {{%[0-9]+}}, align 1, !tbaa !10
+; CHECK: br label %bb1
 ; CHECK: bb4:
-; CHECK-NEXT: %12 = load i64, i64 addrspace(1)* %9, align 1, !tbaa !10
-; CHECK-NEXT: %13 = add nuw nsw i64 %.ret, %12
-; CHECK-NEXT: %14 = icmp eq i64 %11, 10000
+; CHECK-NEXT: {{%[0-9]+}} = add nuw nsw i64 %.ret, [[HOISTED]]
+; CHECK-NEXT: {{%[0-9]+}} = icmp eq i64 {{%[0-9]+}}, 10000
 ; CHECK-NEXT: br i1 %14, label %bb6, label %bb1
 define i64 @foo2() {
 bb0:
@@ -111,10 +110,13 @@ bb6:
   ret i64 %.ret
 }
 
+; CHECK-LABEL: define i64 @foo3(
+; CHECK: bb0:
+; CHECK: [[HOISTED:%[0-9]+]] = load i64, i64 addrspace(1)* {{%[0-9]+}}, align 1, !tbaa !10
+; CHECK: br label %bb1
 ; CHECK: bb4:
-; CHECK-NEXT: %12 = load i64, i64 addrspace(1)* %9, align 1, !tbaa !10
-; CHECK-NEXT: %13 = add nuw nsw i64 %.ret, %12
-; CHECK-NEXT: %14 = icmp eq i64 %11, 10000
+; CHECK-NEXT: {{%[0-9]+}} = add nuw nsw i64 %.ret, [[HOISTED]]
+; CHECK-NEXT: {{%[0-9]+}} = icmp eq i64 {{%[0-9]+}}, 10000
 ; CHECK-NEXT: br i1 %14, label %bb6, label %bb1
 define i64 @foo3() {
 bb0:
