@@ -106,7 +106,7 @@ const static StdMap<unsigned, StringRef> RuntimeMap {
     {Intrinsic::cj_remove_exported_ref, "CJ_MCC_RemoveExportedRef"},
     {Intrinsic::cj_create_export_handle, "CJ_MCC_CreateExportHandle"},
     {Intrinsic::cj_blackhole, "CJ_LLVM_BlackHole"},
-    {Intrinsic::cj_get_lambda_addr, "CJ_MCC_GetJSLambdaAddr"}};
+    {Intrinsic::cj_get_lambda_addr, "CJ_MCC_GetJSLambdaAddr"},
     {Intrinsic::cj_malloc_local_object, "CJ_MCC_NewLocalObject"},
     {Intrinsic::cj_alloca_local_generic, "CJ_MCC_NewLocalObject"},
     {Intrinsic::cj_malloc_local_array_generic, "CJ_MCC_NewLocalGenericArray"}};
