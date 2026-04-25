@@ -59,8 +59,12 @@ enum class StatepointFlags {
   /// start of the call.  In particular, "live-in" values can be placed in
   /// unused argument registers or other non-callee saved registers.
   DeoptLiveIn = 2,
+  /// Indicates that the statepoint call site itself is in tail position and
+  /// should be lowered as a tail transfer when the target can do so while
+  /// preserving statepoint semantics.
+  TailCall = 4,
 
-  MaskAll = 3 ///< A bitmask that includes all valid flags.
+  MaskAll = 7 ///< A bitmask that includes all valid flags.
 };
 
 // These two are defined in IntrinsicInst since they're part of the
