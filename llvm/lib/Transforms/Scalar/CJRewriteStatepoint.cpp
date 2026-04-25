@@ -1548,6 +1548,64 @@ static void setStatepointDebugLocation(IRBuilder<> &Builder, CallBase *CI) {
   }
 }
 
+static bool isIgnorableTailCallInst(const Instruction &I) {
+  if (I.isDebugOrPseudoInst()) {
+    return true;
+  }
+  if (const auto *II = dyn_cast<IntrinsicInst>(&I)) {
+    Intrinsic::ID ID = II->getIntrinsicID();
+    // Ignore lifetime_end & assume & noalias Intrinsic
+    return ID == Intrinsic::lifetime_end || ID == Intrinsic::assume ||
+           ID == Intrinsic::experimental_noalias_scope_decl;
+  }
+  return false;
+}
+
+static const ReturnInst *getTailCallReturn(const BasicBlock &BB) {
+  const Instruction *Term = BB.getTerminator();
+  if (const auto *Ret = dyn_cast<ReturnInst>(Term)) {
+    return Ret;
+  }
+
+  const auto *BI = dyn_cast<BranchInst>(Term);
+  if (!BI || !BI->isUnconditional()) {
+    return nullptr;
+  }
+
+  const BasicBlock *Succ = BI->getSuccessor(0);
+  if (pred_size(Succ) != 1) {
+    return nullptr;
+  }
+
+  return dyn_cast<ReturnInst>(Succ->getTerminator());
+}
+
+/// Recognize calls that are followed only by ignorable instructions and an
+/// eventual return (possibly through a trivial branch-only block).
+static bool isPotentialTailCallSite(const CallInst &CI) {
+  if (CI.getType()->isTokenTy()) {
+    return false;
+  }
+
+  const BasicBlock *BB = CI.getParent();
+  if (!getTailCallReturn(*BB)) {
+    return false;
+  }
+
+  for (auto It = std::next(BasicBlock::const_iterator(CI)); It != BB->end();
+       ++It) {
+    const Instruction &I = *It;
+    if (isa<ReturnInst>(I) || isa<BranchInst>(I)) {
+      return true;
+    }
+    if (isIgnorableTailCallInst(I)) {
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
 static void
 makeStatepointExplicitImpl(CallBase *Call, /* to replace */
                            const SmallVectorImpl<Value *> &BasePtrs,
@@ -1571,6 +1629,13 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
   ArrayRef<Value *> FieldArgs(Result.FieldSet.getArrayRef());
   FunctionCallee CallTarget(Call->getFunctionType(), Call->getCalledOperand());
 
+  if (auto *CI = dyn_cast<CallInst>(Call)) {
+    CallInst::TailCallKind TailKind = CI->getTailCallKind();
+    if (TailKind != CallInst::TCK_NoTail && isPotentialTailCallSite(*CI)) {
+      Flags |= static_cast<uint32_t>(StatepointFlags::TailCall);
+    }
+  }
+
   // Create the statepoint given all the arguments
   GCStatepointInst *Token = nullptr;
   if (auto *CI = dyn_cast<CallInst>(Call)) {
@@ -1578,7 +1643,7 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
         StatepointID, NumPatchBytes, CallTarget, Flags, CallArgs, GCArgs,
         FieldArgs, "token");
 
-    SPCall->setTailCallKind(CI->getTailCallKind());
+    SPCall->setCallingConv(CI->getCallingConv());
     SPCall->setCallingConv(CI->getCallingConv());
 
     // set up function attrs directly on statepoint and return attrs later for
