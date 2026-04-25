@@ -96,6 +96,9 @@ bool X86AsmPrinter::runOnMachineFunction(MachineFunction &MF) {
 }
 
 void X86AsmPrinter::emitFunctionBodyStart() {
+  // Tail-call statepoints are emitted later when we see the matching return,
+  // so each function body starts with a clean pending state.
+  PendingTailStatepoint = nullptr;
   if (EmitFPOData) {
     if (auto *XTS =
         static_cast<X86TargetStreamer *>(OutStreamer->getTargetStreamer()))

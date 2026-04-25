@@ -22,6 +22,7 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
@@ -1273,6 +1274,13 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
                                             I.gc_transition_args_end());
 
   SI.StatepointFlags = I.getFlags();
+  // Preserve tail-position information explicitly because the backend only sees
+  // the lowered STATEPOINT pseudo, not the original CallInst.
+  // For gc.statepoint the original call has already been rewritten and
+  // validated at IR level, while generic tail-position checks are overly
+  // conservative because the intrinsic itself returns a token.
+  if (I.isTailCall())
+    SI.StatepointFlags |= static_cast<uint64_t>(StatepointFlags::TailCall);
   SI.NumPatchBytes = I.getNumPatchBytes();
   SI.EHPadBB = EHPadBB;
 

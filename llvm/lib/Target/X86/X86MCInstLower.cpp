@@ -62,8 +62,79 @@ static cl::opt<bool> DisableFP16TempConversion("disable-fp16-tempconversion",
 namespace llvm {
 extern cl::opt<bool> CJPipeline;
 extern cl::opt<bool> EnableSafepointOutline;
+extern cl::opt<bool> EnableStackGrow;
 }
 namespace {
+
+/// STATEPOINT carries tail-call intent through its explicit flag bits.
+static bool isTailStatepoint(const MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::STATEPOINT) {
+    return false;
+  }
+  StatepointOpers SO(&MI);
+  return (SO.getFlags() & static_cast<uint64_t>(StatepointFlags::TailCall)) !=
+         0;
+}
+
+/// Tail-statepoints are only safe when the callee no longer depends on caller
+/// frame data such as stack allocas or struct-live stack objects.
+static bool hasStatepointMetaCount(const MachineInstr &MI,
+                                   unsigned CountValueIdx) {
+  return CountValueIdx > 0 && CountValueIdx < MI.getNumOperands() &&
+         MI.getOperand(CountValueIdx - 1).isImm() &&
+         MI.getOperand(CountValueIdx - 1).getImm() == StackMaps::ConstantOp &&
+         MI.getOperand(CountValueIdx).isImm();
+}
+
+static bool canEmitTailStatepoint(const MachineInstr &MI) {
+  if (!isTailStatepoint(MI)) {
+    return false;
+  }
+
+  StatepointOpers SO(&MI);
+  if (SO.getNumPatchBytes() != 0) {
+    return false;
+  }
+  if (SO.getFirstAllocaIdx() != -1) {
+    return false;
+  }
+
+  // Older generic statepoints do not carry the Cangjie-specific trailing
+  // sections, so only inspect them when the corresponding count operand exists.
+  unsigned NumStructArgEntriesIdx = SO.getNumStructArgEntriesIdx();
+  if (hasStatepointMetaCount(MI, NumStructArgEntriesIdx)) {
+    unsigned NumStructArgEntries =
+        MI.getOperand(NumStructArgEntriesIdx).getImm();
+    if (NumStructArgEntries != 0) {
+      return false;
+    }
+
+    unsigned NumStackPtrsIdx = NumStructArgEntriesIdx + 1 +
+                               2 * NumStructArgEntries;
+    if (EnableStackGrow && hasStatepointMetaCount(MI, NumStackPtrsIdx) &&
+        MI.getOperand(NumStackPtrsIdx).getImm() != 0) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/// Only the last call-like STATEPOINT before a return can become a real tail
+/// transfer. Earlier ones still have local work left in the block.
+static bool isFinalTailStatepoint(const MachineInstr &MI) {
+  auto It = std::next(MI.getIterator());
+  auto End = MI.getParent()->end();
+  for (; It != End; ++It) {
+    if (It->isDebugInstr())
+      continue;
+    if (It->isReturn())
+      return true;
+    if (It->isCall() || It->getOpcode() == TargetOpcode::STATEPOINT)
+      return false;
+  }
+  return false;
+}
 
 /// X86MCInstLower - This class is used to lower an MachineInstr into an MCInst.
 class X86MCInstLower {
@@ -88,6 +159,39 @@ private:
 };
 
 } // end anonymous namespace
+
+bool X86AsmPrinter::canDeferTailStatepoint(const MachineInstr &MI) const {
+  if (!canEmitTailStatepoint(MI) || !isFinalTailStatepoint(MI))
+    return false;
+
+  StatepointOpers SOpers(&MI);
+  if (SOpers.getID() == Cangjie::CJStatepointID::SafepointStub)
+    return false;
+
+  const MachineOperand &CallTarget = SOpers.getCallTarget();
+  if (!CallTarget.isGlobal())
+    return true;
+
+  const auto *Callee = dyn_cast<Function>(CallTarget.getGlobal());
+  if (!Callee)
+    return true;
+
+  if (tryGetCangjieStubCallNativeFunc(&MI, Callee))
+    return true;
+
+  auto &Caller = MI.getMF()->getFunction();
+  StringRef FuncName = Callee->getName();
+  if (FuncName.isGetGCPhase() ||
+      (Caller.isCangjieSafepointStub() && Callee->isCangjieSafePoint()) ||
+      FuncName.isSetDebugLocation() ||
+      FuncName.equals("CJ_MRT_PreInitializePackage") ||
+      FuncName.equals("CJ_MCC_ThrowException") ||
+      FuncName.equals("CJ_MCC_NewObject") ||
+      FuncName.equals("CJ_MCC_NewFinalizer") || Callee->isGetCJThreadId())
+    return false;
+
+  return true;
+}
 
 /// A RAII helper which defines a region of instructions which can't have
 /// padding added between them for correctness.
@@ -1607,6 +1711,15 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
     }
   }
 
+  if (canDeferTailStatepoint(MI)) {
+    if (PendingTailStatepoint)
+      report_fatal_error("multiple pending tail-call statepoints in one function");
+    // Defer emission until the matching return so the normal epilogue is
+    // printed before the final tail jump.
+    PendingTailStatepoint = &MI;
+    return;
+  }
+
   if (unsigned PatchBytes = SOpers.getNumPatchBytes()) {
     emitX86Nops(*OutStreamer, PatchBytes, Subtarget);
   } else {
@@ -1665,6 +1778,64 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
   MCSymbol *MILabel = Ctx.createTempSymbol();
   OutStreamer->emitLabel(MILabel);
   SM.recordStatepoint(*MILabel, MI);
+}
+
+void X86AsmPrinter::LowerTailSTATEPOINT(const MachineInstr &MI,
+                                        X86MCInstLower &MCIL) {
+  assert(Subtarget->is64Bit() && "Statepoint currently only supports X86-64");
+
+  NoAutoPaddingScope NoPadScope(*OutStreamer);
+  StatepointOpers SOpers(&MI);
+  const MachineOperand &CallTarget = SOpers.getCallTarget();
+
+  if (CallTarget.isGlobal()) {
+    if (const auto *Callee = dyn_cast<Function>(CallTarget.getGlobal())) {
+      if (tryGetCangjieStubCallNativeFunc(&MI, Callee)) {
+        bool Emitted =
+            tryEmitCangjieSpecificCallByMOSym(&MI, CallTarget, X86::TAILJMPd64);
+        assert(Emitted && "tail-call stub emission unexpectedly failed");
+        (void)Emitted;
+        return;
+      }
+    }
+  }
+
+  // Record the stackmap at the tail-call site itself before replacing the
+  // return with a jump.
+  auto &Ctx = OutStreamer->getContext();
+  MCSymbol *MILabel = Ctx.createTempSymbol();
+  OutStreamer->emitLabel(MILabel);
+  SM.recordStatepoint(*MILabel, MI);
+
+  MCOperand CallTargetMCOp;
+  unsigned CallOpcode;
+  switch (CallTarget.getType()) {
+  case MachineOperand::MO_GlobalAddress:
+  case MachineOperand::MO_ExternalSymbol: {
+    CallTargetMCOp = MCIL.LowerSymbolOperand(
+        CallTarget, MCIL.GetSymbolFromOperand(CallTarget));
+    CallOpcode = X86::JMP_1;
+    break;
+  }
+  case MachineOperand::MO_Immediate:
+    CallTargetMCOp = MCOperand::createImm(CallTarget.getImm());
+    CallOpcode = X86::JMP_1;
+    break;
+  case MachineOperand::MO_Register:
+    if (Subtarget->useIndirectThunkCalls())
+      report_fatal_error("Lowering register tail statepoints with thunks not "
+                         "yet implemented.");
+    CallTargetMCOp = MCOperand::createReg(CallTarget.getReg());
+    CallOpcode = X86::JMP64r;
+    break;
+  default:
+    llvm_unreachable("Unsupported operand type in statepoint call target");
+  }
+
+  MCInst TailInst;
+  TailInst.setOpcode(CallOpcode);
+  TailInst.addOperand(CallTargetMCOp);
+  EmitAndCountInstruction(TailInst);
 }
 
 void X86AsmPrinter::LowerFAULTING_OP(const MachineInstr &FaultingMI,
@@ -2853,6 +3024,13 @@ void X86AsmPrinter::emitInstruction(const MachineInstr *MI) {
   const X86RegisterInfo *RI =
       MF->getSubtarget<X86Subtarget>().getRegisterInfo();
 
+  if (PendingTailStatepoint && MI->isReturn()) {
+    // The return is replaced by the delayed tail-statepoint emission.
+    LowerTailSTATEPOINT(*PendingTailStatepoint, MCInstLowering);
+    PendingTailStatepoint = nullptr;
+    return;
+  }
+
   if (MI->getOpcode() == X86::OR64rm) {
     for (auto &Opd : MI->operands()) {
       if (Opd.isSymbol() && StringRef(Opd.getSymbolName()) ==
@@ -3635,7 +3813,8 @@ void X86AsmPrinter::emitCangjieCallStubInstImpl(const MachineInstr *MI,
   // |  callee-addr                        |
   // |  param-stack-size (16 bytes align)  |
   // |  return addr                        |
-  if (Opcode == X86::TAILJMPd64) {
+  bool IsTailCall = Opcode == X86::TAILJMPd64;
+  if (IsTailCall) {
     Opcode = X86::JMP_1;
     // return addr has been push on stack already for jmp inst scenario
     // so we need to insert callee-addr and size before return addr
@@ -3671,9 +3850,12 @@ void X86AsmPrinter::emitCangjieCallStubInstImpl(const MachineInstr *MI,
   // Then flush the shadow so that we fill with nops before the call, not
   // after it.
   SMShadowTracker.emitShadowPadding(*OutStreamer, getSubtargetInfo());
+  if (IsTailCall)
+    SM.recordCJStackMap(*MI);
   // Then emit the call
   OutStreamer->emitInstruction(TemInst, getSubtargetInfo());
-  SM.recordCJStackMap(*MI);
+  if (!IsTailCall)
+    SM.recordCJStackMap(*MI);
   return;
 }
 
