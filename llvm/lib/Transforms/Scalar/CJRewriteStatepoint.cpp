@@ -23,6 +23,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/ADT/iterator_range.h"
+#include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
@@ -1548,6 +1549,116 @@ static void setStatepointDebugLocation(IRBuilder<> &Builder, CallBase *CI) {
   }
 }
 
+static bool isIgnorableTailCallInst(const Instruction &I) {
+  if (I.isDebugOrPseudoInst()) {
+    return true;
+  }
+  if (const auto *II = dyn_cast<IntrinsicInst>(&I)) {
+    Intrinsic::ID ID = II->getIntrinsicID();
+    // Ignore lifetime_end & assume & noalias Intrinsic
+    return ID == Intrinsic::lifetime_end || ID == Intrinsic::assume ||
+           ID == Intrinsic::experimental_noalias_scope_decl;
+  }
+  return false;
+}
+
+static const ReturnInst *getTailCallReturn(const BasicBlock &BB) {
+  const Instruction *Term = BB.getTerminator();
+  if (const auto *Ret = dyn_cast<ReturnInst>(Term)) {
+    return Ret;
+  }
+
+  const auto *BI = dyn_cast<BranchInst>(Term);
+  if (!BI || !BI->isUnconditional()) {
+    return nullptr;
+  }
+
+  const BasicBlock *Succ = BI->getSuccessor(0);
+  if (pred_size(Succ) != 1) {
+    return nullptr;
+  }
+
+  return dyn_cast<ReturnInst>(Succ->getTerminator());
+}
+
+/// Recognize calls that are followed only by ignorable instructions and an
+/// eventual return (possibly through a trivial branch-only block).
+static bool isPotentialTailCallSite(const CallInst &CI) {
+  if (CI.getType()->isTokenTy()) {
+    return false;
+  }
+
+  const BasicBlock *BB = CI.getParent();
+  if (!getTailCallReturn(*BB)) {
+    return false;
+  }
+
+  for (auto It = std::next(BasicBlock::const_iterator(CI)); It != BB->end();
+       ++It) {
+    const Instruction &I = *It;
+    if (isa<ReturnInst>(I) || isa<BranchInst>(I)) {
+      return true;
+    }
+    if (isIgnorableTailCallInst(I)) {
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
+/// Check whether a live value is actually needed after the call.  Values that
+/// die at the call only force extra relocations and can destroy tail position.
+static bool hasUseAfterCall(const Value *V, const CallBase *Call,
+                            DominatorTree &DT) {
+  const Instruction *Start = Call->getNextNode();
+  if (!Start) {
+    return false;
+  }
+  for (const Use &U : V->uses()) {
+    auto *UI = dyn_cast<Instruction>(U.getUser());
+    if (!UI || UI == Call) {
+      continue;
+    }
+    if (isIgnorableTailCallInst(*UI)) {
+      continue;
+    }
+
+    if (const auto *PN = dyn_cast<PHINode>(UI)) {
+      unsigned IncomingIdx =
+          PHINode::getIncomingValueNumForOperand(U.getOperandNo());
+      BasicBlock *IncomingBB = PN->getIncomingBlock(IncomingIdx);
+      if (IncomingBB == Call->getParent()) {
+        return true;
+      }
+      if (Instruction *IncomingTerm = IncomingBB->getTerminator();
+          isPotentiallyReachable(Start, IncomingTerm, nullptr, &DT))
+        return true;
+      continue;
+    }
+
+    if (isPotentiallyReachable(Start, UI, nullptr, &DT)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/// Remove statepoint live-ins that have no observable use after a tail-position
+/// call so the rewritten statepoint can still satisfy tail-call constraints.
+static void pruneTailDeadLiveVariables(const CallBase *Call,
+                                       SafepointRecord &Info,
+                                       DominatorTree &DT) {
+  const auto *CI = dyn_cast<CallInst>(Call);
+  if (!CI || !isPotentialTailCallSite(*CI)) {
+    return;
+  }
+
+  Info.LiveSet.remove_if(
+      [&](Value *LiveV) { return !hasUseAfterCall(LiveV, Call, DT); });
+}
+
 static void
 makeStatepointExplicitImpl(CallBase *Call, /* to replace */
                            const SmallVectorImpl<Value *> &BasePtrs,
@@ -1578,7 +1689,12 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
         StatepointID, NumPatchBytes, CallTarget, Flags, CallArgs, GCArgs,
         FieldArgs, "token");
 
-    SPCall->setTailCallKind(CI->getTailCallKind());
+    CallInst::TailCallKind TailKind = CI->getTailCallKind();
+    // The original call may only become tail-call eligible after we drop dead
+    // post-call live-ins from the statepoint live set.
+    if (TailKind != CallInst::TCK_NoTail && isPotentialTailCallSite(*CI))
+      TailKind = std::max(TailKind, CallInst::TCK_Tail);
+    SPCall->setTailCallKind(TailKind);
     SPCall->setCallingConv(CI->getCallingConv());
 
     // set up function attrs directly on statepoint and return attrs later for
@@ -2632,6 +2748,7 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
       assert(PointerToBase.count(LiveV) && "Missed base for derived pointer");
       return isa<Constant>(PointerToBase[LiveV]);
     });
+    pruneTailDeadLiveVariables(ToUpdate[&Info - Records.data()], Info, DT);
   }
 
   for (CallInst *CI : Holders)
