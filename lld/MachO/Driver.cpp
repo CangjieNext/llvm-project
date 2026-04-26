@@ -284,11 +284,6 @@ static Optional<StringRef> getBitcodePackageName(const BitcodeFile &file) {
 }
 
 static bool validateVisiblePkgModules() {
-  if (config->hideAllVisiblePkgs && !config->visiblePkgs.empty()) {
-    error("cannot combine --visible-pkgs=\"\" with non-empty --visible-pkgs");
-    return false;
-  }
-
   if (!config->hideAllVisiblePkgs && config->visiblePkgs.empty())
     return true;
 

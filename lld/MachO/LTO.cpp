@@ -45,9 +45,9 @@ static Optional<StringRef> getBitcodePackageName(const BitcodeFile &file) {
   return pkgName;
 }
 
-static bool shouldKeepVisibleForPkg(const BitcodeFile &file) {
-  if (config->hideAllVisiblePkgs || config->visiblePkgs.empty())
-    return false;
+static bool shouldExportBitcodeSymbols(const BitcodeFile &file) {
+  if (config->visiblePkgs.empty())
+    return !config->hideAllVisiblePkgs;
   Optional<StringRef> pkgName = getBitcodePackageName(file);
   return pkgName && config->visiblePkgs.count(*pkgName);
 }
@@ -84,7 +84,7 @@ void BitcodeCompiler::add(BitcodeFile &f) {
   ArrayRef<lto::InputFile::Symbol> objSyms = f.obj->symbols();
   std::vector<lto::SymbolResolution> resols;
   resols.reserve(objSyms.size());
-  bool keepVisibleForPkg = shouldKeepVisibleForPkg(f);
+  bool exportBitcodeSymbols = shouldExportBitcodeSymbols(f);
 
   // Provide a resolution to the LTO API for each symbol.
   bool exportDynamic =
@@ -112,9 +112,9 @@ void BitcodeCompiler::add(BitcodeFile &f) {
       r.FinalDefinitionInLinkageUnit = true;
     }
 
-    r.VisibleToRegularObj = sym->isUsedInRegularObj ||
-                            (r.Prevailing && r.ExportDynamic) ||
-                            keepVisibleForPkg;
+    r.VisibleToRegularObj =
+        sym->isUsedInRegularObj ||
+        (r.Prevailing && r.ExportDynamic && exportBitcodeSymbols);
 
     // Un-define the symbol so that we don't get duplicate symbol errors when we
     // load the ObjFile emitted by LTO compilation.
