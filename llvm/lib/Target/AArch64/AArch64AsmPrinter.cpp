@@ -117,6 +117,8 @@ public:
 
   StringRef getPassName() const override { return "AArch64 Assembly Printer"; }
 
+  StackMaps *getStackMaps() override { return &SM; }
+
   /// Wrapper for MCInstLowering.lowerOperand() for the
   /// tblgen'erated pseudo lowering.
   bool lowerOperand(const MachineOperand &MO, MCOperand &MCOp) const {
@@ -194,6 +196,13 @@ public:
 
     // We didn't modify anything.
     return false;
+  }
+
+protected:
+  void prepareForStatepointEmission(MachineFunction &MF) override {
+    AArch64FI = MF.getInfo<AArch64FunctionInfo>();
+    STI = &MF.getSubtarget<AArch64Subtarget>();
+    prepareMachineFunctionForEmission(MF, nullptr);
   }
 
   void emitMetadataAddress() override;
@@ -1369,6 +1378,14 @@ void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
   StatepointOpers SOpers(&MI);
   // Lower call target and choose correct opcode
   const MachineOperand &CallTarget = SOpers.getCallTarget();
+  if (isStatepointStackMapPrepass()) {
+    bool RecordAllRefInReg =
+        EnableSafepointOutline &&
+        SOpers.getID() == Cangjie::CJStatepointID::SafepointStub;
+    SM.recordCJStackMap(MI, RecordAllRefInReg);
+    return;
+  }
+
   if (CJPipeline) {
     uint64_t ID = SOpers.getID();
     // `call CJ_MCC_HandleSafepoint` in cangjie function.

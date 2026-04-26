@@ -115,6 +115,10 @@ public:
   /// The symbol for the entry in __patchable_function_entires.
   MCSymbol *CurrentPatchableFunctionEntrySym = nullptr;
 
+  /// True while clients are running STATEPOINT stack map collection without
+  /// producing the final instruction stream.
+  bool IsStatepointStackMapPrepass = false;
+
   /// The symbol for the current function. This is recalculated at the beginning
   /// of each call to runOnMachineFunction().
   MCSymbol *CurrentFnSym = nullptr;
@@ -411,6 +415,19 @@ public:
     return false;
   }
 
+  /// Return the target-specific stack map collector when the AsmPrinter owns
+  /// one. Targets without stack map support return nullptr.
+  virtual StackMaps *getStackMaps() { return nullptr; }
+
+  bool isStatepointStackMapPrepass() const {
+    return IsStatepointStackMapPrepass;
+  }
+
+  /// Run the target-specific STATEPOINT emission path against a null streamer
+  /// so clients can query the resulting stack map records without producing an
+  /// object or assembly file.
+  void emitStatepointStackMaps(MachineFunction &MF);
+
   //===------------------------------------------------------------------===//
   // Coarse grained IR lowering routines.
   //===------------------------------------------------------------------===//
@@ -418,6 +435,11 @@ public:
   /// This should be called when a new MachineFunction is being processed from
   /// runOnMachineFunction.
   virtual void SetupMachineFunction(MachineFunction &MF);
+
+  /// Initialize the per-function AsmPrinter state without requiring pass
+  /// manager analyses. This is used by lightweight clients such as the machine
+  /// outliner's stack map pre-scan.
+  virtual void prepareForStatepointEmission(MachineFunction &MF);
 
   /// This method emits the body and trailer for a function.
   void emitFunctionBody();
@@ -587,6 +609,11 @@ public:
   /// circumstances and our exception handling reqires that SP should be
   /// at the same place as it leaves the prologue.
   virtual void reloadSPForEpilogue(MachineFunction &) {}
+
+  /// Shared implementation for initializing per-function state in both the
+  /// normal pass pipeline and lightweight standalone emission paths.
+  void prepareMachineFunctionForEmission(
+      MachineFunction &MF, MachineOptimizationRemarkEmitter *RemarkEmitter);
 
   /// Targets should implement this to emit instructions.
   virtual void emitInstruction(const MachineInstr *) {

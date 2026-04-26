@@ -396,6 +396,49 @@ AsmPrinter::~AsmPrinter() {
   }
 }
 
+void AsmPrinter::emitStatepointStackMaps(MachineFunction &MF) {
+  if (!getStackMaps())
+    return;
+
+  StackCheckMap.clear();
+  SafepointStackMap.clear();
+  prepareForStatepointEmission(MF);
+
+  bool OldStatepointStackMapPrepass = IsStatepointStackMapPrepass;
+  IsStatepointStackMapPrepass = true;
+  for (MachineBasicBlock &MBB : MF) {
+    for (MachineInstr &MI : MBB) {
+      if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+        continue;
+
+      if (MCSymbol *S = MI.getPreInstrSymbol())
+        OutStreamer->emitLabel(S);
+      emitInstruction(&MI);
+      if (MCSymbol *S = MI.getPostInstrSymbol())
+        OutStreamer->emitLabel(S);
+    }
+  }
+  IsStatepointStackMapPrepass = OldStatepointStackMapPrepass;
+  if (MF.getFunction().hasCangjieGC()) {
+    for (auto SC : StackCheckMap) {
+      if (EnableStackGrow)
+        emitStackGrow(*SC.first);
+      else
+        emitSOFECall(*SC.first);
+    }
+    StackCheckMap.clear();
+
+    if (!EnableSafepointOutline) {
+      for (unsigned SafeIndex = 0; SafeIndex < SafepointStackMap.size();
+           ++SafeIndex)
+        emitCJSafepointInlineCall(SafeIndex);
+    }
+  }
+
+  StackCheckMap.clear();
+  SafepointStackMap.clear();
+}
+
 bool AsmPrinter::isPositionIndependent() const {
   return TM.isPositionIndependent();
 }
@@ -2296,7 +2339,9 @@ MCSymbol *AsmPrinter::getMBBExceptionSym(const MachineBasicBlock &MBB) {
   return Res.first->second;
 }
 
-void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
+void AsmPrinter::prepareMachineFunctionForEmission(
+    MachineFunction &MF, MachineOptimizationRemarkEmitter *RemarkEmitter) {
+  MMI = &MF.getMMI();
   this->MF = &MF;
   const Function &F = MF.getFunction();
 
@@ -2344,7 +2389,18 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
       CurrentFnSymForSize = CurrentFnBegin;
   }
 
-  ORE = &getAnalysis<MachineOptimizationRemarkEmitterPass>().getORE();
+  ORE = RemarkEmitter;
+}
+
+void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
+  MachineOptimizationRemarkEmitter *RemarkEmitter = nullptr;
+  if (auto *MORE = getAnalysisIfAvailable<MachineOptimizationRemarkEmitterPass>())
+    RemarkEmitter = &MORE->getORE();
+  prepareMachineFunctionForEmission(MF, RemarkEmitter);
+}
+
+void AsmPrinter::prepareForStatepointEmission(MachineFunction &MF) {
+  prepareMachineFunctionForEmission(MF, nullptr);
 }
 
 namespace {
