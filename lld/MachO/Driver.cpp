@@ -292,6 +292,7 @@ static bool validateVisiblePkgModules() {
   if (!config->hideAllVisiblePkgs && config->visiblePkgs.empty())
     return true;
 
+  config->hasVisiblePkgMatch = false;
   for (InputFile *file : inputFiles) {
     auto *bitcodeFile = dyn_cast<BitcodeFile>(file);
     if (!bitcodeFile)
@@ -303,6 +304,7 @@ static bool validateVisiblePkgModules() {
             "' for --visible-pkgs, expected <split-index>-<package-name>");
       return false;
     }
+    config->hasVisiblePkgMatch |= config->visiblePkgs.count(*pkgName) != 0;
   }
   return true;
 }
