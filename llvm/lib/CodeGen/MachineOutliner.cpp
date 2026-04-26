@@ -61,11 +61,13 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/CodeGen/AsmPrinter.h"
+#include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineOptimizationRemarkEmitter.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/CodeGen/StackMapEncode.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
@@ -82,6 +84,7 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/MC/MCStreamer.h"
 #include <functional>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -361,16 +364,13 @@ struct MachineOutliner : public ModulePass {
 
   static char ID;
 
-  raw_null_ostream NullStream;
-
-  std::unique_ptr<StackMaps> SM;
-
-  std::unique_ptr<MCStreamer> MCS;
-
   std::unique_ptr<AsmPrinter> ASM;
 
-  std::unique_ptr<TargetMachine> TM;
+  StackMaps *SM = nullptr;
 
+  DenseMap<const MachineInstr *, unsigned> StatepointToStackMapIdx;
+
+  MapVector<MachineInstr *, std::string> StackMapValueMap;
   /// Set to true if the outliner should consider functions with
   /// linkonceodr linkage.
   bool OutlineFromLinkOnceODRs = false;
@@ -388,12 +388,13 @@ struct MachineOutliner : public ModulePass {
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<MachineModuleInfoWrapperPass>();
+    AU.addRequired<GCModuleInfo>();
     AU.addPreserved<MachineModuleInfoWrapperPass>();
     AU.setPreservesAll();
     ModulePass::getAnalysisUsage(AU);
   }
 
-  MachineOutliner() : ModulePass(ID), SM(nullptr) {
+  MachineOutliner() : ModulePass(ID) {
     initializeMachineOutlinerPass(*PassRegistry::getPassRegistry());
   }
 
@@ -443,6 +444,16 @@ struct MachineOutliner : public ModulePass {
   /// strings from that tree.
   bool doOutline(Module &M, unsigned &OutlinedFunctionNum);
 
+  /// Return the stackmap callsite info collected for a STATEPOINT.
+  const StackMaps::CallsiteInfo *
+  getStatepointCallsiteInfo(const MachineInstr &MI) const;
+
+  /// Return the compressed stackmap data collected for a STATEPOINT.
+  std::unique_ptr<CompressedInfo>
+  createStatepointCompressedInfo(const MachineInstr &MI) const;
+
+  std::string getStatepointCompressedInfoHash(const MachineInstr &MI) const;
+
   /// Return a DISubprogram for OF if one exists, and null otherwise. Helper
   /// function for remark emission.
   DISubprogram *getSubprogramOrNull(const OutlinedFunction &OF) {
@@ -457,6 +468,11 @@ struct MachineOutliner : public ModulePass {
   /// These are used to construct a suffix tree.
   void populateMapper(InstructionMapper &Mapper, Module &M,
                       MachineModuleInfo &MMI);
+
+  /// Run the target AsmPrinter's STATEPOINT stack map collection against a
+  /// null streamer so that the outliner has the stack map records the backend
+  /// would eventually emit.
+  void collectStatepointStackMaps(Module &M, MachineModuleInfo &MMI);
 
   /// Initialize information necessary to output a size remark.
   /// FIXME: This should be handled by the pass manager, not the outliner.
@@ -1013,6 +1029,113 @@ void MachineOutliner::populateMapper(InstructionMapper &Mapper, Module &M,
   }
 }
 
+void MachineOutliner::collectStatepointStackMaps(Module &M,
+                                                 MachineModuleInfo &MMI) {
+  StatepointToStackMapIdx.clear();
+  if (!ASM || !SM)
+    return;
+
+  SM->reset();
+  for (Function &F : M) {
+    if (F.empty())
+      continue;
+
+    MachineFunction *MF = MMI.getMachineFunction(F);
+    if (!MF)
+      continue;
+
+    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+    if (!RunOnAllFunctions && !TII->shouldOutlineFromFunctionByDefault(*MF))
+      continue;
+    if (!TII->isFunctionSafeToOutlineFrom(*MF, OutlineFromLinkOnceODRs))
+      continue;
+    ASM->emitStatepointStackMaps(*MF);
+  }
+
+  const auto &InstrToCallsiteIdx = SM->getInstrToCallsiteIndexMap();
+  for (const auto &Entry : InstrToCallsiteIdx) {
+    const MachineInstr *MI = Entry.first;
+    if (MI->getOpcode() != TargetOpcode::STATEPOINT || Entry.second.empty())
+      continue;
+
+    assert(Entry.second.size() == 1 &&
+           "expected a single stack map record per statepoint");
+    StatepointToStackMapIdx[MI] = Entry.second.front();
+  }
+
+  for (Function &F : M) {
+    if (F.empty())
+      continue;
+
+    MachineFunction *MF = MMI.getMachineFunction(F);
+    if (!MF)
+      continue;
+
+    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+    if (!RunOnAllFunctions && !TII->shouldOutlineFromFunctionByDefault(*MF))
+      continue;
+    if (!TII->isFunctionSafeToOutlineFrom(*MF, OutlineFromLinkOnceODRs))
+      continue;
+
+    for (MachineBasicBlock &MBB : *MF) {
+      for (MachineInstr &MI : MBB) {
+        if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+          continue;
+
+        auto It = StatepointToStackMapIdx.find(&MI);
+        if (It == StatepointToStackMapIdx.end()) {
+          continue;
+        }
+
+        assert(It->second < SM->getCSInfos().size() &&
+               "invalid stack map index");
+        
+        StackMapValueMap[&MI] = getStatepointCompressedInfoHash(MI);
+      }
+    }
+  }
+}
+
+const StackMaps::CallsiteInfo *
+MachineOutliner::getStatepointCallsiteInfo(const MachineInstr &MI) const {
+  if (!SM || MI.getOpcode() != TargetOpcode::STATEPOINT)
+    return nullptr;
+
+  auto It = StatepointToStackMapIdx.find(&MI);
+  if (It == StatepointToStackMapIdx.end())
+    return nullptr;
+
+  const auto &CSInfos = SM->getCSInfos();
+  if (It->second >= CSInfos.size())
+    return nullptr;
+
+  return &CSInfos[It->second];
+}
+
+std::unique_ptr<CompressedInfo>
+MachineOutliner::createStatepointCompressedInfo(const MachineInstr &MI) const {
+  if (!SM || MI.getOpcode() != TargetOpcode::STATEPOINT)
+    return nullptr;
+
+  auto It = StatepointToStackMapIdx.find(&MI);
+  if (It == StatepointToStackMapIdx.end())
+    return nullptr;
+
+  return SM->createCompressedInfoForCallsite(It->second);
+}
+
+std::string MachineOutliner::getStatepointCompressedInfoHash(
+    const MachineInstr &MI) const {
+  if (!SM || MI.getOpcode() != TargetOpcode::STATEPOINT)
+    return "";
+
+  auto It = StatepointToStackMapIdx.find(&MI);
+  if (It == StatepointToStackMapIdx.end())
+    return "";
+
+  return SM->getCompressedInfoHashForCallsite(It->second);
+}
+
 void MachineOutliner::initSizeRemarkInfo(
     const Module &M, const MachineModuleInfo &MMI,
     StringMap<unsigned> &FunctionToInstrCount) {
@@ -1112,14 +1235,16 @@ bool MachineOutliner::runOnModule(Module &M) {
 bool MachineOutliner::doOutline(Module &M, unsigned &OutlinedFunctionNum) {
   MachineModuleInfo &MMI = getAnalysis<MachineModuleInfoWrapperPass>().getMMI();
 
-  if (!SM) {
-    auto Target = MMI.getTarget().getTarget();
-    TM = std::unique_ptr<TargetMachine>(Target.createTargetMachine("", "", "", TargetOptions(), None));
-    MCS = std::unique_ptr<MCStreamer>(Target.createNullStreamer(MMI.getContext()));
-    ASM = std::unique_ptr<AsmPrinter>(Target.createAsmPrinter(*TM, std::move(MCS)));
-    SM = std::make_unique<StackMaps>(*ASM);
+  if (!ASM) {
+    auto &Target = MMI.getTarget().getTarget();
+    auto &TM = const_cast<LLVMTargetMachine &>(MMI.getTarget());
+    std::unique_ptr<MCStreamer> MCS(Target.createNullStreamer(MMI.getContext()));
+    ASM =
+        std::unique_ptr<AsmPrinter>(Target.createAsmPrinter(TM, std::move(MCS)));
+    if (ASM)
+      ASM->setResolver(getResolver());
+    SM = ASM ? ASM->getStackMaps() : nullptr;
   }
-
 
   // If the user passed -enable-machine-outliner=always or
   // -enable-machine-outliner, the pass will run on all functions in the module.
@@ -1138,6 +1263,7 @@ bool MachineOutliner::doOutline(Module &M, unsigned &OutlinedFunctionNum) {
   // If the user specifies that they want to outline from linkonceodrs, set
   // it here.
   OutlineFromLinkOnceODRs = EnableLinkOnceODROutlining;
+  collectStatepointStackMaps(M, MMI);
   InstructionMapper Mapper;
 
   // Prepare instruction mappings for the suffix tree.
@@ -1177,6 +1303,7 @@ bool MachineOutliner::doOutline(Module &M, unsigned &OutlinedFunctionNum) {
       dbgs() << "Stopped outlining at iteration " << OutlineRepeatedNum
              << " because no changes were found.\n";
   });
-
+  if (ASM) 
+    ASM->setResolver(NULL);
   return OutlinedSomething;
 }
