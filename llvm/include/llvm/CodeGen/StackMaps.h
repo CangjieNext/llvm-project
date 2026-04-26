@@ -9,6 +9,7 @@
 #ifndef LLVM_CODEGEN_STACKMAPS_H
 #define LLVM_CODEGEN_STACKMAPS_H
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineInstr.h"
@@ -17,6 +18,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace llvm {
@@ -348,11 +351,15 @@ public:
     CSInfos.clear();
     ConstPool.clear();
     FnInfos.clear();
+    InstrToCallsiteIdx.clear();
   }
 
   using LocationVec = SmallVector<Location, 8>;
   using LiveOutVec = SmallVector<LiveOutReg, 8>;
   using ConstantPool = MapVector<uint64_t, uint64_t>;
+  using CallsiteIndexVec = SmallVector<unsigned, 1>;
+  using InstrToCallsiteIndexMap =
+      DenseMap<const MachineInstr *, CallsiteIndexVec>;
 
   struct FunctionInfo {
     uint64_t StackSize = 0;
@@ -415,13 +422,40 @@ public:
   /// afterwards.
   void serializeToStackMapSection();
 
-  void updateOrInsertFnInfo(const MCSymbol *FnSym, CallsiteInfo &CallInfo);
+  void updateOrInsertFnInfo(const MCSymbol *FnSym, CallsiteInfo &CallInfo,
+                           const MachineInstr *OriginMI = nullptr);
 
   /// Get call site info.
   CallsiteInfoList &getCSInfos() { return CSInfos; }
+  const CallsiteInfoList &getCSInfos() const { return CSInfos; }
+
+  /// Build compressed stack map data for a single callsite record.
+  std::unique_ptr<CompressedInfo>
+  createCompressedInfoForCallsite(unsigned CallsiteIndex) const;
+
+  /// Build compressed stack map data for the first callsite record emitted for
+  /// a MachineInstr.
+  std::unique_ptr<CompressedInfo>
+  createCompressedInfoForInstr(const MachineInstr &MI) const;
+
+  /// Build a stable string hash from compressed stack map data. Line number
+  /// data is intentionally excluded.
+  std::string getCompressedInfoHash(const CompressedInfo &Data) const;
+
+  /// Build a hash for one callsite record's compressed stack map data.
+  std::string getCompressedInfoHashForCallsite(unsigned CallsiteIndex) const;
+
+  /// Build a hash for the first callsite record emitted for a MachineInstr.
+  std::string getCompressedInfoHashForInstr(const MachineInstr &MI) const;
 
   /// Get function info.
   FnInfoMap &getFnInfos() { return FnInfos; }
+
+  /// Get the mapping from MachineInstrs to the stack map callsite records
+  /// emitted for them.
+  const InstrToCallsiteIndexMap &getInstrToCallsiteIndexMap() const {
+    return InstrToCallsiteIdx;
+  }
 
   void emitCangjieStackMaps(MCStreamer &OS);
 
@@ -438,6 +472,7 @@ private:
   CallsiteInfoList CSInfos;
   ConstantPool ConstPool;
   FnInfoMap FnInfos;
+  InstrToCallsiteIndexMap InstrToCallsiteIdx;
   bool IsX86_64 = false;
   bool IsAArch64 = false;
   bool IsARM = false;
