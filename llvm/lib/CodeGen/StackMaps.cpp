@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/StackMaps.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Twine.h"
@@ -37,12 +38,14 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetMachine.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <iterator>
 #include <map>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -735,7 +738,8 @@ StackMaps::parseRegisterLiveOutMask(const uint32_t *Mask) const {
 }
 
 void StackMaps::updateOrInsertFnInfo(const MCSymbol *FnSym,
-                                     CallsiteInfo &CallInfo) {
+                                     CallsiteInfo &CallInfo,
+                                     const MachineInstr *OriginMI) {
   auto Itr = FnInfos.find(FnSym);
   if (Itr == FnInfos.end()) {
     // create a new function info.
@@ -780,6 +784,8 @@ void StackMaps::updateOrInsertFnInfo(const MCSymbol *FnSym,
   // update callsite count.
   Itr->second.RecordCount++;
   CSInfos.emplace_back(CallInfo);
+  if (OriginMI)
+    InstrToCallsiteIdx[OriginMI].push_back(CSInfos.size() - 1);
 }
 
 MachineInstr::const_mop_iterator
@@ -976,7 +982,7 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
     }
     CSInfo.LineNumber = DIL->getLine();
   }
-  updateOrInsertFnInfo(AP.CurrentFnSym, CSInfo);
+  updateOrInsertFnInfo(AP.CurrentFnSym, CSInfo, &MI);
 }
 
 void StackMaps::recordStackMap(const MCSymbol &L, const MachineInstr &MI) {
@@ -1034,7 +1040,7 @@ void StackMaps::recordStatepoint(const MCSymbol &L, const MachineInstr &MI,
 
 void StackMaps::recordCJStackMap(const MachineInstr &MI,
                                  bool RecordAllRefInReg) {
-  const Triple TT(AP.MMI->getModule()->getTargetTriple());
+  const Triple TT(AP.TM.getTargetTriple());
   OffsetStepSize = TT.isARM() ? 4 : 8;
   MCSymbol *MILabel = AP.OutStreamer->getContext().createTempSymbol();
   AP.OutStreamer->emitLabel(MILabel);
@@ -1243,7 +1249,7 @@ void StackMaps::emitCangjieCompressedStackMaps(MCStreamer &OS) {
   MCContext &OutContext = OS.getContext();
   unsigned CSIdxStart = 0;
   unsigned CSIdxEnd = 0;
-  const Triple TT(AP.MMI->getModule()->getTargetTriple());
+  const Triple TT(AP.TM.getTargetTriple());
   bool IsWindows = TT.isOSWindows();
   OffsetStepSize = TT.isARM() ? 4 : 8;
   FuncPtrSize = TT.isARM() ? 4 : 8;
@@ -1262,6 +1268,179 @@ void StackMaps::emitCangjieCompressedStackMaps(MCStreamer &OS) {
   }
   OS.addBlankLine();
   reset();
+}
+
+std::unique_ptr<CompressedInfo>
+StackMaps::createCompressedInfoForCallsite(unsigned CallsiteIndex) const {
+  if (CallsiteIndex >= CSInfos.size())
+    return nullptr;
+
+  const Triple TT(AP.TM.getTargetTriple());
+  bool IsWindows = TT.isOSWindows();
+  OffsetStepSize = TT.isARM() ? 4 : 8;
+  FuncPtrSize = TT.isARM() ? 4 : 8;
+
+  unsigned CSIdxStart = 0;
+  for (auto const &FR : FnInfos) {
+    unsigned CSIdxEnd = CSIdxStart + FR.second.RecordCount;
+    if (CallsiteIndex >= CSIdxStart && CallsiteIndex < CSIdxEnd) {
+      auto Data = std::make_unique<CompressedInfo>(
+          (IsWindows && isX86_64()) ? X86WinCalleeSavedReg
+              : isX86_64() ? X86CalleeSavedReg
+              : isAArch64() ? AArch64CalleeSavedReg : ARMCalleeSavedReg);
+      prepareCompressedData(*Data, FR.second, CallsiteIndex, CallsiteIndex + 1);
+      return Data;
+    }
+    CSIdxStart = CSIdxEnd;
+  }
+
+  return nullptr;
+}
+
+std::unique_ptr<CompressedInfo>
+StackMaps::createCompressedInfoForInstr(const MachineInstr &MI) const {
+  auto It = InstrToCallsiteIdx.find(&MI);
+  if (It == InstrToCallsiteIdx.end() || It->second.empty())
+    return nullptr;
+
+  assert(It->second.size() == 1 &&
+         "expected a single stack map record per instruction");
+  return createCompressedInfoForCallsite(It->second.front());
+}
+
+static uint64_t getAbsForHash(int64_t Value) {
+  if (Value >= 0)
+    return static_cast<uint64_t>(Value);
+  return 0 - static_cast<uint64_t>(Value);
+}
+
+static void appendUInt64Vec(raw_ostream &OS, ArrayRef<uint64_t> Values) {
+  OS << "[";
+  for (unsigned I = 0, E = Values.size(); I != E; ++I) {
+    if (I)
+      OS << ",";
+    OS << Values[I];
+  }
+  OS << "]";
+}
+
+static void appendUInt32Vec(raw_ostream &OS, ArrayRef<uint32_t> Values) {
+  OS << "[";
+  for (unsigned I = 0, E = Values.size(); I != E; ++I) {
+    if (I)
+      OS << ",";
+    OS << Values[I];
+  }
+  OS << "]";
+}
+
+static void appendRegItemHash(raw_ostream &OS, const CompressedInfo &Data,
+                              unsigned RegIdx) {
+  OS << "R";
+  if (RegIdx >= Data.RegItems.Items.size()) {
+    OS << "<invalid:" << RegIdx << ">";
+    return;
+  }
+  OS << Data.RegItems.Items[RegIdx].RegBit;
+}
+
+static void appendSlotItemHash(raw_ostream &OS, const CompressedInfo &Data,
+                               unsigned SlotIdx) {
+  OS << "S";
+  if (SlotIdx >= Data.SlotItems.Items.size()) {
+    OS << "<invalid:" << SlotIdx << ">";
+    return;
+  }
+
+  const auto &Slot = Data.SlotItems.Items[SlotIdx];
+  OS << getAbsForHash(Slot.BaseOffset) << ":";
+  appendUInt64Vec(OS, Slot.SlotBit);
+  OS << ":";
+  appendUInt32Vec(OS, Slot.CompressedSlotBit);
+}
+
+static unsigned getDerivedInfoEnd(const CompressedInfo &Data,
+                                  unsigned StackMapItemIdx,
+                                  unsigned DerivedStartIdx) {
+  if (DerivedStartIdx == 0)
+    return 0;
+
+  unsigned DerivedEnd = Data.DerivedInfo.size();
+  unsigned CurStackMapIdx = 0;
+  for (const auto &StackMapItem : Data.StackMapItem) {
+    if (CurStackMapIdx++ <= StackMapItemIdx)
+      continue;
+
+    unsigned NextStartIdx = StackMapItem.second.DerivedInfoStartIdx;
+    if (NextStartIdx != 0 && NextStartIdx > DerivedStartIdx) {
+      DerivedEnd = NextStartIdx;
+      break;
+    }
+  }
+  return DerivedEnd;
+}
+
+std::string StackMaps::getCompressedInfoHash(const CompressedInfo &Data) const {
+  std::string Hash;
+  raw_string_ostream OS(Hash);
+
+  unsigned StackMapItemIdx = 0;
+  for (const auto &StackMapItem : Data.StackMapItem) {
+    const auto &Idx = StackMapItem.second;
+    if (StackMapItemIdx)
+      OS << "|";
+
+    OS << "CS" << StackMapItemIdx << "{";
+    appendRegItemHash(OS, Data, Idx.RegIdxPlusOne);
+    OS << ";";
+    appendSlotItemHash(OS, Data, Idx.SlotIdxPlusOne);
+
+    unsigned DerivedEnd =
+        getDerivedInfoEnd(Data, StackMapItemIdx, Idx.DerivedInfoStartIdx);
+    OS << ";D[";
+    for (unsigned I = Idx.DerivedInfoStartIdx; I != DerivedEnd; ++I) {
+      if (I != Idx.DerivedInfoStartIdx)
+        OS << ",";
+      if (I >= Data.DerivedInfo.size()) {
+        OS << "<invalid:" << I << ">";
+        break;
+      }
+      OS << "(" << Data.DerivedInfo[I].first << ","
+         << Data.DerivedInfo[I].second << ")";
+    }
+    OS << "]";
+
+    if (Idx.SPRegIdxPlusOne != 0 || Idx.SPSlotIdxPlusOne != 0) {
+      OS << ";";
+      appendRegItemHash(OS, Data, Idx.SPRegIdxPlusOne);
+      OS << ";";
+      appendSlotItemHash(OS, Data, Idx.SPSlotIdxPlusOne);
+    }
+
+    OS << "}";
+    ++StackMapItemIdx;
+  }
+
+  OS.flush();
+  return Hash;
+}
+
+std::string
+StackMaps::getCompressedInfoHashForCallsite(unsigned CallsiteIndex) const {
+  auto Data = createCompressedInfoForCallsite(CallsiteIndex);
+  if (!Data)
+    return "";
+
+  return getCompressedInfoHash(*Data);
+}
+
+std::string
+StackMaps::getCompressedInfoHashForInstr(const MachineInstr &MI) const {
+  auto Data = createCompressedInfoForInstr(MI);
+  if (!Data)
+    return "";
+
+  return getCompressedInfoHash(*Data);
 }
 
 static void setPrologueInfo(CompressedInfo &Data,
