@@ -40,6 +40,13 @@
 using namespace llvm;
 using namespace cangjie;
 
+static Type *getPointeeType(Type *Ty) {
+  auto *PT = dyn_cast<PointerType>(Ty);
+  if (!PT || PT->isOpaque())
+    return nullptr;
+  return PT->getNonOpaquePointerElementType();
+}
+
 // Print the liveset found at the insert location
 static cl::opt<bool> PrintLiveSet("cj-spp-print-liveset", cl::Hidden,
                                   cl::init(false));
@@ -940,7 +947,8 @@ bool StructLiveAnalysis::isStackContainGCPtr(Value *V, uint64_t Size) {
     Value *Def = V->stripPointerCasts();
     if (isMemoryContainsGCPtrType(Def->getType())) {
       Ret = true;
-    } else if (Def->getType()->getNonOpaquePointerElementType()->isStructTy()) {
+    } else if (Type *Pointee = getPointeeType(Def->getType());
+               Pointee && Pointee->isStructTy()) {
       if (containGCPtrByOffset(Def, Size)) {
         Ret = true;
       } else {
@@ -1108,7 +1116,8 @@ void StructLiveAnalysis::visitMemoryStore(StoreInst *SI,
     // Only if the PointerType and ValueType of Store Inst are equal,
     // we consider this store inst to be a define point.
     // And do nothing for partial store.
-    if (ValType == cast<PointerType>(BasePtr->getType())->getElementType())
+    if (Type *Pointee = getPointeeType(BasePtr->getType());
+        ValType == Pointee)
       addGCFieldsByMemory(BasePtr, AllocaDefs);
   }
 }
@@ -1225,8 +1234,7 @@ void StructLiveAnalysis::visitMemoryCallBase(
     unsigned Size = 0;
     Value *Arg = CB->getArgOperand(ArgIdx);
     Type *Ty = Arg->getType();
-    if (Ty->isPointerTy() && !Ty->isOpaquePointerTy()) {
-      auto *Pointee = Ty->getNonOpaquePointerElementType();
+    if (Type *Pointee = getPointeeType(Ty)) {
       if (isa<StructType>(Pointee) || isa<ArrayType>(Pointee))
         Size =
             static_cast<unsigned>(DL.getTypeAllocSize(Pointee).getFixedSize());

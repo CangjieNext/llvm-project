@@ -6225,7 +6225,14 @@ static bool isPtrContainsGCPtr(Type *Ty) {
   if (!Ty->isPointerTy()) {
     return false;
   }
-  Type *ET = Ty->getNonOpaquePointerElementType();
+  auto *PT = cast<PointerType>(Ty);
+  // Under opaque pointers we cannot recover the pointee shape here. Be
+  // conservative and disable the switch-to-lookup transform for pointer-typed
+  // PHI results rather than forming a lookup table that may later require an
+  // illegal ptr* materialization for Cangjie GC-aware pointers.
+  if (PT->isOpaque())
+    return true;
+  Type *ET = PT->getNonOpaquePointerElementType();
   if (isGCPointerType(ET)) {
     return true;
   }

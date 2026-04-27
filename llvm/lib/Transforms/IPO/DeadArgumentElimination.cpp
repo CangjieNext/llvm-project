@@ -65,6 +65,16 @@ extern cl::opt<bool> CJPipeline;
 
 namespace {
 
+static bool hasThisParamBasePtr(const Function &F) {
+  return F.hasFnAttribute("thisParamHasBP") || F.hasFnAttribute("record_mut");
+}
+
+static std::optional<unsigned> getMutThisArgNo(const Function &F) {
+  if (!hasThisParamBasePtr(F))
+    return std::nullopt;
+  return F.hasParamAttribute(0, Attribute::StructRet) ? 1u : 0u;
+}
+
 /// The dead argument elimination pass.
 class DAE : public ModulePass {
 protected:
@@ -649,13 +659,13 @@ void DeadArgumentEliminationPass::surveyFunction(const Function &F) {
     markValue(createArg(&F, ArgI), Result, MaybeLiveArgUses);
     // Clear the vector again for the next iteration.
     MaybeLiveArgUses.clear();
-    // In cangjie, if a gc struct argument is alive, then its base pointer
-    // should also be alive. The base pointer is the after argument of the
-    // struct pointer.
+    // In cangjie, a mut-this parameter may be followed by an explicit base
+    // pointer argument. Under opaque pointers we can no longer infer this from
+    // the pointee type, so rely on the frontend contract instead.
     if (CJPipeline) {
       Type *AT = AI->getType();
-      if (isGCPointerType(AT) &&
-          AT->getNonOpaquePointerElementType()->isStructTy() &&
+      auto MutThisArgNo = getMutThisArgNo(F);
+      if (MutThisArgNo && ArgI == *MutThisArgNo && isGCPointerType(AT) &&
           isLive(createArg(&F, ArgI))) {
         HasStructGCAlive = true;
         unsigned BasePtrIdx = ArgI + 1;

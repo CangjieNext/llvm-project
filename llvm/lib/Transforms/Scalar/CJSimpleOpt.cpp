@@ -35,6 +35,36 @@
 
 using namespace llvm;
 
+static Type *getPointeeType(Type *Ty) {
+  auto *PT = dyn_cast<PointerType>(Ty);
+  if (!PT || PT->isOpaque())
+    return nullptr;
+  return PT->getNonOpaquePointerElementType();
+}
+
+static Type *getValuePointeeType(const Value *V) {
+  V = V->stripPointerCasts();
+  if (auto *GEP = dyn_cast<GEPOperator>(V))
+    return GEP->getSourceElementType();
+  if (auto *AI = dyn_cast<AllocaInst>(V))
+    return AI->getAllocatedType();
+  if (auto *GV = dyn_cast<GlobalVariable>(V))
+    return GV->getValueType();
+  return getPointeeType(V->getType());
+}
+
+static Value *createByteOffsetPtr(IRBuilder<> &IRB, Value *Base, uint64_t Offset,
+                                  Type *ResultPtrTy) {
+  auto *BasePtrTy = cast<PointerType>(Base->getType());
+  unsigned AS = BasePtrTy->getAddressSpace();
+  Value *BaseI8 = IRB.CreateBitCast(Base, Type::getInt8PtrTy(IRB.getContext(), AS));
+  Value *OffsetPtr = IRB.CreateInBoundsGEP(IRB.getInt8Ty(), BaseI8,
+                                           IRB.getInt64(Offset));
+  if (OffsetPtr->getType() == ResultPtrTy)
+    return OffsetPtr;
+  return IRB.CreateBitCast(OffsetPtr, ResultPtrTy);
+}
+
 static cl::opt<bool> CJCallRetOpt("cj-callret-opt", cl::Hidden, cl::init(true));
 static cl::opt<bool> CJTsanSupport("cj-tsan-support-for-mutexopt", cl::Hidden,
                                    cl::init(false));
@@ -443,16 +473,13 @@ struct MutexLockLower {
     IRBuilder<> IRB(BB0);
     // Prepare mutex params.
     Value *MutexPtr = F->getArg(0);
-    Type *MutexType = MutexPtr->getType()->getNonOpaquePointerElementType();
+    Type *I64PtrTy = Type::getInt64PtrTy(F->getContext(), 1);
     Value *MutexCjthreadIdPtr =
-        IRB.CreateBitCast(IRB.CreateGEP(MutexType, MutexPtr, IRB.getInt32(8)),
-                          Type::getInt64PtrTy(F->getContext(), 1));
+        createByteOffsetPtr(IRB, MutexPtr, 8, I64PtrTy);
     Value *MutexOwnCountPtr =
-        IRB.CreateBitCast(IRB.CreateGEP(MutexType, MutexPtr, IRB.getInt32(16)),
-                          Type::getInt64PtrTy(F->getContext(), 1));
+        createByteOffsetPtr(IRB, MutexPtr, 16, I64PtrTy);
     Value *MutexStatePtr =
-        IRB.CreateBitCast(IRB.CreateGEP(MutexType, MutexPtr, IRB.getInt32(24)),
-                          Type::getInt64PtrTy(F->getContext(), 1));
+        createByteOffsetPtr(IRB, MutexPtr, 24, I64PtrTy);
     Value *Expected = ConstantInt::get(IRB.getInt64Ty(), 0);
     // 0x4: LOCKED flag which is defined in runtime
     Value *Desired = ConstantInt::get(IRB.getInt64Ty(), 0x4);
@@ -466,9 +493,7 @@ struct MutexLockLower {
 
     // Build BB1
     IRB.SetInsertPoint(BB1);
-    auto *MutexOwnCount = IRB.CreateLoad(
-        MutexOwnCountPtr->getType()->getNonOpaquePointerElementType(),
-        MutexOwnCountPtr);
+    auto *MutexOwnCount = IRB.CreateLoad(IRB.getInt64Ty(), MutexOwnCountPtr);
     Value *OwnCountInc =
         IRB.CreateAdd(MutexOwnCount, ConstantInt::get(IRB.getInt64Ty(), 1));
     IRB.CreateStore(OwnCountInc, MutexOwnCountPtr);
@@ -563,8 +588,8 @@ struct ICmpOptimization {
              isLoadFromArray(GEP->getPointerOperand(), --Times);
     else if (auto *BC = dyn_cast<BitCastInst>(Ptr)) {
       Value *OP = BC->getOperand(0);
-      return (isa<PointerType>(OP->getType()) &&
-              IsArrayType(OP->getType()->getNonOpaquePointerElementType())) ||
+      Type *PointeeTy = getValuePointeeType(OP);
+      return (PointeeTy && IsArrayType(PointeeTy)) ||
              isLoadFromArray(OP, --Times);
     }
     return false;

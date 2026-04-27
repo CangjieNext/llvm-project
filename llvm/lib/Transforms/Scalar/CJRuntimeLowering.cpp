@@ -38,6 +38,75 @@
 
 using namespace llvm;
 
+static PointerType *getPtrTy(LLVMContext &C, unsigned AS = 0) {
+  return PointerType::get(C, AS);
+}
+
+static StructType *getOrCreateExtensionDefType(LLVMContext &C) {
+  auto *ED = StructType::getTypeByName(C, "ExtensionDef");
+  if (ED)
+    return ED;
+
+  auto *I8 = Type::getInt8Ty(C);
+  auto *I16 = Type::getInt16Ty(C);
+  auto *I32 = Type::getInt32Ty(C);
+  auto *Ptr = getPtrTy(C);
+  ED = StructType::create(C, "ExtensionDef");
+  ED->setBody({I32, I8, I8, I16, Ptr, Ptr, Ptr, Ptr});
+  return ED;
+}
+
+static Type *getPointeeType(Type *Ty) {
+  auto *PT = dyn_cast<PointerType>(Ty);
+  if (!PT || PT->isOpaque())
+    return nullptr;
+  return PT->getNonOpaquePointerElementType();
+}
+
+static bool isTypeInfoGlobal(const GlobalVariable *GV) {
+  return GV &&
+         (GV->hasAttribute("CFileKlass") || GV->getName().endswith(".ti"));
+}
+
+static Value *normalizeTypeInfoValue(Value *V) {
+  V = V->stripPointerCasts();
+  auto *LI = dyn_cast<LoadInst>(V);
+  if (!LI)
+    return V;
+
+  Value *Ptr = LI->getPointerOperand()->stripPointerCasts();
+  auto *GV = dyn_cast<GlobalVariable>(Ptr);
+  if (isTypeInfoGlobal(GV))
+    return GV;
+  return V;
+}
+
+static GlobalVariable *getTypeInfoGlobal(Value *V) {
+  V = normalizeTypeInfoValue(V);
+  return dyn_cast<GlobalVariable>(V->stripPointerCasts());
+}
+
+static Value *normalizeTypeInfoArg(CallBase *CI, unsigned ArgNo) {
+  Value *Old = CI->getArgOperand(ArgNo);
+  Value *New = normalizeTypeInfoValue(Old);
+  if (New != Old) {
+    if (New->getType() != Old->getType()) {
+      IRBuilder<> IRB(CI);
+      New = IRB.CreatePointerBitCastOrAddrSpaceCast(New, Old->getType());
+    }
+    CI->setArgOperand(ArgNo, New);
+  }
+  return New;
+}
+
+static Value *castPointerArgToType(IRBuilder<> &IRB, Value *V, Type *DestTy) {
+  if (V->getType() == DestTy)
+    return V;
+  if (!V->getType()->isPointerTy() || !DestTy->isPointerTy())
+    return V;
+  return IRB.CreatePointerBitCastOrAddrSpaceCast(V, DestTy);
+}
+
 namespace llvm {
 extern cl::opt<bool> CJLTOOpt;
 extern cl::opt<bool> CangjieJIT;
@@ -116,7 +185,7 @@ struct LowerGetFieldOffset {
   uint64_t AttachedInt;
 
   LowerGetFieldOffset(CallBase *CI) : CI(CI) {
-    TI = CI->getArgOperand(0);
+    TI = normalizeTypeInfoValue(CI->getArgOperand(0));
     FieldIndex = CI->getArgOperand(1);
     AttachedOffset = CI->getArgOperand(2);
     AttachedInt = dyn_cast<ConstantInt>(AttachedOffset)->getZExtValue();
@@ -169,12 +238,12 @@ struct LowerGetFieldOffset {
     Value *Offset = nullptr;
     StructType *KlassType =
         StructType::getTypeByName(IRB.getContext(), "TypeInfo");
-    Value *TICast = IRB.CreateBitCast(TI, KlassType->getPointerTo());
+    Value *TICast = IRB.CreateBitCast(TI, getPtrTy(IRB.getContext()));
 
     Idxs.push_back(IRB.getInt32(0));
     Idxs.push_back(IRB.getInt32(CIT_SUPER));
     Value *ElemPtr = IRB.CreateGEP(KlassType, TICast, {Idxs}, "", true);
-    Value *Elem = IRB.CreateLoad(KlassType->getPointerTo(), ElemPtr, "");
+    Value *Elem = IRB.CreateLoad(getPtrTy(IRB.getContext()), ElemPtr, "");
     Idxs.clear();
     Idxs.push_back(IRB.getInt32(0));
     Idxs.push_back(IRB.getInt32(CIT_TYPE));
@@ -208,11 +277,11 @@ struct LowerGetFieldOffset {
     Value *Offset = nullptr;
     StructType *KlassType =
         StructType::getTypeByName(IRB.getContext(), "TypeInfo");
-    Value *TICast = IRB.CreateBitCast(TI, KlassType->getPointerTo());
+    Value *TICast = IRB.CreateBitCast(TI, getPtrTy(IRB.getContext()));
     Idxs.push_back(IRB.getInt32(0));
     Idxs.push_back(IRB.getInt32(CIT_OFFSETS));
     Value *OffsetsPtr = IRB.CreateGEP(KlassType, TICast, {Idxs}, "", true);
-    Type *Int32PtrTy = I32Ty->getPointerTo();
+    Type *Int32PtrTy = getPtrTy(IRB.getContext());
     Value *Offsets = IRB.CreateLoad(Int32PtrTy, OffsetsPtr);
     Idxs.clear();
     Idxs.push_back(FieldIndex);
@@ -223,17 +292,21 @@ struct LowerGetFieldOffset {
   }
 
   bool isRawArrayOrVArray(Value *V) {
-    CallInst *CI = dyn_cast<CallInst>(V->stripPointerCasts());
+    CallBase *CI = dyn_cast<CallBase>(V->stripPointerCasts());
     if (!CI || CI->arg_size() != 3) // 3: llvm.cj.get.type.info arg num
       return false;
 
-    auto CE = dyn_cast<ConstantExpr>(CI->getArgOperand(0));
-    if (!CE)
+    Value *TypeTemplate = CI->getArgOperand(0)->stripPointerCasts();
+    auto *TT = dyn_cast<GlobalVariable>(TypeTemplate);
+    if (!TT) {
+      auto *CE = dyn_cast<ConstantExpr>(CI->getArgOperand(0));
+      if (!CE)
+        return false;
+      TT = dyn_cast<GlobalVariable>(CE->getOperand(0));
+    }
+    if (!TT)
       return false;
-
-    auto *TT = dyn_cast<GlobalVariable>(CE->getOperand(0));
-    if (TT->getName().equals("VArray.tt") ||
-        TT->getName().equals("RawArray.tt"))
+    if (TT->getName() == "VArray.tt" || TT->getName() == "RawArray.tt")
       return true;
 
     return false;
@@ -302,6 +375,7 @@ public:
 
   void replaceWithRuntimeFunc(CallBase *CI, bool GCLeafFunc, bool GCMalloc) {
     CI->setCalledFunction(getOrInsertRuntimeFunc(CI, GCLeafFunc, GCMalloc));
+    reconcileCallArgsWithCallee(CI);
   }
 
   // cj.heapmalloc.class (i8* bitcast (TypeInfo* @Klass.ti to i8*), i32 size)
@@ -317,7 +391,9 @@ public:
       CI->setArgOperand(1, V);
     };
     auto GetTISizePointer = [this](Value *TI, IRBuilder<> &IRB) -> Value * {
-      Type *Ty = TI->getType()->getNonOpaquePointerElementType();
+      Type *Ty = getPointeeType(TI->getType());
+      if (!Ty)
+        Ty = StructType::getTypeByName(M.getContext(), "TypeInfo");
       if (isa<GlobalVariable>(TI) || isa<StructType>(Ty))
         return IRB.CreateInBoundsGEP(Ty, TI,
                                      {IRB.getInt32(0), IRB.getInt32(CIT_SIZE)});
@@ -327,10 +403,10 @@ public:
       auto *SL = M.getDataLayout().getStructLayout(ST);
       auto *GEP =
           IRB.CreateGEP(Ty, TI, {IRB.getInt32(SL->getElementOffset(CIT_SIZE))});
-      return IRB.CreateBitCast(GEP, IRB.getInt32Ty()->getPointerTo());
+      return IRB.CreateBitCast(GEP, getPtrTy(IRB.getContext()));
     };
 
-    auto *TI = CI->getArgOperand(0)->stripPointerCasts();
+    auto *TI = normalizeTypeInfoArg(CI, 0)->stripPointerCasts();
     auto *GV = dyn_cast<GlobalVariable>(TI);
     if (CI->hasMetadata("TrustedSize") ||
         (GV && GV->hasAttribute("NotModifiableClass"))) {
@@ -343,8 +419,8 @@ public:
     }
     IRBuilder<> IRB(CI);
     auto *Ptr = GetTISizePointer(TI, IRB);
-    assert(Ptr->getType()->getNonOpaquePointerElementType() ==
-           IRB.getInt32Ty());
+    assert((!getPointeeType(Ptr->getType()) ||
+            getPointeeType(Ptr->getType()) == IRB.getInt32Ty()));
     auto *LI = dyn_cast<Instruction>(IRB.CreateLoad(IRB.getInt32Ty(), Ptr));
     LI->setMetadata(LLVMContext::MD_invariant_load, MDNode::get(LI->getContext(), {}));
     LI->setDebugLoc(CI->getDebugLoc());
@@ -387,6 +463,7 @@ public:
                                     CI->getFunctionType(), false);
     }
     CI->setCalledFunction(Func);
+    reconcileCallArgsWithCallee(CI);
   }
 
   void replaceNewWeakRefFunc(CallBase *CI) {
@@ -397,6 +474,7 @@ public:
                                     CI->getFunctionType(), false);
     }
     CI->setCalledFunction(Func);
+    reconcileCallArgsWithCallee(CI);
   }
 
   // llvm.cj.alloca.generic(TypeInfo* ti, i64 size)
@@ -411,7 +489,8 @@ public:
 
   void replaceIsReference(CallBase *CI) {
     IRBuilder<> IRB(CI);
-    Value *Arg = CI->getArgOperand(0)->stripPointerCasts();
+    Value *Arg =
+        normalizeTypeInfoValue(CI->getArgOperand(0))->stripPointerCasts();
     if (auto *GV = dyn_cast<GlobalVariable>(Arg)) {
       if (Value *Res = TypeInfo::getReferenceType(GV)) {
         CI->replaceAllUsesWith(Res);
@@ -422,8 +501,8 @@ public:
     StructType *ST = StructType::getTypeByName(C, "TypeInfo");
     assert(ST && "TypeInfo type doesn't exist!");
     Value *TypePtr = Arg;
-    if (Arg->getType()->getNonOpaquePointerElementType() != ST) {
-      TypePtr = IRB.CreateBitCast(Arg, ST->getPointerTo());
+    if (getPointeeType(Arg->getType()) != ST) {
+      TypePtr = IRB.CreateBitCast(Arg, getPtrTy(C));
     }
     SmallVector<Value *> Idxs;
     Idxs.push_back(IRB.getInt32(0));
@@ -439,6 +518,7 @@ public:
 
   // llvm.cj.gcmalloc.array(TypeInfo* @Klass.ti, i64 length, i64 elem.size)
   void replaceNewArray(CallBase *CI) {
+    normalizeTypeInfoArg(CI, 0);
     uint64_t Size = 0; // 0 is slowpath, others is fastpath.
     if (EnableCJNewArrayFast && !CangjieJIT) {
       auto *LengthOp = dyn_cast<ConstantInt>(CI->getArgOperand(1));
@@ -469,17 +549,19 @@ public:
 
   void replaceIsTypeInfoEqual(CallBase *CI) {
     IRBuilder<> IRB(CI);
-    Value *Arg0 = CI->getArgOperand(0)->stripPointerCasts();
-    Value *Arg1 = CI->getArgOperand(1)->stripPointerCasts();
+    Value *Arg0 =
+        normalizeTypeInfoValue(CI->getArgOperand(0))->stripPointerCasts();
+    Value *Arg1 =
+        normalizeTypeInfoValue(CI->getArgOperand(1))->stripPointerCasts();
     StructType *ST = StructType::getTypeByName(C, "TypeInfo");
     assert(ST && "TypeInfo type doesn't exist!");
     Value *TypePtr0 = Arg0;
-    if (Arg0->getType()->getNonOpaquePointerElementType() != ST) {
-      TypePtr0 = IRB.CreateBitCast(Arg0, ST->getPointerTo());
+    if (getPointeeType(Arg0->getType()) != ST) {
+      TypePtr0 = IRB.CreateBitCast(Arg0, getPtrTy(C));
     }
     Value *TypePtr1 = Arg1;
-    if (Arg1->getType()->getNonOpaquePointerElementType() != ST) {
-      TypePtr1 = IRB.CreateBitCast(Arg1, ST->getPointerTo());
+    if (getPointeeType(Arg1->getType()) != ST) {
+      TypePtr1 = IRB.CreateBitCast(Arg1, getPtrTy(C));
     }
     SmallVector<Value *> Idxs;
     Idxs.push_back(IRB.getInt32(0));
@@ -504,7 +586,7 @@ public:
       Func = Itr->second;
     } else {
       Type *boolTy = IRB.getInt1Ty();
-      Type *I8Ptr = IRB.getInt8PtrTy();
+      Type *I8Ptr = getPtrTy(C);
       FunctionType *FT = FunctionType::get(boolTy, {I8Ptr, I8Ptr, I8Ptr}, false);
       Func = M.declareCJRuntimeFunc(Callee, FT, true, false);
       auto FnAttrs = CI->getCalledFunction()->getAttributes().getFnAttrs();
@@ -515,10 +597,7 @@ public:
     }
     assert(Func != nullptr && "replaceIsTupleTypeOf failed.");
     CI->setCalledFunction(Func);
-    if (CI->getArgOperand(0)->getType() == IRB.getInt8PtrTy(1)) {
-      auto ObjCast = IRB.CreateAddrSpaceCast(CI->getArgOperand(0), IRB.getInt8PtrTy(0));
-      CI->setArgOperand(0, ObjCast);
-    }
+    reconcileCallArgsWithCallee(CI);
   }
 
   // %0 = getelementptr i8, i8* %ti, i32 72
@@ -535,51 +614,45 @@ public:
   // %10 = load i8*, i8** %9
   void replaceGetVTableFunc(CallBase *CB) {
     IRBuilder<> IRB(CB);
+    auto *FuncPtrTy = CB->getType();
+    auto *FuncPtrPtrTy = PointerType::get(FuncPtrTy, 0);
     auto *TI = CB->getArgOperand(0);
     auto *ST = StructType::getTypeByName(CB->getContext(), "TypeInfo");
     auto *SL = CB->getModule()->getDataLayout().getStructLayout(ST);
     auto VOffset = SL->getElementOffset(CIT_VTABLE);
     auto *GEP0 =
-        IRB.CreateGEP(TI->getType()->getNonOpaquePointerElementType(), TI,
+        IRB.CreateGEP(IRB.getInt8Ty(), TI,
                       {ConstantInt::get(IRB.getInt32Ty(), VOffset)});
-    auto *BS0 = IRB.CreateBitCast(
-        GEP0, IRB.getInt8PtrTy()->getPointerTo()->getPointerTo());
-    auto *LI0 =
-        IRB.CreateLoad(BS0->getType()->getNonOpaquePointerElementType(), BS0);
+    auto *BS0 = IRB.CreateBitCast(GEP0, FuncPtrPtrTy);
+    auto *LI0 = IRB.CreateLoad(FuncPtrTy, BS0);
     LI0->setMetadata(LLVMContext::MD_virtual_call,
                      MDNode::get(CB->getContext(), {}));
     LI0->setMetadata(LLVMContext::MD_invariant_load,
                      MDNode::get(CB->getContext(), {}));
-    auto *GEP1 = IRB.CreateGEP(LI0->getType()->getNonOpaquePointerElementType(),
-                               LI0, {CB->getArgOperand(1)});
-    auto *LI1 =
-        IRB.CreateLoad(GEP1->getType()->getNonOpaquePointerElementType(), GEP1);
+    auto *GEP1 = IRB.CreateGEP(FuncPtrTy, LI0, {CB->getArgOperand(1)});
+    auto *LI1 = IRB.CreateLoad(FuncPtrTy, GEP1);
     LI1->setMetadata(LLVMContext::MD_invariant_load,
                      MDNode::get(CB->getContext(), {}));
 
-    auto *Int8PtrTy = Type::getInt8PtrTy(C);
     auto *Callee = getOrInsertRuntimeFunc(CB, true, false,
-      // CJ_MCC_UpdateVMT: void(*)(i8*, i8*, i8*)
-      FunctionType::get(Type::getVoidTy(C), {Int8PtrTy, Int8PtrTy, Int8PtrTy}, false));
+      FunctionType::get(Type::getVoidTy(C),
+                        {CB->getArgOperand(0)->getType(),
+                         CB->getArgOperand(3)->getType(), LI1->getType()},
+                        false));
     IRB.CreateCall(Callee, {CB->getArgOperand(0), CB->getArgOperand(3), LI1});
 
-    auto *BS1 = IRB.CreateBitCast(
-        LI1, StructType::getTypeByName(CB->getContext(), "ExtensionDef")
-                 ->getPointerTo());
+    auto *BS1 = IRB.CreateBitCast(LI1, getPtrTy(CB->getContext()));
+    auto *ED = getOrCreateExtensionDefType(CB->getContext());
     auto *GEP2 =
-        IRB.CreateGEP(BS1->getType()->getNonOpaquePointerElementType(), BS1,
+        IRB.CreateGEP(ED, BS1,
                       {ConstantInt::get(IRB.getInt64Ty(), 0),
                        ConstantInt::get(IRB.getInt32Ty(), ET_FUNC_TABLE)});
-    auto *BS2 = IRB.CreateBitCast(
-        GEP2, IRB.getInt8PtrTy()->getPointerTo()->getPointerTo());
-    auto *LI2 =
-        IRB.CreateLoad(BS2->getType()->getNonOpaquePointerElementType(), BS2);
+    auto *BS2 = IRB.CreateBitCast(GEP2, FuncPtrPtrTy);
+    auto *LI2 = IRB.CreateLoad(FuncPtrTy, BS2);
     LI2->setMetadata(LLVMContext::MD_invariant_load,
                      MDNode::get(CB->getContext(), {}));
-    auto *GEP3 = IRB.CreateGEP(LI2->getType()->getNonOpaquePointerElementType(),
-                               LI2, {CB->getArgOperand(2)});
-    auto *LI3 =
-        IRB.CreateLoad(GEP3->getType()->getNonOpaquePointerElementType(), GEP3);
+    auto *GEP3 = IRB.CreateGEP(FuncPtrTy, LI2, {CB->getArgOperand(2)});
+    auto *LI3 = IRB.CreateLoad(FuncPtrTy, GEP3);
     LI3->setMetadata(LLVMContext::MD_intro_type,
                      CB->getMetadata(LLVMContext::MD_intro_type));
     LI3->setMetadata(LLVMContext::MD_func_table,
@@ -595,10 +668,13 @@ public:
     if (ObjTypeMD) {
       auto *VFEInfoFn = Intrinsic::getDeclaration(
           CB->getModule(), Intrinsic::cj_vfe_info);
-      Result = IRB.CreateCall(VFEInfoFn,
-                              {LI3, MetadataAsValue::get(CB->getContext(),
-                                                         ObjTypeMD),
-                               FuncOffset});
+      Value *VFEArg0 = castPointerArgToType(
+          IRB, LI3, VFEInfoFn->getFunctionType()->getParamType(0));
+      auto *VFECall = IRB.CreateCall(
+          VFEInfoFn,
+          {VFEArg0, MetadataAsValue::get(CB->getContext(), ObjTypeMD),
+           FuncOffset});
+      Result = castPointerArgToType(IRB, VFECall, LI3->getType());
     }
     CB->replaceAllUsesWith(Result);
     CB->eraseFromParent();
@@ -606,20 +682,21 @@ public:
 
   void replaceGetMTableFunc(CallBase *CB) {
     auto &C = CB->getContext();
+    auto *FuncPtrTy = CB->getType();
+    auto *FuncPtrPtrTy = PointerType::get(FuncPtrTy, 0);
     auto *Callee = getOrInsertRuntimeFunc(
         CB, true, false,
         // CJ_MCC_GetMTable: i8*(*)(i8*, i8*)
         FunctionType::get(
-            Type::getInt8PtrTy(C),
+            FuncPtrTy,
             {CB->getArgOperand(0)->getType(), CB->getArgOperand(1)->getType()},
             false));
     IRBuilder<> IRB(CB);
-    auto *Int8PtrTy = Type::getInt8PtrTy(C);
     auto *CI =
         IRB.CreateCall(Callee, {CB->getArgOperand(0), CB->getArgOperand(1)});
-    auto *BC0 = IRB.CreateBitCast(CI, Int8PtrTy->getPointerTo());
-    auto *GEP = IRB.CreateGEP(Int8PtrTy, BC0, {CB->getArgOperand(2)});
-    auto *LI = IRB.CreateLoad(Int8PtrTy, GEP);
+    auto *BC0 = IRB.CreateBitCast(CI, FuncPtrPtrTy);
+    auto *GEP = IRB.CreateGEP(FuncPtrTy, BC0, {CB->getArgOperand(2)});
+    auto *LI = IRB.CreateLoad(FuncPtrTy, GEP);
     LI->setMetadata(LLVMContext::MD_invariant_load, MDNode::get(C, {}));
     LI->setMetadata(LLVMContext::MD_func_table,
                     MDNode::get(C, {ConstantAsMetadata::get(cast<ConstantInt>(
@@ -631,9 +708,12 @@ public:
     if (ObjTypeMD) {
       auto *VFEInfoFn = Intrinsic::getDeclaration(
           CB->getModule(), Intrinsic::cj_vfe_info);
-      Result = IRB.CreateCall(VFEInfoFn,
-                              {LI, MetadataAsValue::get(C, ObjTypeMD),
-                               FuncOffset});
+      Value *VFEArg0 =
+          castPointerArgToType(IRB, LI, VFEInfoFn->getFunctionType()->getParamType(0));
+      auto *VFECall = IRB.CreateCall(
+          VFEInfoFn,
+          {VFEArg0, MetadataAsValue::get(C, ObjTypeMD), FuncOffset});
+      Result = castPointerArgToType(IRB, VFECall, LI->getType());
     }
     CB->replaceAllUsesWith(Result);
     CB->eraseFromParent();
@@ -644,6 +724,7 @@ public:
       // CJ_MCC_GetMethodOuterType: TypeInfo*(*)(i8*, i8*, i64 index)
       CB->getFunctionType());
     CB->setCalledFunction(Callee);
+    reconcileCallArgsWithCallee(CB);
   }
 
   void replaceDivisionCheck() {
@@ -759,6 +840,21 @@ private:
   // map intrinsic to runtime API function type.
   DenseMap<StringRef, Function *> RTFuncMap;
 
+  void reconcileCallArgsWithCallee(CallBase *CI) {
+    auto *FT = CI->getFunctionType();
+    IRBuilder<> IRB(CI);
+    for (unsigned I = 0, E = std::min<unsigned>(CI->arg_size(), FT->getNumParams());
+         I != E; ++I) {
+      Type *ParamTy = FT->getParamType(I);
+      Value *Arg = CI->getArgOperand(I);
+      if (Arg->getType() == ParamTy)
+        continue;
+      if (!Arg->getType()->isPointerTy() || !ParamTy->isPointerTy())
+        continue;
+      CI->setArgOperand(I, IRB.CreatePointerBitCastOrAddrSpaceCast(Arg, ParamTy));
+    }
+  }
+
   StringRef getRuntimeFuncName(CallBase *CI) const {
     Intrinsic::ID IID = CI->getIntrinsicID();
     if (IID == Intrinsic::cj_malloc_array) {
@@ -771,10 +867,9 @@ private:
   }
 
   StringRef getMallocArrayFuncName(CallBase *CI) const {
-    Value *Arg0 = CI->getOperand(0);
-    // gc.malloc.array(i64, bitcast arg1 to i8*)
-    auto *CastExpr = dyn_cast<ConstantExpr>(Arg0);
-    auto *KlassGV = dyn_cast<GlobalVariable>(CastExpr->getOperand(0));
+    auto *KlassGV = getTypeInfoGlobal(CI->getArgOperand(0));
+    if (!KlassGV)
+      report_fatal_error("Unsupported element klass type for gc.malloc.array!");
     TypeInfo ArrayKlass(KlassGV);
 
     Type *ET = ArrayKlass.getArrayElementType();
@@ -852,39 +947,38 @@ private:
     BasicBlock &EntryBB = CI->getFunction()->getEntryBlock();
     Instruction *InsertPos = &*EntryBB.getFirstInsertionPt();
     IRBuilder<> IRB(InsertPos);
-    auto *TIType = StructType::getTypeByName(C, "TypeInfo");
     const Triple TT(CI->getModule()->getTargetTriple());
     if (isPrimitiveTypeInfo(GV)) {
       SmallVector<Type *> ElemTypes;
-      ElemTypes.push_back(TIType->getPointerTo());
+      ElemTypes.push_back(getPtrTy(C));
       if (TT.isARM())
         ElemTypes.push_back(IRB.getInt32Ty());
       ElemTypes.push_back(IRB.getInt64Ty());
       AI = IRB.CreateAlloca(StructType::get(C, ElemTypes));
-      Value *BC = IRB.CreateBitCast(AI, IRB.getInt8PtrTy()->getPointerTo());
-      Value *GVExpr = ConstantExpr::getBitCast(GV, IRB.getInt8PtrTy());
+      Value *BC = IRB.CreateBitCast(AI, getPtrTy(C));
+      Value *GVExpr = ConstantExpr::getBitCast(GV, getPtrTy(C));
       IRB.SetInsertPoint(CI);
       IRB.CreateStore(GVExpr, BC);
     } else {
       StructType *ST = getTypeLayoutType(GV);
       assert(ST && "alloca.generic layout info missing!");
       SmallVector<Type *> ElemTypes;
-      ElemTypes.push_back(TIType->getPointerTo());
+      ElemTypes.push_back(getPtrTy(C));
       if (TT.isARM())
         ElemTypes.push_back(IRB.getInt32Ty());
       ElemTypes.push_back(ST);
       AI = IRB.CreateAlloca(StructType::get(C, ElemTypes));
-      Value *BC = IRB.CreateBitCast(AI, IRB.getInt8PtrTy()->getPointerTo());
-      Value *GVExpr = ConstantExpr::getBitCast(GV, IRB.getInt8PtrTy());
+      Value *BC = IRB.CreateBitCast(AI, getPtrTy(C));
+      Value *GVExpr = ConstantExpr::getBitCast(GV, getPtrTy(C));
       IRB.CreateStore(GVExpr, BC);
       uint64_t MemSize = DL.getStructLayout(ST)->getSizeInBytes();
       // %x.payload = getelementptr i8*, %x.i, i32 1
       // call @memset(%x.payload, 0, size)
-      Value *Data = IRB.CreateGEP(IRB.getInt8PtrTy(), BC, {IRB.getInt32(1)});
+      Value *Data = IRB.CreateGEP(getPtrTy(C), BC, {IRB.getInt32(1)});
       IRB.SetInsertPoint(CI);
       IRB.CreateMemSet(Data, IRB.getInt8(0), MemSize, Align(8));
     }
-    Value *ASC = IRB.CreateAddrSpaceCast(AI, IRB.getInt8PtrTy(1));
+    Value *ASC = IRB.CreateAddrSpaceCast(AI, getPtrTy(C, 1));
     CI->replaceAllUsesWith(ASC);
     // Set terminator for invoke instruction.
     if (auto *II = dyn_cast<InvokeInst>(CI)) {

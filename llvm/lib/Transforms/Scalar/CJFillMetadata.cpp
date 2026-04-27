@@ -26,6 +26,19 @@ using namespace llvm;
 
 namespace {
 const char *CFileKlassStr = "CFileKlass";
+
+static Type *getPointeeType(Type *Ty) {
+  auto *PT = dyn_cast<PointerType>(Ty);
+  if (!PT || PT->isOpaque())
+    return nullptr;
+  return PT->getNonOpaquePointerElementType();
+}
+
+static GlobalVariable *getGlobalFromConstantOperand(Constant *C) {
+  if (!C || C->isNullValue())
+    return nullptr;
+  return dyn_cast<GlobalVariable>(C->stripPointerCasts());
+}
 } // namespace
 
 StructType *llvm::getTypeLayoutType(GlobalVariable *GV) {
@@ -39,15 +52,20 @@ StructType *llvm::getTypeLayoutType(GlobalVariable *GV) {
 }
 
 std::string llvm::getPrimitiveTypeName(Type *Ty) {
-  if (auto PT = dyn_cast<PointerType>(Ty)) {
-    if (PT->getElementType()->isIntegerTy(8)) {
-      if (PT->getAddressSpace() == 1) {
+  if (Ty->isPointerTy()) {
+    Type *PointeeTy = getPointeeType(Ty);
+    unsigned AS = cast<PointerType>(Ty)->getAddressSpace();
+    if (!PointeeTy) {
+      return AS == 1 ? "array_ref" : "array_cptr";
+    }
+    if (PointeeTy->isIntegerTy(8)) {
+      if (AS == 1) {
         return "array_ref";
       } else {
         return "array_cptr";
       }
     }
-    if (PT->getElementType()->isFunctionTy()) {
+    if (PointeeTy->isFunctionTy()) {
       return "array_cfunc";
     }
   }
@@ -314,8 +332,8 @@ unsigned TypeInfo::getAlign() {
 }
 
 Constant *TypeInfo::getOffsets() {
-  auto C = cast<ConstantExpr>(get(CIT_OFFSETS))->getOperand(0);
-  auto GV = cast<GlobalVariable>(C);
+  auto *GV = getGlobalFromConstantOperand(get(CIT_OFFSETS));
+  assert(GV && "Field offset GV is invalid!");
   assert(GV->hasInitializer() && "Field GV has no Initializer!");
   return GV->getInitializer();
 }
@@ -331,8 +349,8 @@ unsigned TypeInfo::getOffset(unsigned Idx) {
 }
 
 Constant *TypeInfo::getFields() {
-  auto C = cast<ConstantExpr>(get(CIT_FIELD))->getOperand(0);
-  auto GV = cast<GlobalVariable>(C);
+  auto *GV = getGlobalFromConstantOperand(get(CIT_FIELD));
+  assert(GV && "Field GV is invalid!");
   assert(GV->hasInitializer() && "Field GV has no Initializer!");
   return GV->getInitializer();
 }
@@ -348,8 +366,8 @@ GlobalVariable *TypeInfo::getField(unsigned Idx) {
 }
 
 Constant *TypeInfo::getTypeArgs() {
-  auto C = cast<ConstantExpr>(get(CIT_TYPE_ARG))->getOperand(0);
-  auto GV = cast<GlobalVariable>(C);
+  auto *GV = getGlobalFromConstantOperand(get(CIT_TYPE_ARG));
+  assert(GV && "TypeArg GV is invalid!");
   assert(GV->hasInitializer() && "TypeArg GV has no Initializer!");
   return cast<Constant>(GV->getInitializer());
 }
@@ -421,23 +439,21 @@ ExtensionDefData::ExtensionDefData(GlobalVariable *GV) {
   Flag = cast<ConstantInt>(Data->getOperand(ET_FLAG))->getZExtValue();
   FuncTableSize =
       cast<ConstantInt>(Data->getOperand(ET_FUNC_TABLE_SIZE))->getSExtValue();
-  auto CE = dyn_cast<ConstantExpr>(Data->getOperand(ET_TARGET_TYPE));
-  TargetType = dyn_cast<GlobalVariable>(CE->getOperand(0));
-  CE = dyn_cast<ConstantExpr>(Data->getOperand(ET_INTERFACE_FN));
+  auto *Field = cast<Constant>(Data->getOperand(ET_TARGET_TYPE));
+  TargetType = dyn_cast<GlobalVariable>(Field->stripPointerCasts());
+  Field = cast<Constant>(Data->getOperand(ET_INTERFACE_FN));
   if (IsInterfaceTypeInfo == 0) {
-    InterfaceFn = dyn_cast<Function>(CE->getOperand(0));
+    InterfaceFn = dyn_cast<Function>(Field->stripPointerCasts());
   } else {
-    InterfaceTypeInfo = dyn_cast<GlobalVariable>(CE->getOperand(0));
+    InterfaceTypeInfo = dyn_cast<GlobalVariable>(Field->stripPointerCasts());
   }
-  auto Field = cast<Constant>(Data->getOperand(ET_WHERE_COND_FN));
+  Field = cast<Constant>(Data->getOperand(ET_WHERE_COND_FN));
   if (!Field->isNullValue()) {
-    CE = dyn_cast<ConstantExpr>(Field);
-    WhereCondFn = dyn_cast<Function>(CE->getOperand(0));
+    WhereCondFn = dyn_cast<Function>(Field->stripPointerCasts());
   }
   Field = cast<Constant>(Data->getOperand(ET_FUNC_TABLE));
   if (!Field->isNullValue()) {
-    CE = dyn_cast<ConstantExpr>(Field);
-    FuncTable = dyn_cast<GlobalVariable>(CE->getOperand(0));
+    FuncTable = dyn_cast<GlobalVariable>(Field->stripPointerCasts());
   }
 }
 

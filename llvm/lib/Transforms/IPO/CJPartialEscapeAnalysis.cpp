@@ -64,6 +64,38 @@ void setEscapeMeta(Instruction *I) {
   I->setMetadata("ea_val", MDNode::get(I->getContext(), {}));
 }
 
+static Type *getKnownPointeeType(const Value *V) {
+  if (V == nullptr) {
+    return nullptr;
+  }
+  if (auto *GEP = dyn_cast<GEPOperator>(V)) {
+    // For a derived pointer value, we need the type addressed by the GEP
+    // result, not the original base object's source element type.
+    return GEP->getResultElementType();
+  }
+  if (auto *AI = dyn_cast<AllocaInst>(V)) {
+    return AI->getAllocatedType();
+  }
+  if (auto *GV = dyn_cast<GlobalVariable>(V)) {
+    return GV->getValueType();
+  }
+  if (auto *Arg = dyn_cast<Argument>(V)) {
+    if (Arg->hasByValAttr()) {
+      return Arg->getParamByValType();
+    }
+  }
+  if (auto *PT = dyn_cast<PointerType>(V->getType())) {
+    if (!PT->isOpaque()) {
+      return PT->getNonOpaquePointerElementType();
+    }
+  }
+  const Value *Stripped = V->stripPointerCasts();
+  if (Stripped != V) {
+    return getKnownPointeeType(Stripped);
+  }
+  return nullptr;
+}
+
 Type *getAllocaType(GlobalVariable *Klass, bool &HasRef, uint32_t &AS,
                     bool &NonMovArray, Instruction *Val) {
   Module *M = Klass->getParent();
@@ -390,16 +422,17 @@ private:
       SmallVector<Value *, 2> GEPIndices;
       GEPIndices.push_back(IRB.getInt32(0));
       GEPIndices.push_back(IRB.getInt32(1));
+      Type *NewInstTy = cast<AllocaInst>(NewInst)->getAllocatedType();
       auto SizeP = IRB.CreateInBoundsGEP(
-          NewInst->getType()->getNonOpaquePointerElementType(), NewInst,
-          GEPIndices);
+          NewInstTy, NewInst, GEPIndices);
       SmallVector<Value *, 2> GEPSizeIndices;
       GEPSizeIndices.push_back(IRB.getInt32(0));
       GEPSizeIndices.push_back(IRB.getInt32(0));
       GEPSizeIndices.push_back(IRB.getInt32(0));
+      Type *SizePTy = getKnownPointeeType(SizeP);
+      assert(SizePTy && "opaque GEP source type should be recoverable");
       auto SizeP64 = IRB.CreateInBoundsGEP(
-          SizeP->getType()->getNonOpaquePointerElementType(), SizeP,
-          GEPSizeIndices);
+          SizePTy, SizeP, GEPSizeIndices);
       IRB.CreateStore(I->getOperand(1), SizeP64); // store array size
       MemSetSize = AllocaSize - ArrayHeadSize;
     }
@@ -1074,12 +1107,8 @@ public:
     if (!dyn_cast<Argument>(V) && !dyn_cast<Instruction>(V)) {
       if (isa<GlobalVariable>(V) || isa<ConstantExpr>(V)) {
         Value *Base = findMemoryBasePointer(V);
-        PointerType *PT = dyn_cast<PointerType>(Base->getType());
-        if (PT == nullptr) {
-          return nullptr;
-        }
-        Type *PointeeType = PT->getNonOpaquePointerElementType();
-        if (containsGCPtrType(PointeeType)) {
+        Type *PointeeType = getKnownPointeeType(Base);
+        if (PointeeType == nullptr || containsGCPtrType(PointeeType)) {
           return HeapLoc;
         }
       }
@@ -2267,10 +2296,9 @@ bool CJEscapeAnalysis::isEscapedValue(Value *V) {
     return true;
   }
   if (isa<GlobalVariable>(Base) || isa<ConstantExpr>(Base)) {
-    if (auto PT = dyn_cast<PointerType>(Base->getType())) {
-      if (!containsGCPtrType(PT->getNonOpaquePointerElementType())) {
-        return false;
-      }
+    Type *PointeeType = getKnownPointeeType(Base);
+    if (PointeeType && !containsGCPtrType(PointeeType)) {
+      return false;
     }
     return true;
   }
@@ -2756,11 +2784,11 @@ public:
       CopyType = ST;
       BeginOff = 0;
     } else {
-      if (!isa<PointerType>(BaseV->getType())) {
+      CopyType = getKnownPointeeType(BaseV);
+      if (CopyType == nullptr) {
+        bindInfoEscape(GP, GV, I->getParent());
         return;
       }
-      CopyType =
-          cast<PointerType>(BaseV->getType())->getNonOpaquePointerElementType();
     }
     if (auto *CopyST = dyn_cast<StructType>(CopyType)) {
       if (!containsGCPtrType(CopyST)) {

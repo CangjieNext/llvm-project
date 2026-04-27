@@ -58,6 +58,24 @@ static cl::opt<bool> EnableCJRSSCE("enable-cj-rssce", cl::Hidden,
 
 using Interval = std::pair<uint64_t, uint64_t>;
 
+static Type *getKnownPointeeType(const Value *V) {
+  V = V->stripPointerCasts();
+  if (auto *GEP = dyn_cast<GEPOperator>(V))
+    return GEP->getSourceElementType();
+  if (auto *AI = dyn_cast<AllocaInst>(V))
+    return AI->getAllocatedType();
+  if (auto *GV = dyn_cast<GlobalVariable>(V))
+    return GV->getValueType();
+  if (auto *Arg = dyn_cast<Argument>(V)) {
+    if (Arg->hasByValAttr())
+      return Arg->getParamByValType();
+  }
+  auto *PT = dyn_cast<PointerType>(V->getType());
+  if (!PT || PT->isOpaque())
+    return nullptr;
+  return PT->getNonOpaquePointerElementType();
+}
+
 static std::pair<Value *, uint64_t>
 getBasePtrAndOffset(const DataLayout &DL, Value *V, Instruction *I,
                     Instruction **LastClobberI = nullptr) {
@@ -154,8 +172,7 @@ bool llvm::hasMemoryDefBetween(MemorySSA &MSSA, DominatorTree &DT,
   SmallVector<const Value *, 8> UnderObjs;
   getUnderlyingObjects(UnderObj, UnderObjs);
   for (auto *V : UnderObjs) {
-    auto *ST =
-        dyn_cast<StructType>(V->getType()->getNonOpaquePointerElementType());
+    auto *ST = dyn_cast_or_null<StructType>(getKnownPointeeType(V));
     // Loc may be load inst, and the clobber we find may not accurate.
     MemoryLocation Loc =
         ST ? MemoryLocation(V, LocationSize::precise(
@@ -336,12 +353,8 @@ struct SourcePropagationState {
   }
 
   bool isKlassGlobal(GlobalVariable *GV) {
-    return GV->getType()->isPointerTy() &&
-           GV->getType()->getNonOpaquePointerElementType()->isStructTy() &&
-           GV->getType()
-               ->getNonOpaquePointerElementType()
-               ->getStructName()
-               .isCangjieTypeInfo();
+    auto *ST = dyn_cast_or_null<StructType>(GV ? GV->getValueType() : nullptr);
+    return ST && ST->getStructName().isCangjieTypeInfo();
   }
 
   bool isStackValueSrc(SetVector<Instruction *> &BaseStoreMemcpy) {
@@ -575,9 +588,8 @@ struct SourcePropagationState {
     auto *Arg = CB->getArgOperand(ArgIndex);
     Value *CastI = NewI;
     if (NewI->getType()->getPointerAddressSpace() != 0) {
-      CastI = Builder.CreateAddrSpaceCast(
-          NewI, PointerType::get(
-                    NewI->getType()->getNonOpaquePointerElementType(), 0));
+      CastI = Builder.CreateAddrSpaceCast(NewI,
+                                          PointerType::get(Builder.getContext(), 0));
     }
     Value *Cast = Builder.CreateBitCast(CastI, Arg->getType());
     CB->setArgOperand(ArgIndex, Cast);
@@ -1209,8 +1221,9 @@ struct DestPropagationState {
       if (!(ArgReadOnly || FnReadOnly) || !ArgNoCaptured ||
           !Arg->getType()->isPointerTy())
         continue;
-      Type *Ty =
-          Arg->stripPointerCasts()->getType()->getNonOpaquePointerElementType();
+      Type *Ty = getKnownPointeeType(Arg);
+      if (!Ty)
+        continue;
       uint64_t Size = Ty->isFunctionTy() ? 8 : DL.getTypeAllocSize(Ty);
       auto [EV, Offset] = findFullEquivalentValue(Arg, Size, BB, CB);
       if (EV)

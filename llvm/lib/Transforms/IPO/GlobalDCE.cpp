@@ -1011,8 +1011,15 @@ void CangjieDCE::rewriteExtensions(Module &M) {
     // Replace GV
     if (GV->getNumUses() != 1) // 1: llvm.used
       report_fatal_error("User number should be one");
-    auto *Expr = dyn_cast<ConstantExpr>(GV->use_begin()->getUser());
-    Expr->handleOperandChange(GV, NewGV);
+    auto *UseUser = GV->use_begin()->getUser();
+    if (auto *Expr = dyn_cast<ConstantExpr>(UseUser)) {
+      Expr->handleOperandChange(GV, NewGV);
+    } else {
+      // In opaque-pointer mode llvm.used can reference the global directly
+      // instead of through a bitcast ConstantExpr. The Value type is `ptr` in
+      // both cases, so a direct replacement is safe.
+      GV->replaceNonMetadataUsesWith(NewGV);
+    }
     GV->eraseFromParent();
   }
 }

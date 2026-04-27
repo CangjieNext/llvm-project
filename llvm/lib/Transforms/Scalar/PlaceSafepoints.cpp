@@ -314,7 +314,8 @@ static bool containsUnconditionalCallSafepoint(Loop *L, BasicBlock *Header,
   BasicBlock *Current = Pred;
   while (true) {
     for (Instruction &I : *Current) {
-      if (auto *Call = dyn_cast<CallBase>(&I))
+      if (auto *Call = dyn_cast<CallBase>(&I)) {
+        Function *Callee = Call->getCalledFunction();
         // Note: Technically, needing a safepoint isn't quite the right
         // condition here.  We should instead be checking if the target method
         // has an
@@ -322,9 +323,11 @@ static bool containsUnconditionalCallSafepoint(Loop *L, BasicBlock *Header,
         // since we don't have any methods with conditional-only safepoint
         // polls.
         if (needsStatepoint(Call, TLI) &&
-            !Call->getCalledFunction()->isDeclaration() &&
-            !Call->getCalledFunction()->hasFnAttribute("cj_fast_call"))
+            (!Callee ||
+             (!Callee->isDeclaration() &&
+              !Callee->hasFnAttribute("cj_fast_call"))))
           return true;
+      }
     }
 
     if (Current == Header)

@@ -34,6 +34,13 @@
 
 using namespace llvm;
 
+static Type *getPointeeType(Type *Ty) {
+  auto *PT = dyn_cast<PointerType>(Ty);
+  if (!PT || PT->isOpaque())
+    return nullptr;
+  return PT->getNonOpaquePointerElementType();
+}
+
 static cl::opt<bool>
     DisableDeadAllocaElimination("disable-dead-alloca-elimination", cl::Hidden,
                                  cl::init(false));
@@ -250,7 +257,9 @@ static bool replaceInvalidAddrpaceCast(Function &F) {
       continue;
     }
     auto *PT = dyn_cast<PointerType>(ACI->getPointerOperand()->getType());
-    if (PT->getAddressSpace() != 0 || !PT->getElementType()->isIntegerTy(8)) {
+    Type *PointeeTy = getPointeeType(PT);
+    if (PT->getAddressSpace() != 0 ||
+        (PointeeTy && !PointeeTy->isIntegerTy(8))) {
       continue;
     }
     WorkList.push_back(ACI);

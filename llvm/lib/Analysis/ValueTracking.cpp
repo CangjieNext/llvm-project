@@ -4701,6 +4701,28 @@ bool llvm::isSafeToSpeculativelyExecute(const Instruction *Inst,
                                                 DT, TLI);
 }
 
+static Type *getKnownPointeeTypeForCJ(const Value *V) {
+  if (!V)
+    return nullptr;
+  if (auto *GEP = dyn_cast<GEPOperator>(V))
+    return GEP->getSourceElementType();
+  if (auto *AI = dyn_cast<AllocaInst>(V))
+    return AI->getAllocatedType();
+  if (auto *GV = dyn_cast<GlobalVariable>(V))
+    return GV->getValueType();
+  if (auto *Arg = dyn_cast<Argument>(V)) {
+    if (Arg->hasByValAttr())
+      return Arg->getParamByValType();
+  }
+  if (auto *PT = dyn_cast<PointerType>(V->getType())) {
+    if (!PT->isOpaque())
+      return PT->getNonOpaquePointerElementType();
+  }
+  if (const Value *Stripped = V->stripPointerCasts(); Stripped != V)
+    return getKnownPointeeTypeForCJ(Stripped);
+  return nullptr;
+}
+
 static bool isCJRefReadSafeToSpeculativelyExecute(
     const IntrinsicInst *II, const Instruction *CtxI, const DominatorTree *DT,
     const TargetLibraryInfo *TLI) {
@@ -4710,9 +4732,11 @@ static bool isCJRefReadSafeToSpeculativelyExecute(
   Value *Ptr = II->getCJRefGCReadPtr();
   if (!Ptr)
     return false;
-  return isDereferenceableAndAlignedPointer(
-      Ptr, Ptr->getType()->getNonOpaquePointerElementType(), Align(8), DL, CtxI,
-      DT, TLI);
+  Type *ElemTy = getKnownPointeeTypeForCJ(Ptr);
+  if (!ElemTy)
+    return false;
+  return isDereferenceableAndAlignedPointer(Ptr, ElemTy, Align(8), DL, CtxI,
+                                            DT, TLI);
 }
 
 bool llvm::isSafeToSpeculativelyExecuteWithOpcode(

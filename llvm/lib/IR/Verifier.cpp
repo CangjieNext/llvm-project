@@ -2273,10 +2273,10 @@ void Verifier::verifyStatepoint(const CallBase &Call) {
     TargetFuncType = CalledFunction->getFunctionType();
   } else {
     Type *TargetElemType = Call.getParamElementType(2);
-    if (TargetElemType == nullptr) {
-      TargetElemType =
-          Call.getArgOperand(2)->getType()->getNonOpaquePointerElementType();
-    }
+    if (TargetElemType == nullptr)
+      if (auto *PT = dyn_cast<PointerType>(Call.getArgOperand(2)->getType()))
+        if (!PT->isOpaque())
+          TargetElemType = PT->getNonOpaquePointerElementType();
     Check(TargetElemType,
           "gc.statepoint callee argument have not elementtype attribute", Call);
     TargetFuncType = dyn_cast<FunctionType>(TargetElemType);
