@@ -311,6 +311,12 @@ struct InstructionMapper {
           It->getOpcode() == TargetOpcode::STATEPOINT)
         OutliningType = InstrType::Legal;
 
+      if (TreatStatepointAsLegal &&
+          TII.isIllegalForMultiStatepointOutlining(*It) &&
+          It->getOpcode() != TargetOpcode::STATEPOINT) {
+        OutliningType = InstrType::Illegal;
+      }
+
       switch (OutliningType) {
       case InstrType::Illegal:
         mapToIllegalUnsigned(It, CanOutlineWithPrevInstr, UnsignedVecForMBB,
@@ -843,7 +849,7 @@ void MachineOutliner::findMultiStatepointHashCandidates(
   SuffixTree MultiStatepointST(Mapper.UnsignedVec);
   std::vector<Candidate> CandidatesForRepeatedSeq;
   unsigned GroupIdx = 0;
-
+  
   for (const SuffixTree::RepeatedSubstring &RS : MultiStatepointST) {
     CandidatesForRepeatedSeq.clear();
     unsigned StringLen = RS.Length;
