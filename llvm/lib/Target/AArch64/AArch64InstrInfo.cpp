@@ -8108,7 +8108,6 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
   MachineInstr &MI = *MIT;
   MachineBasicBlock *MBB = MI.getParent();
   MachineFunction *MF = MBB->getParent();
-  AArch64FunctionInfo *FuncInfo = MF->getInfo<AArch64FunctionInfo>();
 
   // Don't outline anything used for return address signing. The outlined
   // function will get signed later if needed
@@ -8123,9 +8122,9 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
     return outliner::InstrType::Illegal;
   }
 
-  // Don't outline LOHs.
-  if (FuncInfo->getLOHRelated().count(&MI))
-    return outliner::InstrType::Illegal;
+  // LOH directives are optimization hints. They do not block outlining; if an
+  // outlined candidate touches LOH-related instructions, the stale hints are
+  // cleared when the outlined call is inserted.
 
   if ((Flags & HasCangjiePrologueForOutlining) &&
       isInRange(*MBB, MIT, findFirstCangjiePrologueX9Clobber(*MBB),
@@ -8700,6 +8699,14 @@ void AArch64InstrInfo::buildOutlinedFrame(
 MachineBasicBlock::iterator AArch64InstrInfo::insertOutlinedCall(
     Module &M, MachineBasicBlock &MBB, MachineBasicBlock::iterator &It,
     MachineFunction &MF, outliner::Candidate &C) const {
+  AArch64FunctionInfo *CallerFI =
+      MBB.getParent()->getInfo<AArch64FunctionInfo>();
+  if (!CallerFI->getLOHRelated().empty() &&
+      llvm::any_of(make_range(C.front(), std::next(C.back())),
+                   [CallerFI](const MachineInstr &MI) {
+                     return CallerFI->getLOHRelated().count(&MI);
+                   }))
+    CallerFI->clearLOHDirectives();
 
   if (C.CallConstructionID == MachineOutlinerStatepointThunk) {
     MachineInstr *OrigSP = nullptr;
