@@ -36,12 +36,14 @@ bool CangjieDeclMap::IsInterfaceType(CompilerType& type) {
 }
 
 void CangjieDeclMap::CollectLocalVariableAddress(const std::string& sname, lldb::VariableSP& var) {
-    auto frame = m_exe_ctx.GetFramePtr();
     auto target = m_exe_ctx.GetTargetSP();
-    if (!var || !frame || !target) {
+    if (!var || !target) {
         return;
     }
-    auto valobj = frame->GetValueObjectForFrameVariable(var, lldb::DynamicValueType::eNoDynamicValues);
+    auto valobj = GetValueObject(var);
+    if (!valobj) {
+      return;
+    }
     AddressType address_type = eAddressTypeInvalid;
     const bool scalar_is_load_address = false;
     lldb::addr_t addr = valobj->GetAddressOf(scalar_is_load_address, &address_type);
@@ -99,6 +101,14 @@ void CangjieDeclMap::CollectOptionValType(CompilerType& val_type) {
   }
 }
 
+lldb::ValueObjectSP CangjieDeclMap::GetValueObject(lldb::VariableSP var) {
+    auto frame = m_exe_ctx.GetFramePtr();
+    if (!frame) {
+        return nullptr;
+    }
+    return frame->GetValueObjectForFrameVariable(var, lldb::DynamicValueType::eNoDynamicValues);
+}
+
 CompilerType CangjieDeclMap::GetVariableType(lldb::VariableSP var) {
     CompilerType type = var->GetType()->GetFullCompilerType();
     ReplaceTypeDefWithInterfaceType(type);
@@ -108,17 +118,15 @@ CompilerType CangjieDeclMap::GetVariableType(lldb::VariableSP var) {
     }
     // Variables of type interface will have a dynamic type. For example, var a:interface1 = classA()
     if (IsInterfaceType(type)) {
-      auto frame = m_exe_ctx.GetFramePtr();
-      if (frame != nullptr) {
-        auto valobj = frame->GetValueObjectForFrameVariable(var, lldb::DynamicValueType::eNoDynamicValues);
+      auto valobj = GetValueObject(var);
+      if (valobj != nullptr) {
         dynamic_type = valobj->GetDynamicType();
         m_parsed_types.insert({dynamic_type.GetTypeName().AsCString(), dynamic_type});
       }
     }
     if (ConstString(type_name).GetStringRef().contains(GENERIC_TYPE_PREFIX_NAME)) {
-      auto frame = m_exe_ctx.GetFramePtr();
-      if (frame != nullptr) {
-        auto valobj = frame->GetValueObjectForFrameVariable(var, lldb::DynamicValueType::eNoDynamicValues);
+      auto valobj = GetValueObject(var);
+      if (valobj != nullptr) {
         auto dynamic_Type = valobj->GetDynamicType();
         type = dynamic_Type;
         type_name = SafeAsCString(type.GetTypeName());
@@ -1498,6 +1506,9 @@ std::vector<OwnedPtr<AST::Package>> CangjieDeclMap::CreateFakePackage() {
     file->fileName = std::string("locals.cj");
     AddImportSpec(file, LOCAL_PACKAGE_NAME);
     file->decls = std::move(m_local_decls);
+    for (auto& decl : file->decls) {
+      decl->EnableAttr(Attribute::IMPORTED);
+    }
     auto package = MakeOwned<AST::Package>(LOCAL_PACKAGE_NAME);
     package->EnableAttr(Attribute::IMPORTED);
     package->files.emplace_back(std::move(file));
@@ -1510,6 +1521,10 @@ std::vector<OwnedPtr<AST::Package>> CangjieDeclMap::CreateFakePackage() {
     if (tmpDecl->TestAttr(Attribute::PRIVATE)) {
       file->begin = tmpDecl->begin;
       tmpDecl->curFile = file.get();
+    }
+    tmpDecl->EnableAttr(Attribute::IMPORTED);
+    for (auto& member : tmpDecl->GetMemberDecls()) {
+      member->EnableAttr(Attribute::IMPORTED);
     }
   }
   file->decls = std::move(m_global_decls);
