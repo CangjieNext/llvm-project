@@ -12,6 +12,8 @@ add_lldb_library(lldbTarget
   CJRegisterContext.cpp
   CJThread.cpp
   DynamicRegisterInfo.cpp
+  MixedDebugger.cpp
+  MixedArkTSDebugger.cpp
   ExecutionContext.cpp
   InstrumentationRuntime.cpp
   InstrumentationRuntimeStopInfo.cpp

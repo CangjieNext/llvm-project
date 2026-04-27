@@ -72,6 +72,7 @@ protected:
   friend class SBTarget;
   friend class SBThread;
   friend class SBCJThread;
+  friend class SBMixedArkTSDebugger;
   friend class SBTrace;
   friend class SBValue;
   friend class SBWatchpoint;

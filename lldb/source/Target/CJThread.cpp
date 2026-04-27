@@ -108,6 +108,29 @@ constexpr CJThreadLayoutOffsets offsets_aarch64_darwin = {
     .offset_of_boundCJThread = 296
 };
 
+static bool GetCJThreadLayoutOffsets(Process &process, CJThreadLayoutOffsets &offsets) {
+  llvm::Triple triple = process.GetSystemArchitecture().GetTriple();
+
+  if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
+    if (triple.getOS() == llvm::Triple::OSType::Win32) {
+      offsets = offsets_x86_windows;
+      return true;
+    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
+      offsets = offsets_x86_linux;
+      return true;
+    }
+  } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
+    if (triple.getOS() == llvm::Triple::OSType::MacOSX) {
+      offsets = offsets_aarch64_darwin;
+      return true;
+    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
+      offsets = offsets_aarch64_linux;
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool ReadMemoryChecked(Process &process, lldb::addr_t addr, void *dst,
                               size_t size, Status &status) {
   size_t bytes_read = process.ReadMemory(addr, dst, size, status);
@@ -198,29 +221,9 @@ std::vector<CJThreadInfoOverview> CollectAllCJThreads(Process &process,
     return results;
   }
 
-  llvm::Triple triple = process.GetSystemArchitecture().GetTriple();
   CJThreadLayoutOffsets offsets;
-
-  if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
-    if (triple.getOS() == llvm::Triple::OSType::Win32) {
-      offsets = offsets_x86_windows;
-    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
-      offsets = offsets_x86_linux;
-    } else {
-      status.SetErrorString("Unsupported OS for x86_64");
-      return results;
-    }
-  } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
-    if (triple.getOS() == llvm::Triple::OSType::MacOSX) {
-      offsets = offsets_aarch64_darwin;
-    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
-      offsets = offsets_aarch64_linux;
-    } else {
-      status.SetErrorString("Unsupported OS for aarch64");
-      return results;
-    }
-  } else {
-    status.SetErrorString("Unsupported architecture");
+  if (!GetCJThreadLayoutOffsets(process, offsets)) {
+    status.SetErrorString("Unsupported architecture/OS");
     return results;
   }
 
@@ -487,11 +490,19 @@ lldb::RegisterContextSP CJThread::CreateRegisterContextForFrame(StackFrame *fram
 }
 
 bool CJThread::CalculateStopInfo() {
-  if (m_stop_info_sp && m_stop_info_sp->IsValid())
-    return true;
-
-  m_stop_info_sp = StopInfo::CreateStopReasonToTrace(*reinterpret_cast<Thread*>(this));
-  return (m_stop_info_sp && m_stop_info_sp->IsValid());
+  if (m_cjthread_info.state == CJThreadState::eRunning) {
+    lldb::ThreadSP os_thread = GetProcess()->GetThreadList().FindThreadByID(GetHostThreadID());
+    if (os_thread) {
+      lldb::StopInfoSP stop_info_sp = os_thread->GetPrivateStopInfo();
+      if (stop_info_sp && stop_info_sp->IsValidForOperatingSystemThread(*this)) {
+        stop_info_sp->SetThread(shared_from_this());
+        SetStopInfo(stop_info_sp);
+        return true;
+      }
+    }
+  }
+  SetStopInfo(lldb::StopInfoSP());
+  return true;
 }
 
 bool CJThread::BindCJThreadToOSThread(Process &process) {
@@ -499,31 +510,11 @@ bool CJThread::BindCJThreadToOSThread(Process &process) {
     return false;
   }
 
-  llvm::Triple triple = process.GetSystemArchitecture().GetTriple();
   CJThreadLayoutOffsets offsets;
-
-  if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
-    if (triple.getOS() == llvm::Triple::OSType::Win32) {
-      offsets = offsets_x86_windows;
-    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
-      offsets = offsets_x86_linux;
-    } else {
-      return false;
-    }
-  } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
-    if (triple.getOS() == llvm::Triple::OSType::MacOSX) {
-      offsets = offsets_aarch64_darwin;
-    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
-      offsets = offsets_aarch64_linux;
-    } else {
-      return false;
-    }
-  } else {
+  if (!GetCJThreadLayoutOffsets(process, offsets))
     return false;
-  }
 
   Status error;
-  lldb::addr_t addr = 0;
   process.WriteMemory(m_cjthread_info.cjthread_ptr + offsets.offset_of_boundThread,
                       &m_cjthread_info.thread_ptr, sizeof(lldb::addr_t), error);
   if (error.Fail())
@@ -541,28 +532,9 @@ bool CJThread::BindCJThreadToOSThread(Process &process) {
 }
 
 bool CJThread::UnBindCJThreadToOSThread(Process &process) {
-  llvm::Triple triple = process.GetSystemArchitecture().GetTriple();
   CJThreadLayoutOffsets offsets;
-
-  if (triple.getArch() == llvm::Triple::ArchType::x86_64) {
-    if (triple.getOS() == llvm::Triple::OSType::Win32) {
-      offsets = offsets_x86_windows;
-    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
-      offsets = offsets_x86_linux;
-    } else {
-      return false;
-    }
-  } else if (triple.getArch() == llvm::Triple::ArchType::aarch64) {
-    if (triple.getOS() == llvm::Triple::OSType::MacOSX) {
-      offsets = offsets_aarch64_darwin;
-    } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
-      offsets = offsets_aarch64_linux;
-    } else {
-      return false;
-    }
-  } else {
+  if (!GetCJThreadLayoutOffsets(process, offsets))
     return false;
-  }
 
   Status error;
   lldb::addr_t addr = 0;
@@ -626,7 +598,7 @@ public:
   }
 };
 
-bool CJThread::WaitUntilCJThreadScheduled(Target &target, lldb::CJThreadSP selected_thread, Status error) {
+bool CJThread::WaitUntilCJThreadScheduled(Target &target, lldb::CJThreadSP selected_thread, Status &error) {
   unsigned saved_cjt_id = selected_thread->GetID();
   lldb::ProcessSP process_sp = selected_thread->GetProcess();
   ThreadList &cjtlist = process_sp->GetCJThreadList();
@@ -666,7 +638,7 @@ bool CJThread::WaitUntilCJThreadScheduled(Target &target, lldb::CJThreadSP selec
       ThreadList &thlist = process_sp->GetThreadList();
       lldb::ThreadSP thread = thlist.FindThreadByID(cjthread->GetHostThreadID());
       if (!thread) {
-        error.SetErrorStringWithFormat("cjthread #{0}'s host thread #{1} is vanished",
+        error.SetErrorStringWithFormat("cjthread #%lld's host thread #%lld is vanished",
           cjthread->GetID(), cjthread->GetHostThreadID());
         return false;
       }
