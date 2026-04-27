@@ -299,6 +299,8 @@ public:
       std::vector<outliner::Candidate> &RepeatedSequenceLocs) const override;
   outliner::InstrType
   getOutliningType(MachineBasicBlock::iterator &MIT, unsigned Flags) const override;
+  bool isIllegalForMultiStatepointOutlining(
+      const MachineInstr &MI) const override;
   bool isMBBSafeToOutlineFrom(MachineBasicBlock &MBB,
                               unsigned &Flags) const override;
   void buildOutlinedFrame(MachineBasicBlock &MBB, MachineFunction &MF,
