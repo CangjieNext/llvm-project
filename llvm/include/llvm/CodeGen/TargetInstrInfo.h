@@ -1944,6 +1944,13 @@ public:
         "Target didn't implement TargetInstrInfo::getOutliningType!");
   }
 
+  /// Optional target hook that marks instructions illegal only for specialized
+  /// multi-statepoint outlining.
+  virtual bool
+  isIllegalForMultiStatepointOutlining(const MachineInstr &MI) const {
+    return false;
+  }
+
   /// Optional target hook that returns true if \p MBB is safe to outline from,
   /// and returns any target-specific information in \p Flags.
   virtual bool isMBBSafeToOutlineFrom(MachineBasicBlock &MBB,
