@@ -118,6 +118,7 @@ private:
   MCContext &Context;
   const Triple &TT;
   bool IsMachO = TT.isOSBinFormatMachO();
+  bool RecordedCangjieOutlinedMultiStatepoint = false;
   TableDesc TD[CJMetadataMax];
   // <FuncName, FuncBegin symbol, FuncEndSymbol>
   SmallVector<std::tuple<const MCSymbol *, const MCSymbol *, const MCSymbol *,
