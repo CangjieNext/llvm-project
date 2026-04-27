@@ -138,11 +138,12 @@ public:
       return CalledFunction->getReturnType();
     } else {
       Type *TargetElemType = getParamElementType(CalledFunctionPos);
-      if (TargetElemType == nullptr) {
-        TargetElemType = getArgOperand(CalledFunctionPos)
-                             ->getType()
-                             ->getNonOpaquePointerElementType();
-      }
+      if (TargetElemType == nullptr)
+        if (auto *PT =
+                dyn_cast<PointerType>(getArgOperand(CalledFunctionPos)
+                                          ->getType()))
+          if (!PT->isOpaque())
+            TargetElemType = PT->getNonOpaquePointerElementType();
       return cast<FunctionType>(TargetElemType)->getReturnType();
     }
   }

@@ -144,8 +144,11 @@ Value *castToTargetType(Value *V, IRBuilder<> &IRB, Type *TargetType) {
       PtrTy->getAddressSpace() == TargetPtrTy->getAddressSpace();
   Value *Res = nullptr;
   if (!AddressSpaceEqual) {
-    Type *TmpType = PointerType::get(TargetPtrTy->getElementType(),
-                                     PtrTy->getAddressSpace());
+    Type *TmpType = TargetPtrTy->isOpaque()
+                        ? PointerType::get(TargetPtrTy->getContext(),
+                                           PtrTy->getAddressSpace())
+                        : PointerType::get(TargetPtrTy->getElementType(),
+                                           PtrTy->getAddressSpace());
     Res = IRB.CreateBitCast(V, TmpType);
     Res = IRB.CreateAddrSpaceCast(Res, TargetType);
   } else {

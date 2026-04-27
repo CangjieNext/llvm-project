@@ -33,8 +33,42 @@
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Scalar/ReflectionInfo.h"
 
+#include <cstdlib>
+
 using namespace llvm;
 using namespace cangjie;
+
+static bool shouldTraceCJIRVerify() {
+  static bool Enabled = std::getenv("CJ_LLVM15_TRACE_IRVERIFY") != nullptr;
+  return Enabled;
+}
+
+static void traceCJIRVerify(StringRef Stage, StringRef Name) {
+  if (!shouldTraceCJIRVerify())
+    return;
+  errs() << "[CJIRVerifier] " << Stage << ' ' << Name << '\n';
+  errs().flush();
+}
+
+static Type *getKnownPointeeType(const Value *V) {
+  if (!V)
+    return nullptr;
+  V = V->stripPointerCasts();
+  if (auto *AI = dyn_cast<AllocaInst>(V))
+    return AI->getAllocatedType();
+  if (auto *GEP = dyn_cast<GetElementPtrInst>(V))
+    return GEP->getSourceElementType();
+  if (auto *GV = dyn_cast<GlobalVariable>(V))
+    return GV->getValueType();
+  return nullptr;
+}
+
+static Type *getPointerElementType(Type *T) {
+  auto *PT = dyn_cast<PointerType>(T);
+  if (!PT || PT->isOpaque())
+    return nullptr;
+  return PT->getNonOpaquePointerElementType();
+}
 
 #define Assert(C, ...)                                                         \
   do {                                                                         \
@@ -120,14 +154,14 @@ public:
         auto *BasePtrTy = dyn_cast<PointerType>(FT->getParamType(BaseIdx));
         Assert(BasePtrTy, "The base pointer of this should be pointer type",
                F.getArg(BaseIdx));
-        Assert(BasePtrTy == Type::getInt8PtrTy(C, 1),
+        Assert(BasePtrTy == PointerType::get(C, 1),
                "The base pointer should be i8 addrspace(1)*",
                F.getArg(BaseIdx));
         continue;
       }
 
       if (isGCPointerType(PT))
-        Assert(PT == Type::getInt8PtrTy(C, 1),
+        Assert(PT == PointerType::get(C, 1),
                "The gc pointer parameter should be i8 addrspace(1)*",
                F.getArg(I));
     }
@@ -144,16 +178,16 @@ public:
 
   void visitAllocaInst(AllocaInst &AI) {
     Type *T = AI.getAllocatedType();
-    if (auto *PT = dyn_cast<PointerType>(T)) {
-      Type *ET = PT->getElementType();
-      if (isGCPointerType(PT) && ET->isStructTy()) {
+    if (T->isPointerTy()) {
+      Type *ET = getPointerElementType(T);
+      if (isGCPointerType(T) && ET && ET->isStructTy()) {
         checkFailed("Alloca %struct addrspace(1)* is not allowed.", &AI);
       }
-      if (isGCPointerType(ET)) {
+      if (ET && isGCPointerType(ET)) {
         checkFailed("Alloca addrspace(1)** is not allowed.", &AI);
       }
 
-      if (!isa<StructType>(ET)) {
+      if (!ET || !isa<StructType>(ET)) {
         return;
       }
 
@@ -176,6 +210,10 @@ public:
 
     bool hasMemset = false;
     for (const User *U : AI.users()) {
+      if (isIntrinsicX(U, Intrinsic::cj_memset)) {
+        hasMemset = true;
+        break;
+      }
       auto *Cast = dyn_cast<BitCastInst>(U);
       if (!Cast) {
         continue;
@@ -350,8 +388,8 @@ public:
 
     Type *SrcTy = I.getOperand(0)->getType();
     Assert(SrcTy->isPointerTy(), "AddrSpaceCast source must be a pointer", &I);
-    Assert((SrcTy->getNonOpaquePointerElementType()->isStructTy() ||
-            SrcTy->getNonOpaquePointerElementType()->isArrayTy()),
+    Type *SrcElemTy = getKnownPointeeType(I.getOperand(0));
+    Assert(SrcElemTy && (SrcElemTy->isStructTy() || SrcElemTy->isArrayTy()),
            "Addrspacecast can only be used for struct* or array* conversion.",
            &I);
 
@@ -421,12 +459,15 @@ private:
   bool Broken = false;
 
   void verifyTypeInfo(GlobalVariable &GV) {
+    traceCJIRVerify("typeinfo.begin", GV.getName());
     TypeInfo Klass(&GV);
+    traceCJIRVerify("typeinfo.kind", GV.getName());
     if (Klass.isPureValueType())
       return;
 
     // check field data
     if (Klass.getFieldNum() > 0) {
+      traceCJIRVerify("typeinfo.fields", GV.getName());
       auto *FieldsTy = dyn_cast<ArrayType>(Klass.getFields()->getType());
       Assert(FieldsTy->getNumElements() == Klass.getFieldNum(),
              "Klass fields num error!", &GV);
@@ -466,17 +507,20 @@ private:
     }
     // check type args data
     if (Klass.getTypeArgNum() > 0) {
+      traceCJIRVerify("typeinfo.typeargs", GV.getName());
       Constant *TypeArgs = Klass.getTypeArgs();
       Assert(TypeArgs->getNumOperands() == Klass.getTypeArgNum(),
              "Klass typeArgs num error!", &GV);
     }
     // check array typeinfo data
     if (Klass.isArray()) {
+      traceCJIRVerify("typeinfo.array", GV.getName());
       Assert(Klass.getSuperOrComponent(),
              "Array Klass has no element typeinfo!", &GV);
     }
     // check typetemplate
     if (auto Temp = Klass.getTypeTemplate()) {
+      traceCJIRVerify("typeinfo.template", GV.getName());
       TypeTemplate TT(Temp);
       Assert(TT.getKind() == Klass.Kind, "typetemplate kind error!", &GV);
       Assert(TT.getFieldNum() == Klass.getFieldNum(),
@@ -485,10 +529,12 @@ private:
              "typetemplate typeArgs num error!", &GV);
     }
     // check reflection
+    traceCJIRVerify("typeinfo.reflect", GV.getName());
     auto ReflectMD = dyn_cast_or_null<MDTuple>(GV.getMetadata("Reflection"));
     if (ReflectMD != nullptr) {
       verifyReflection(ReflectMD, Klass.isEnum());
     }
+    traceCJIRVerify("typeinfo.end", GV.getName());
   }
 
   void verifyTypeTemplate(GlobalVariable &GV) {
@@ -697,8 +743,7 @@ private:
       report_fatal_error("The dst of memcpy base is gc pointer!");
       return true;
     }
-    StructType *ST = dyn_cast<StructType>(
-        PtrBase->getType()->getNonOpaquePointerElementType());
+    StructType *ST = dyn_cast_or_null<StructType>(getKnownPointeeType(PtrBase));
     if (!ST)
       return false;
 
@@ -788,6 +833,7 @@ static bool doCJIRVerify(Module &M) {
     if (!GV.hasInitializer())
       continue;
 
+    traceCJIRVerify("global.verify", GV.getName());
     Broken |= CV.verify(GV);
     if (Broken)
       report_fatal_error("Broken global value found, compilation aborted!");
@@ -797,6 +843,7 @@ static bool doCJIRVerify(Module &M) {
     if (!F.hasCangjieGC())
       continue;
 
+    traceCJIRVerify("function.verify", F.getName());
     Broken |= CV.verify(F);
     if (Broken)
       report_fatal_error("Broken function found, compilation aborted!");

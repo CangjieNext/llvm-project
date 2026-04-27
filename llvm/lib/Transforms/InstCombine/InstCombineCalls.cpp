@@ -120,13 +120,40 @@ static bool hasUndefSource(AnyMemTransferInst *MI) {
   return isa<AllocaInst>(Src) && Src->hasOneUse();
 }
 
+static Type *getKnownPointeeType(Value *V) {
+  if (!V)
+    return nullptr;
+
+  if (auto *GEP = dyn_cast<GEPOperator>(V))
+    return GEP->getSourceElementType();
+  if (auto *AI = dyn_cast<AllocaInst>(V))
+    return AI->getAllocatedType();
+  if (auto *GV = dyn_cast<GlobalVariable>(V))
+    return GV->getValueType();
+  if (auto *Arg = dyn_cast<Argument>(V)) {
+    if (Arg->hasByValAttr())
+      return Arg->getParamByValType();
+  }
+  if (auto *PT = dyn_cast<PointerType>(V->getType())) {
+    if (!PT->isOpaque())
+      return PT->getNonOpaquePointerElementType();
+  }
+
+  Value *Stripped = V->stripPointerCasts();
+  if (Stripped != V)
+    return getKnownPointeeType(Stripped);
+  return nullptr;
+}
+
 // If the element of src/dst is pointer type, return it.
 // If can find actual type, return it.
 // Others, return nullptr.
 static Type *getMatchedType(Value *V, const DataLayout &DL, uint64_t Size) {
   APInt Offset(DL.getIndexSizeInBits(0u), 0);
   auto *Base = V->stripAndAccumulateConstantOffsets(DL, Offset, true);
-  Type *Ty = Base->getType()->getNonOpaquePointerElementType();
+  Type *Ty = getKnownPointeeType(Base);
+  if (!Ty)
+    return nullptr;
   if (Ty->isPointerTy()) {
     return Ty;
   } else if (Ty->isArrayTy()) {

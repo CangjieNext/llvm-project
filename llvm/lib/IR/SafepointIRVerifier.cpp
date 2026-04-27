@@ -944,7 +944,8 @@ bool llvm::isHandledGCPointerType(Type *T) {
 
 bool llvm::isMemoryContainsGCPtrType(Type *T) {
   if (auto *PT = dyn_cast<PointerType>(T)) {
-    return !isGCPointerType(PT) && containsGCPtrType(PT->getElementType());
+    return !isGCPointerType(PT) && !PT->isOpaque() &&
+           containsGCPtrType(PT->getNonOpaquePointerElementType());
   }
   return false;
 }
@@ -1124,7 +1125,7 @@ bool llvm::isInt8AS1Pty(Type *Ty) {
   }
   // 8: for i8 addrspace(1)*
   return (PT->getAddressSpace() == 1) &&
-         (PT->getElementType()->isIntegerTy(8));
+         (PT->isOpaque() || PT->getNonOpaquePointerElementType()->isIntegerTy(8));
 }
 
 // Check if i8 AS(0)*
@@ -1135,7 +1136,30 @@ bool llvm::isInt8AS0Pty(Value *Ptr) {
   }
   // 8: for i8 addrspace(0)*
   return (PT->getAddressSpace() == 0) &&
-         (PT->getElementType()->isIntegerTy(8));
+         (PT->isOpaque() || PT->getNonOpaquePointerElementType()->isIntegerTy(8));
+}
+
+static Type *getKnownPointeeType(const Value *V) {
+  if (!V)
+    return nullptr;
+  if (auto *GEP = dyn_cast<GEPOperator>(V))
+    return GEP->getSourceElementType();
+  if (auto *AI = dyn_cast<AllocaInst>(V))
+    return AI->getAllocatedType();
+  if (auto *GV = dyn_cast<GlobalVariable>(V))
+    return GV->getValueType();
+  if (auto *Arg = dyn_cast<Argument>(V)) {
+    if (Arg->hasByValAttr())
+      return Arg->getParamByValType();
+  }
+  if (auto *PT = dyn_cast<PointerType>(V->getType())) {
+    if (!PT->isOpaque())
+      return PT->getNonOpaquePointerElementType();
+  }
+  const Value *Stripped = V->stripPointerCasts();
+  if (Stripped != V)
+    return getKnownPointeeType(Stripped);
+  return nullptr;
 }
 
 bool llvm::maybeCJFinalizerObj(Value *V) {
@@ -1155,9 +1179,11 @@ Type *llvm::getUniqueActualType(Value *V) {
   Type *CommonTy = nullptr;
   for (Value *U : V->users()) {
     if (auto *BCI = dyn_cast<BitCastInst>(U)) {
-      auto *Ty = BCI->getDestTy();
+      auto *Ty = getKnownPointeeType(BCI);
+      if (!Ty)
+        return nullptr;
       if (CommonTy == nullptr)
-        CommonTy = Ty->getNonOpaquePointerElementType();
+        CommonTy = Ty;
       else if (CommonTy != Ty)
         return nullptr;
     }
@@ -1173,9 +1199,9 @@ void llvm::getAllStructTypes(Value *V, SmallSet<StructType *, 8> &STs) {
     auto *Ptr = WorkList.pop_back_val();
     if (!Visited.insert(Ptr).second)
       continue;
-    if (isa<StructType>(Ptr->getType()->getNonOpaquePointerElementType()))
-      STs.insert(
-          cast<StructType>(Ptr->getType()->getNonOpaquePointerElementType()));
+    if (auto *Ty = getKnownPointeeType(Ptr))
+      if (auto *ST = dyn_cast<StructType>(Ty))
+        STs.insert(ST);
     if (auto *BI = dyn_cast<BitCastInst>(Ptr))
       WorkList.push_back(BI->getOperand(0));
     else if (auto *ASCI = dyn_cast<AddrSpaceCastInst>(Ptr))

@@ -49,6 +49,28 @@ extern cl::opt<bool> CJPipeline;
 
 static bool isUnnamedArrayLayout(StructType *ST);
 
+static Type *getKnownPointeeType(const Value *V) {
+  if (!V)
+    return nullptr;
+  if (auto *GEP = dyn_cast<GEPOperator>(V))
+    return GEP->getSourceElementType();
+  V = V->stripPointerCasts();
+  if (auto *AI = dyn_cast<AllocaInst>(V))
+    return AI->getAllocatedType();
+  if (auto *GEP = dyn_cast<GEPOperator>(V))
+    return GEP->getSourceElementType();
+  if (auto *GV = dyn_cast<GlobalVariable>(V))
+    return GV->getValueType();
+  if (auto *Arg = dyn_cast<Argument>(V)) {
+    if (Arg->hasByValAttr())
+      return Arg->getParamByValType();
+  }
+  Type *Ty = V->getType();
+  if (Ty->isPointerTy() && !Ty->isOpaquePointerTy())
+    return Ty->getNonOpaquePointerElementType();
+  return nullptr;
+}
+
 class TBAAProcessUnit {
 public:
   TBAAProcessUnit(const DataLayout &DL, MDBuilder &MDB, LLVMContext &Context,
@@ -507,7 +529,7 @@ static bool getSrcTyAndOffset(TBAAProcessUnit &TBAAUnit, Value *OP,
     return true;
   } else if (isa<GlobalVariable>(OP) || isa<Argument>(OP)) {
     assert(OP->getType()->isPointerTy());
-    Type *ET = OP->getType()->getNonOpaquePointerElementType();
+    Type *ET = getKnownPointeeType(OP);
     if (auto SET = dyn_cast<StructType>(ET)) {
       TBAAUnit.SrcTy = SET;
       return true;
@@ -722,8 +744,10 @@ static bool updateBySibling(const DataLayout &DL, Instruction *I, Value *Ptr) {
   if (!N)
     return false;
   auto *BaseMD = N;
-  std::string TypeStr =
-      getTypeString(Ptr->getType()->getNonOpaquePointerElementType());
+  Type *PtrTy = getKnownPointeeType(Ptr);
+  if (!PtrTy)
+    return false;
+  std::string TypeStr = getTypeString(PtrTy);
   uint64_t OffsetValue = Offset.getZExtValue();
   while (N && N->getNumOperands() > 1) {
     if (OffsetValue == 0)
@@ -768,9 +792,8 @@ static bool maybeAllocaWithTwoDifferentType(Value *Ptr, Type *Ty,
     I->setMetadata(LLVMContext::MD_tbaa, nullptr);
     return true;
   }
-  if (isa<AllocaInst>(BPtr) && Ty != Ptr->stripPointerCasts()
-                                         ->getType()
-                                         ->getNonOpaquePointerElementType()) {
+  if (isa<AllocaInst>(BPtr) &&
+      Ty != getKnownPointeeType(Ptr->stripPointerCasts())) {
     I->setMetadata(LLVMContext::MD_tbaa, nullptr);
     return true;
   }
@@ -800,17 +823,23 @@ bool llvm::updateTBAA(const DataLayout &DL, Instruction *I) {
       break;
     case Intrinsic::cj_gcread_ref:
       Ptr = getPointerArg(II);
-      Ty = Ptr->getType()->getNonOpaquePointerElementType();
+      // A ref barrier reads a single reference value. When opaque pointers are
+      // enabled, recovering the pointee type from the address may either fail
+      // or over-approximate to the containing aggregate. Use the intrinsic
+      // result type instead.
+      Ty = II->getType();
       break;
     case Intrinsic::cj_gcread_static_ref:
       Ptr = getPointerArg(II);
-      Ty = Ptr->getType()->getNonOpaquePointerElementType();
+      Ty = II->getType();
       break;
     default:
       llvm_unreachable(
           "must be cangjie read/write barrier and not be struct barrier");
     }
   }
+  if (!Ty)
+    return false;
   if (maybeAllocaWithTwoDifferentType(Ptr, Ty, I))
     return false;
   if (I->hasMetadata(LLVMContext::MD_tbaa))
@@ -874,12 +903,12 @@ static bool insertCJTBAA(Function &F) {
         break;
       case Intrinsic::cj_gcread_static_ref:
         OpNO = 0;
-        DstTy = getPointerArg(CB)->getType()->getNonOpaquePointerElementType();
+        DstTy = CB->getType();
         IsTBAAStruct = false;
         break;
       case Intrinsic::cj_gcread_ref:
         OpNO = 1;
-        DstTy = getPointerArg(CB)->getType()->getNonOpaquePointerElementType();
+        DstTy = CB->getType();
         IsTBAAStruct = false;
         break;
       case Intrinsic::cj_gcwrite_ref: {

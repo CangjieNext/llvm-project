@@ -26,15 +26,58 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/SafepointIRVerifier.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/InsertCJTBAA.h"
 #include <cstdint>
+#include <cstdlib>
 
 using namespace llvm;
 using namespace cangjie;
+
+static bool shouldTraceCJBarrierSplit() {
+  const char *Env = std::getenv("CJ_TRACE_CJ_BARRIER_SPLIT");
+  return Env && Env[0] && Env[0] != '0';
+}
+
+static void traceCJBarrierSplit(StringRef Stage, const Instruction *I = nullptr,
+                                const Value *V = nullptr) {
+  if (!shouldTraceCJBarrierSplit())
+    return;
+  errs() << "[cj-barrier-split] stage=" << Stage;
+  if (I) {
+    errs() << " func=";
+    if (const Function *F = I->getFunction())
+      errs() << F->getName();
+    else
+      errs() << "<null>";
+    errs() << " inst=";
+    I->print(errs());
+  }
+  if (V) {
+    errs() << " value=";
+    V->print(errs());
+  }
+  errs() << '\n';
+}
+
+static Type *getKnownPointeeType(const Value *V) {
+  if (!V)
+    return nullptr;
+  if (auto *GEP = dyn_cast<GEPOperator>(V))
+    return GEP->getSourceElementType();
+  V = V->stripPointerCasts();
+  if (auto *AI = dyn_cast<AllocaInst>(V))
+    return AI->getAllocatedType();
+  if (auto *GEP = dyn_cast<GEPOperator>(V))
+    return GEP->getSourceElementType();
+  if (auto *GV = dyn_cast<GlobalVariable>(V))
+    return GV->getValueType();
+  return nullptr;
+}
 
 namespace {
 class SplitBarrier {
@@ -62,6 +105,7 @@ public:
   explicit SplitBarrier(CallInst *CI)
       : M(CI->getModule()), C(CI->getContext()), IRB(CI),
         DL(CI->getModule()->getDataLayout()), Barrier(cast<IntrinsicInst>(CI)) {
+    traceCJBarrierSplit("ctor.begin", CI);
     auto ID = CI->getIntrinsicID();
     if (ID == Intrinsic::cj_gcread_struct ||
         ID == Intrinsic::cj_gcwrite_struct) {
@@ -81,34 +125,40 @@ public:
       report_fatal_error("The size of read barrier is 0!");
     }
     IsRead = Barrier->isCJStructGCRead();
+    traceCJBarrierSplit("ctor.ready", CI);
   }
 
   ~SplitBarrier() = default;
 
-  std::pair<uint64_t, Type *> getValueOffsetAndType(Value *Ptr) {
+  std::pair<uint64_t, Value *> getValueOffsetAndBase(Value *Ptr) {
     APInt Offset(DL.getIndexSizeInBits(0), 0);
     Value *PtrBase = Ptr->stripAndAccumulateConstantOffsets(DL, Offset, true);
-    return {Offset.getZExtValue(), PtrBase->getType()};
+    return {Offset.getZExtValue(), PtrBase};
   }
 
   std::pair<uint64_t, uint64_t>
   findReferencePositions(Value *Ptr, SmallVector<uint64_t, 8> &AllRefPos) {
-    auto [Offset, Ty] = getValueOffsetAndType(Ptr);
+    auto [Offset, PtrBase] = getValueOffsetAndBase(Ptr);
     uint64_t BeginPos = Offset;
     uint64_t EndPos = BeginPos + Size;
-    if (isGCPointerType(Ty)) {
+    if (isGCPointerType(PtrBase->getType())) {
       report_fatal_error("The dst of read struct is gc pointer!");
       return {0, 0};
     }
-    StructType *ST = dyn_cast<StructType>(Ty->getNonOpaquePointerElementType());
-    if (!ST)
-      return {0, 0};
-
-    findReferencePositionInStruct(ST, BeginPos, EndPos, 0, AllRefPos);
+    Type *PointeeTy = getKnownPointeeType(PtrBase);
+    if (auto *ST = dyn_cast_or_null<StructType>(PointeeTy)) {
+      findReferencePositionInStruct(ST, BeginPos, EndPos, 0, AllRefPos);
+      return {BeginPos, EndPos};
+    }
+    if (auto *AT = dyn_cast_or_null<ArrayType>(PointeeTy)) {
+      findReferencePositionInArray(AT, BeginPos, EndPos, 0, AllRefPos);
+      return {BeginPos, EndPos};
+    }
     return {BeginPos, EndPos};
   }
 
   bool doSplit() {
+    traceCJBarrierSplit("doSplit.begin", Barrier);
     if (Size == 8) {
       IsRead ? createReadRefByOffset(0) : createWriteRefByOffset(0);
       return true;
@@ -117,13 +167,20 @@ public:
     SmallVector<uint64_t, 8> AllRefPos;
     auto [BeginPos, EndPos] = findReferencePositions(
         IsRead ? Dst : Src, AllRefPos);
+    if (shouldTraceCJBarrierSplit()) {
+      errs() << "[cj-barrier-split] stage=doSplit.positions"
+             << " func=" << Barrier->getFunction()->getName()
+             << " begin=" << BeginPos << " end=" << EndPos
+             << " refs=" << AllRefPos.size() << '\n';
+    }
     if (EndPos == 0)
       return false;
 
     SplitPosion Posions(BeginPos, EndPos, AllRefPos);
     switch (AllRefPos.size()) {
     case 0:
-      report_fatal_error("The read struct does not contain a reference!");
+      // No ref fields means there is nothing worth splitting here; keep the
+      // original aggregate barrier untouched.
       return false;
     case 1:
       splitForOneRef(Posions, 0);
@@ -264,6 +321,7 @@ public:
   }
 
   void createMemoryByOffset(uint64_t BeginPos, uint64_t EndPos) {
+    traceCJBarrierSplit("createMemory.begin", Barrier);
     if (EndPos <= BeginPos)
       report_fatal_error("The offset of read barrier splitting is error!");
 
@@ -309,40 +367,53 @@ public:
   }
 
   void createReadRefByOffset(uint64_t RefPos) {
+    traceCJBarrierSplit("createReadRef.begin", Barrier);
     auto [DstPtr, SrcPtr] = maybeCreateGEPByOffset(RefPos);
-    Type *Int8AS1Ty = IRB.getInt8PtrTy(1);
+    traceCJBarrierSplit("createReadRef.dst", Barrier, DstPtr);
+    traceCJBarrierSplit("createReadRef.src", Barrier, SrcPtr);
+    traceCJBarrierSplit("createReadRef.base", Barrier, BaseObj);
+    auto *Int8AS0Ty = PointerType::get(C, 0);
+    auto *Int8AS1Ty = PointerType::get(C, 1);
     CallInst *ReadRef = nullptr;
     Value *SrcCast = nullptr;
     if (BaseObj) {
-      SrcCast = IRB.CreateBitCast(SrcPtr, Int8AS1Ty->getPointerTo(1));
+      SrcCast = IRB.CreateBitCast(SrcPtr, Int8AS1Ty);
       Function *Callee = Intrinsic::getDeclaration(M, Intrinsic::cj_gcread_ref);
       ReadRef = IRB.CreateCall(Callee, {BaseObj, SrcCast});
     } else {
-      SrcCast = IRB.CreateBitCast(SrcPtr, Int8AS1Ty->getPointerTo(0));
+      SrcCast = IRB.CreateBitCast(SrcPtr, Int8AS0Ty);
       Function *Callee =
           Intrinsic::getDeclaration(M, Intrinsic::cj_gcread_static_ref);
       ReadRef = IRB.CreateCall(Callee, {SrcCast});
     }
+    traceCJBarrierSplit("createReadRef.after-call", Barrier, ReadRef);
 
     if (isPtrEnumOrOption(getUnderlyingObject(DstPtr))) {
-      ReadRef->setMetadata(LLVMContext::MD_untrusted_ref,
+      ReadRef->setMetadata(C.getMDKindID("untrusted_ref"),
                            MDNode::get(ReadRef->getContext(), {}));
     }
+    traceCJBarrierSplit("createReadRef.after-md", Barrier, ReadRef);
     updateTBAA(DL, ReadRef);
+    traceCJBarrierSplit("createReadRef.after-updateTBAA", Barrier, ReadRef);
 
     ReadRef->setDebugLoc(Barrier->getDebugLoc());
-    Value *DstCast = IRB.CreateBitCast(DstPtr, Int8AS1Ty->getPointerTo(0));
+    Value *DstCast = IRB.CreateBitCast(DstPtr, Int8AS0Ty);
+    traceCJBarrierSplit("createReadRef.dstcast", Barrier, DstCast);
     StoreInst *SI = IRB.CreateStore(ReadRef, DstCast);
+    traceCJBarrierSplit("createReadRef.after-store", Barrier, SI);
     SI->setDebugLoc(Barrier->getDebugLoc());
     // Since we know the type of Dst, this doesn't fail.
     prepareCJTBAA(DL, SI, DstCast, Int8AS1Ty);
+    traceCJBarrierSplit("createReadRef.after-prepareTBAA", Barrier, SI);
   }
 
   void createWriteRefByOffset(uint64_t RefPos) {
+    traceCJBarrierSplit("createWriteRef.begin", Barrier);
     auto [DstPtr, SrcPtr] = maybeCreateGEPByOffset(RefPos);
     // Create load
-    Type *Int8AS1Ty = IRB.getInt8PtrTy(1);
-    Value *SrcCast = IRB.CreateBitCast(SrcPtr, Int8AS1Ty->getPointerTo());
+    auto *Int8AS0Ty = PointerType::get(C, 0);
+    auto *Int8AS1Ty = PointerType::get(C, 1);
+    Value *SrcCast = IRB.CreateBitCast(SrcPtr, Int8AS0Ty);
     LoadInst *LI = LI = IRB.CreateLoad(Int8AS1Ty, SrcCast);
     LI->setDebugLoc(Barrier->getDebugLoc());
     // Since we know the type of Src, this doesn't fail.
@@ -352,12 +423,11 @@ public:
     Value *DstCast = nullptr;
     CallInst *WriteRef = nullptr;
     if (BaseObj) {
-      DstCast = IRB.CreateBitCast(DstPtr, Int8AS1Ty->getPointerTo(1));
-      Function *Callee =
-          Intrinsic::getDeclaration(M, Intrinsic::cj_gcwrite_ref);
+      DstCast = IRB.CreateBitCast(DstPtr, Int8AS1Ty);
+      Function *Callee = Intrinsic::getDeclaration(M, Intrinsic::cj_gcwrite_ref);
       WriteRef = IRB.CreateCall(Callee, {LI, BaseObj, DstCast});
     } else {
-      DstCast = IRB.CreateBitCast(DstPtr, Int8AS1Ty->getPointerTo());
+      DstCast = IRB.CreateBitCast(DstPtr, Int8AS0Ty);
       Function *Callee =
           Intrinsic::getDeclaration(M, Intrinsic::cj_gcwrite_static_ref);
       WriteRef = IRB.CreateCall(Callee, {LI, DstCast});
@@ -408,6 +478,7 @@ static bool simplySplit(Function *F) {
       ToSplits.insert(CI);
   }
   for (auto *I : ToSplits) {
+    traceCJBarrierSplit("simplySplit.next", I);
     SplitBarrier SB(I);
     if (SB.doSplit()) {
       I->eraseFromParent();
@@ -427,7 +498,8 @@ PreservedAnalyses CJBarrierSplit::run(Module &M,
   SmallVector<Function *> AggBarrierIntrinsics = {
       Intrinsic::getDeclaration(&M, Intrinsic::cj_gcread_struct, {IntptrTy}),
       Intrinsic::getDeclaration(&M, Intrinsic::cj_gcwrite_struct,
-                                {Type::getInt8PtrTy(M.getContext()), IntptrTy}),
+                                {PointerType::get(M.getContext(), 0),
+                                 IntptrTy}),
       Intrinsic::getDeclaration(&M, Intrinsic::cj_gcread_static_struct,
                                 {IntptrTy}),
       Intrinsic::getDeclaration(&M, Intrinsic::cj_gcwrite_static_struct,
@@ -452,7 +524,7 @@ public:
     SmallVector<Function *> AggBarrierIntrinsics = {
         Intrinsic::getDeclaration(&M, Intrinsic::cj_gcread_struct),
         Intrinsic::getDeclaration(&M, Intrinsic::cj_gcwrite_struct,
-                                  {Type::getInt8PtrTy(M.getContext())}),
+                                  {PointerType::get(M.getContext(), 0)}),
         Intrinsic::getDeclaration(&M, Intrinsic::cj_gcread_static_struct),
         Intrinsic::getDeclaration(&M, Intrinsic::cj_gcwrite_static_struct)};
     bool Changed = false;

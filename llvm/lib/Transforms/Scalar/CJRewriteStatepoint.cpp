@@ -452,22 +452,18 @@ static Value *findBaseDefiningValue(Value *I, DefiningValueMapTy &Cache,
     return findBaseDefiningValueOfVector(I, Cache, KnownBases);
 
   if (auto *Arg = dyn_cast<Argument>(I)) {
-    if (!Arg->getType()->isOpaquePointerTy()) {
-      // The backend determines whether there is a baseptr based on the frontend
-      // `mut` attribute. In this case, addrspace(1)* may be a derived pointer
-      // and does not have the typeinfio* header, and base pointer is required
-      // for runtime GC parsing. The base is next to the current variable.
-      // The non-mut addrspace(1)* parameter is considered as a pointer with
-      // the typeinfo* header and can be directly recorded in stackmap.
-      assert(isGCPointerType(Arg->getType()) &&
-             "Derived Pointer should be gc-pointer type.");
-      if (isMutThisArg(Arg)) {
-        Function *F = Arg->getParent();
-        Value *ArgBase = F->getArg(Arg->getArgNo() + 1);
-        Cache[I] = ArgBase;
-        setKnownBase(ArgBase, /* IsKnownBase */ true, KnownBases);
-        return ArgBase;
-      }
+    // The backend determines whether there is a baseptr based on the frontend
+    // `mut` attribute. In this case, addrspace(1)* may be a derived pointer
+    // and does not have the typeinfio* header, and base pointer is required
+    // for runtime GC parsing. The base is next to the current variable.
+    // The non-mut addrspace(1)* parameter is considered as a pointer with
+    // the typeinfo* header and can be directly recorded in stackmap.
+    if (isGCPointerType(Arg->getType()) && isMutThisArg(Arg)) {
+      Function *F = Arg->getParent();
+      Value *ArgBase = F->getArg(Arg->getArgNo() + 1);
+      Cache[I] = ArgBase;
+      setKnownBase(ArgBase, /* IsKnownBase */ true, KnownBases);
+      return ArgBase;
     }
 
     // An incoming argument to the function is a base pointer

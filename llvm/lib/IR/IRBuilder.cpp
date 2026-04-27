@@ -838,6 +838,9 @@ CallInst *IRBuilderBase::CreateCJGCStatepointCall(
 
   CallInst *CI =
       CreateCall(Fn, Args, getStatepointBundles(GCArgs, StructArgs), Name);
+  CI->addParamAttr(2,
+                   Attribute::get(this->getContext(), Attribute::ElementType,
+                                  ActualCallee.getFunctionType()));
   return CI;
 }
 
@@ -915,6 +918,9 @@ InvokeInst *IRBuilderBase::CreateCJGCStatepointInvoke(
   InvokeInst *II =
       CreateInvoke(Fn, NormalDest, UnwindDest, Args,
                    getStatepointBundles(GCArgs, StructArgs), Name);
+  II->addParamAttr(2,
+                   Attribute::get(this->getContext(), Attribute::ElementType,
+                                  ActualInvokee.getFunctionType()));
   return II;
 }
 

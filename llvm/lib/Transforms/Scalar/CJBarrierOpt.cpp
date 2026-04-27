@@ -35,11 +35,65 @@
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
+#include <cstdlib>
 #include <cstdint>
 
 using namespace llvm;
+
+static Type *getPointeeType(Type *Ty) {
+  auto *PT = dyn_cast<PointerType>(Ty);
+  if (!PT || PT->isOpaque())
+    return nullptr;
+  return PT->getNonOpaquePointerElementType();
+}
+
+static Type *getKnownBasePointeeType(const Value *V) {
+  if (!V)
+    return nullptr;
+  if (auto *GEP = dyn_cast<GEPOperator>(V))
+    return GEP->getSourceElementType();
+  V = V->stripPointerCasts();
+  if (auto *AI = dyn_cast<AllocaInst>(V))
+    return AI->getAllocatedType();
+  if (auto *GEP = dyn_cast<GEPOperator>(V))
+    return GEP->getSourceElementType();
+  if (auto *GV = dyn_cast<GlobalVariable>(V))
+    return GV->getValueType();
+  if (auto *Arg = dyn_cast<Argument>(V)) {
+    if (Arg->hasByValAttr())
+      return Arg->getParamByValType();
+  }
+  return getPointeeType(V->getType());
+}
+
+static StructType *getStructTypeIfAny(Type *Ty) {
+  if (!Ty || !Ty->isStructTy())
+    return nullptr;
+  return cast<StructType>(Ty);
+}
+
+static bool shouldTraceCJBarrierOpt() {
+  static bool Enabled = std::getenv("CJ_LLVM15_TRACE_BARRIEROPT") != nullptr;
+  return Enabled;
+}
+
+static void traceCJBarrierOpt(StringRef Stage, const Function *F,
+                              const Value *V = nullptr) {
+  if (!shouldTraceCJBarrierOpt())
+    return;
+  errs() << "[cj-barrier-opt] stage=" << Stage;
+  if (F)
+    errs() << " func=" << F->getName();
+  errs() << '\n';
+  if (V) {
+    errs() << "  value: ";
+    V->print(errs());
+    errs() << '\n';
+  }
+}
 
 static cl::opt<unsigned> CJArrayThreshold(
     // 128 is cj-array-threshol default Initial Value
@@ -295,9 +349,11 @@ public:
 
   bool run() {
     bool Changed = false;
+    traceCJBarrierOpt("run.begin", F);
     initData();
 
     for (auto SI : StoreSet) {
+      traceCJBarrierOpt("run.store", F, SI);
       Type *Ty = SI->getValueOperand()->stripPointerCasts()->getType();
       if (!isGCPointerType(Ty))
         continue;
@@ -309,6 +365,7 @@ public:
     }
 
     for (auto Mem : MemSet) {
+      traceCJBarrierOpt("run.mem", F, Mem);
       if (!verifierMemcpy(Mem)) {
         report_fatal_error("Need write barrier in function: " +
                            Twine(F->getName()) + "!!!");
@@ -316,6 +373,7 @@ public:
     }
 
     for (auto Barrier : BarrierSet) {
+      traceCJBarrierOpt("run.barrier", F, Barrier);
       if (optStructBarrier(Barrier) || optStackBarrier(Barrier)) {
         Changed = true;
         continue;
@@ -341,12 +399,17 @@ private:
   DenseMap<BasicBlock *, bool> BBSafepointMaps;
 
   bool verifierMemcpy(CallBase *Mem) {
+    if (auto *Size = dyn_cast<ConstantInt>(Mem->getArgOperand(2));
+        Size && Size->isZero())
+      return true;
     auto GetBeginOffset = [&](Value *V, uint64_t &BeginPos) {
+      Type *KnownTy = getKnownBasePointeeType(V);
+      if (!KnownTy || !KnownTy->isStructTy())
+        return static_cast<StructType *>(nullptr);
       APInt Offset(DL.getIndexSizeInBits(0u), 0);
       Value *Base = V->stripAndAccumulateConstantOffsets(DL, Offset, true);
       BeginPos = Offset.getZExtValue();
-      StructType *ST = dyn_cast<StructType>(
-          Base->getType()->getNonOpaquePointerElementType());
+      StructType *ST = getStructTypeIfAny(getKnownBasePointeeType(Base));
       return ST;
     };
 
@@ -512,17 +575,14 @@ private:
       auto Size = dyn_cast<ConstantInt>(Barrier->getArgOperand(3));
       if (auto AI = dyn_cast<AllocaInst>(Src)) {
         Offset = 0;
-        ST = dyn_cast<StructType>(AI->getAllocatedType());
+        ST = getStructTypeIfAny(AI->getAllocatedType());
       } else if (auto GEP = dyn_cast<GetElementPtrInst>(Src)) {
         if (!GEP->accumulateConstantOffset(DL, Offset))
           Offset = -1;
-        ST = dyn_cast<StructType>(GEP->getPointerOperand()
-                                      ->getType()
-                                      ->getNonOpaquePointerElementType());
+        ST = getStructTypeIfAny(getKnownBasePointeeType(GEP->getPointerOperand()));
       } else if (auto Arg = dyn_cast<Argument>(Src)) {
         Offset = 0;
-        ST = dyn_cast<StructType>(
-            Arg->getType()->getNonOpaquePointerElementType());
+        ST = getStructTypeIfAny(getKnownBasePointeeType(Arg));
       }
       if (Offset != -1 && ST != nullptr && Size != nullptr &&
           !containsRefInStruct(ST, Offset.getSExtValue(),
@@ -557,6 +617,9 @@ private:
       Uses.insert(V);
       for (auto Use : V->users()) {
         auto I = dyn_cast<Instruction>(Use);
+        if (!I) {
+          continue;
+        }
         switch (I->getOpcode()) {
         default:
           break;
@@ -580,6 +643,7 @@ private:
     for (auto &BB : *F) {
       bool IsSafepointBB = false;
       for (auto &I : BB) {
+        traceCJBarrierOpt("init.inst", F, &I);
         if (isa<LoadInst>(&I) && containsGCPtrType(I.getType())) {
           fillUses(UsesMaps[&I], &I);
         }
@@ -625,9 +689,7 @@ private:
                           uint64_t CurPos) {
     bool Result = false;
     Type *ElementTy = AT->getElementType();
-    if (isa<PointerType>(ElementTy)) {
-      assert(isGCPointerType(ElementTy) &&
-             "The elements of array can only be gc pointers.");
+    if (isGCPointerType(ElementTy)) {
       return true;
     } else if (auto AST = dyn_cast<StructType>(ElementTy)) {
       for (unsigned Idx = 0; Idx < AT->getNumElements(); Idx++) {
@@ -665,17 +727,19 @@ private:
     auto SizeOp = dyn_cast<ConstantInt>(Mem->getLength());
     if (!SizeOp)
       return false;
+    if (SizeOp->isZero())
+      return false;
 
     uint64_t Size = SizeOp->getZExtValue();
     Value *Src = Mem->getArgOperand(1)->stripPointerCasts();
     Value *Dst = Mem->getArgOperand(0)->stripPointerCasts();
-    Type *SrcTy = Src->getType()->getNonOpaquePointerElementType();
-    Type *DstTy = Dst->getType()->getNonOpaquePointerElementType();
-    if (SrcTy->isStructTy() &&
+    Type *SrcTy = getKnownBasePointeeType(Src);
+    Type *DstTy = getKnownBasePointeeType(Dst);
+    if (SrcTy && SrcTy->isStructTy() &&
         containsRefInStruct(cast<StructType>(SrcTy), 0, Size))
       return true;
 
-    if (DstTy->isStructTy() &&
+    if (DstTy && DstTy->isStructTy() &&
         containsRefInStruct(cast<StructType>(DstTy), 0, Size))
       return true;
 
@@ -683,8 +747,8 @@ private:
     Value *PtrBase = Src->stripAndAccumulateConstantOffsets(DL, Offset, false);
     uint64_t Off = Offset.getZExtValue();
     uint64_t End = Off + Size;
-    Type *BaseTy = PtrBase->getType()->getNonOpaquePointerElementType();
-    if (BaseTy->isStructTy() &&
+    Type *BaseTy = getKnownBasePointeeType(PtrBase);
+    if (BaseTy && BaseTy->isStructTy() &&
         containsRefInStruct(cast<StructType>(BaseTy), Off, End))
       return true;
 
