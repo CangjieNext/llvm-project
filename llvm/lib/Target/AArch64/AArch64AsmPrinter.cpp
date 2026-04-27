@@ -84,6 +84,11 @@ static bool isOutlinedFunctionCallTarget(const MachineOperand &MO) {
   return F != nullptr && F->getName().startswith("OUTLINED_FUNCTION_");
 }
 
+static const char *CangjieOutlinedMultiStatepointAttr =
+    "cangjie-outlined-multistatepoint";
+static const char *CangjieOutlinedMultiStatepointName =
+    "OUTLINED_FUNCTION_CANGJIE_STATEPOINT";
+
 static StringRef getCallTargetName(const MachineOperand &MO) {
   if (MO.isGlobal()) {
     const auto *F = dyn_cast<Function>(MO.getGlobal());
@@ -192,6 +197,7 @@ public:
     // Emit the XRay table for this function.
     emitXRayTable();
 
+    SM.recordCangjieOutlinedFunctionStackMap();
     CMI.recordCurrentFunc();
 
     // We didn't modify anything.
@@ -1596,8 +1602,12 @@ void AArch64AsmPrinter::emitInstruction(const MachineInstr *MI) {
         report_fatal_error("There is not cangjie package id in module!");
       }
       StringRef PACKAGEID = dyn_cast<MDString>(MD)->getString();
+      StringRef MethodDescName =
+          Func.hasFnAttribute(CangjieOutlinedMultiStatepointAttr)
+              ? StringRef(CangjieOutlinedMultiStatepointName)
+              : MF->getName();
       MCSymbol *DescSymbol = OutContext.getOrCreateSymbol(
-          ".Lmethod_desc." + PACKAGEID + "._" + MF->getName());
+          ".Lmethod_desc." + PACKAGEID + "._" + MethodDescName);
       Expr = MCSymbolRefExpr::create(
           DescSymbol, MCSymbolRefExpr::VK_PAGE, OutContext);
       // adrp x10, .Lmethod_desc.PACKAGEID.xxx@PAGE
