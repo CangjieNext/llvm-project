@@ -132,6 +132,10 @@ static cl::opt<bool> EnableCJNewObjFast("enable-cangjie-new-obj-fastpath",
                                         cl::init(true), cl::ReallyHidden);
 static cl::opt<bool> ReflectOffset("reflect-offset", cl::init(true),
                                    cl::NotHidden);
+static const char *CangjieOutlinedMultiStatepointAttr =
+    "cangjie-outlined-multistatepoint";
+static const char *CangjieOutlinedMultiStatepointName =
+    "OUTLINED_FUNCTION_CANGJIE_STATEPOINT";
 
 namespace llvm {
 extern cl::opt<unsigned> CangjieStackCheckSize;
@@ -1055,8 +1059,12 @@ void AsmPrinter::emitFunctionHeader() {
   const Triple TT(F.getParent()->getTargetTriple());
   if (F.hasCangjieGC() && !F.hasFnAttribute("leaf-function") &&
       !TT.isOSBinFormatMachO()) {
+    StringRef MethodDescName =
+        F.hasFnAttribute(CangjieOutlinedMultiStatepointAttr)
+            ? StringRef(CangjieOutlinedMultiStatepointName)
+            : CurrentFnSym->getName();
     MCSymbol *DescSymbol = OutContext.getOrCreateSymbol(
-        ".Lmethod_desc." + CurrentFnSym->getName());
+        ".Lmethod_desc." + MethodDescName);
     MCSymbol *PCSym = OutContext.createTempSymbol();
     OutStreamer->emitLabel(PCSym);
     const MCExpr *MethodDescOffset = MCBinaryExpr::createSub(

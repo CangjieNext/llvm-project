@@ -417,6 +417,11 @@ public:
   /// Generate a stackmap record for a cangjie statepoint instruction.
   void recordCJStackMap(const MachineInstr &MI, bool RecordAllRefInReg = false);
 
+  /// Record the shared empty Cangjie stackmap used by multi-statepoint outlined
+  /// helpers. These helpers contain no stackmap callsites, but still need
+  /// prologue information for x29/lr.
+  void recordCangjieOutlinedFunctionStackMap();
+
   /// If there is any stack map data, create a stack map section and serialize
   /// the map info into it. This clears the stack map data structures
   /// afterwards.
