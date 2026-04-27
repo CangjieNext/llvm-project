@@ -401,6 +401,11 @@ public:
     LOHRelated.insert(Args.begin(), Args.end());
   }
 
+  void clearLOHDirectives() {
+    LOHContainerSet.clear();
+    LOHRelated.clear();
+  }
+
   SmallVectorImpl<ForwardedRegister> &getForwardedMustTailRegParms() {
     return ForwardedMustTailRegParms;
   }
