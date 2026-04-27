@@ -36,8 +36,6 @@ inline llvm::StringRef FormatCJThreadState(CJThreadState state) {
     case CJThreadState::eSyscall: return "syscall";
     default: return "unknown";
     }
-  
-  return "unknown";
 }
 
 struct CJThreadInfoOverview {
@@ -86,7 +84,7 @@ public:
 
   void UpdateInfo(const CJThreadInfoOverview &info);
 
-  static bool WaitUntilCJThreadScheduled(Target &target, lldb::CJThreadSP selected_thread, Status error);
+  static bool WaitUntilCJThreadScheduled(Target &target, lldb::CJThreadSP selected_thread, Status &error);
 
   static llvm::StringRef type_decl_of_cjcontext_x86_linux;
   static llvm::StringRef type_decl_of_cjcontext_x86_windows;
