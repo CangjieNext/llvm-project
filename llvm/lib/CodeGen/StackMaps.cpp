@@ -75,6 +75,10 @@ enum CJStackMapFormat : uint64_t {
   CJ_STACKMAP_COMPRESSED_BITMAP = 1
 };
 const int32_t RawDataWidth = 31; // for compressed stack map
+const char *CangjieOutlinedMultiStatepointAttr =
+    "cangjie-outlined-multistatepoint";
+const char *CangjieOutlinedMultiStatepointName =
+    "OUTLINED_FUNCTION_CANGJIE_STATEPOINT";
 
 // unordered_map<regNo, bitIdx>, regNo can be used to find callee saved reg
 // while bitIdx is used in prologue
@@ -1047,6 +1051,35 @@ void StackMaps::recordCJStackMap(const MachineInstr &MI,
   recordStatepoint(*MILabel, MI, RecordAllRefInReg);
 }
 
+void StackMaps::recordCangjieOutlinedFunctionStackMap() {
+  if (!AP.MF ||
+      !AP.MF->getFunction().hasFnAttribute(CangjieOutlinedMultiStatepointAttr))
+    return;
+
+  const Triple TT(AP.TM.getTargetTriple());
+  if (!TT.isAArch64())
+    return;
+
+  std::string FnSymName = CangjieOutlinedMultiStatepointName;
+  if (TT.isOSBinFormatMachO())
+    FnSymName.insert(FnSymName.begin(), '_');
+  MCSymbol *FnSym = AP.OutStreamer->getContext().getOrCreateSymbol(FnSymName);
+  if (FnInfos.find(FnSym) != FnInfos.end())
+    return;
+
+  OffsetStepSize = 8;
+
+  std::map<unsigned, int> CSReg2Stack;
+  // AArch64 DWARF register numbers: x29/fp = 29, x30/lr = 30.
+  // The custom outlined helper frame sets x29 to the saved FP slot:
+  //   stp x29, x30, [sp, #16]
+  //   add x29, sp, #16
+  CSReg2Stack[29] = 0;
+  CSReg2Stack[30] = 8;
+  FnInfos.insert(
+      std::make_pair(FnSym, FunctionInfo(/*StackSize=*/32, CSReg2Stack)));
+}
+
 /// Emit the stackmap header.
 ///
 /// Header {
@@ -1308,120 +1341,27 @@ StackMaps::createCompressedInfoForInstr(const MachineInstr &MI) const {
   return createCompressedInfoForCallsite(It->second.front());
 }
 
-static uint64_t getAbsForHash(int64_t Value) {
-  if (Value >= 0)
-    return static_cast<uint64_t>(Value);
-  return 0 - static_cast<uint64_t>(Value);
-}
-
-static void appendUInt64Vec(raw_ostream &OS, ArrayRef<uint64_t> Values) {
-  OS << "[";
-  for (unsigned I = 0, E = Values.size(); I != E; ++I) {
-    if (I)
-      OS << ",";
-    OS << Values[I];
-  }
-  OS << "]";
-}
-
-static void appendUInt32Vec(raw_ostream &OS, ArrayRef<uint32_t> Values) {
-  OS << "[";
-  for (unsigned I = 0, E = Values.size(); I != E; ++I) {
-    if (I)
-      OS << ",";
-    OS << Values[I];
-  }
-  OS << "]";
-}
-
-static void appendRegItemHash(raw_ostream &OS, const CompressedInfo &Data,
-                              unsigned RegIdx) {
-  OS << "R";
-  if (RegIdx >= Data.RegItems.Items.size()) {
-    OS << "<invalid:" << RegIdx << ">";
-    return;
-  }
-  OS << Data.RegItems.Items[RegIdx].RegBit;
-}
-
-static void appendSlotItemHash(raw_ostream &OS, const CompressedInfo &Data,
-                               unsigned SlotIdx) {
-  OS << "S";
-  if (SlotIdx >= Data.SlotItems.Items.size()) {
-    OS << "<invalid:" << SlotIdx << ">";
-    return;
-  }
-
-  const auto &Slot = Data.SlotItems.Items[SlotIdx];
-  OS << getAbsForHash(Slot.BaseOffset) << ":";
-  appendUInt64Vec(OS, Slot.SlotBit);
-  OS << ":";
-  appendUInt32Vec(OS, Slot.CompressedSlotBit);
-}
-
-static unsigned getDerivedInfoEnd(const CompressedInfo &Data,
-                                  unsigned StackMapItemIdx,
-                                  unsigned DerivedStartIdx) {
-  if (DerivedStartIdx == 0)
-    return 0;
-
-  unsigned DerivedEnd = Data.DerivedInfo.size();
-  unsigned CurStackMapIdx = 0;
-  for (const auto &StackMapItem : Data.StackMapItem) {
-    if (CurStackMapIdx++ <= StackMapItemIdx)
-      continue;
-
-    unsigned NextStartIdx = StackMapItem.second.DerivedInfoStartIdx;
-    if (NextStartIdx != 0 && NextStartIdx > DerivedStartIdx) {
-      DerivedEnd = NextStartIdx;
-      break;
-    }
-  }
-  return DerivedEnd;
-}
 
 std::string StackMaps::getCompressedInfoHash(const CompressedInfo &Data) const {
   std::string Hash;
-  raw_string_ostream OS(Hash);
 
   unsigned StackMapItemIdx = 0;
   for (const auto &StackMapItem : Data.StackMapItem) {
     const auto &Idx = StackMapItem.second;
     if (StackMapItemIdx)
-      OS << "|";
+      Hash += "|";
 
-    OS << "CS" << StackMapItemIdx << "{";
-    appendRegItemHash(OS, Data, Idx.RegIdxPlusOne);
-    OS << ";";
-    appendSlotItemHash(OS, Data, Idx.SlotIdxPlusOne);
+    Hash += std::to_string(Data.RegItems.Items[Idx.RegIdxPlusOne].RegBit) + "_";
+    Hash += std::to_string(Data.SlotItems.Items[Idx.SlotIdxPlusOne].BaseOffset) + "_";
 
-    unsigned DerivedEnd =
-        getDerivedInfoEnd(Data, StackMapItemIdx, Idx.DerivedInfoStartIdx);
-    OS << ";D[";
-    for (unsigned I = Idx.DerivedInfoStartIdx; I != DerivedEnd; ++I) {
-      if (I != Idx.DerivedInfoStartIdx)
-        OS << ",";
-      if (I >= Data.DerivedInfo.size()) {
-        OS << "<invalid:" << I << ">";
-        break;
-      }
-      OS << "(" << Data.DerivedInfo[I].first << ","
-         << Data.DerivedInfo[I].second << ")";
-    }
-    OS << "]";
-
-    if (Idx.SPRegIdxPlusOne != 0 || Idx.SPSlotIdxPlusOne != 0) {
-      OS << ";";
-      appendRegItemHash(OS, Data, Idx.SPRegIdxPlusOne);
-      OS << ";";
-      appendSlotItemHash(OS, Data, Idx.SPSlotIdxPlusOne);
+    for (auto Slot: Data.SlotItems.Items[Idx.SlotIdxPlusOne].SlotBit) {
+      Hash += std::to_string(Slot) + "_" + std::to_string(Idx.SlotIdxPlusOne);
     }
 
-    OS << "}";
+
     ++StackMapItemIdx;
   }
 
-  OS.flush();
   return Hash;
 }
 

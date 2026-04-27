@@ -58,6 +58,10 @@ static uint32_t StrPoolDictSplitMinSize = 1000;
 namespace {
 const std::string StrPool(".Lstr_pool.");
 const std::string StrPoolDict(".Lstr_pool_dict.");
+const char *CangjieOutlinedMultiStatepointAttr =
+    "cangjie-outlined-multistatepoint";
+const char *CangjieOutlinedMultiStatepointName =
+    "OUTLINED_FUNCTION_CANGJIE_STATEPOINT";
 } // namespace
 CJMetadataInfo::CJMetadataInfo(AsmPrinter &AP, StackMaps &SM)
     : AP(AP), SM(SM), OS(*AP.OutStreamer), Context(AP.OutContext),
@@ -247,6 +251,20 @@ void CJMetadataInfo::recordCurrentFunc() {
   const Function &F = AP.MF->getFunction();
   if (!F.hasCangjieGC() || F.hasFnAttribute("leaf-function"))
     return;
+
+  if (F.hasFnAttribute(CangjieOutlinedMultiStatepointAttr)) {
+    if (RecordedCangjieOutlinedMultiStatepoint)
+      return;
+
+    std::string FnSymName = CangjieOutlinedMultiStatepointName;
+    if (IsMachO)
+      FnSymName.insert(FnSymName.begin(), '_');
+    MCSymbol *SharedFuncSym = Context.getOrCreateSymbol(FnSymName);
+    MethodTable.push_back(std::make_tuple(
+        SharedFuncSym, nullptr, nullptr, AP.MF->getFunctionNumber()));
+    RecordedCangjieOutlinedMultiStatepoint = true;
+    return;
+  }
 
   // pc + methodinfo. stackmap symbol
   if (F.hasComdat()) {

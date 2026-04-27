@@ -46,6 +46,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LEB128.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include <cassert>
@@ -7067,6 +7068,7 @@ enum MachineOutlinerClass {
   MachineOutlinerNoLRSave, /// Emit a call and return.
   MachineOutlinerThunk,    /// Emit a call and tail-call.
   MachineOutlinerStatepointThunk, /// Emit a STATEPOINT and tail-call.
+  MachineOutlinerStatepointCall, /// Lower outlined STATEPOINTs to calls.
   MachineOutlinerRegSave,  /// Same as default, but save to a register.
   /// Cangjie prologue outlining. The caller keeps the ADR/ADRP/ADD prefix,
   /// branches to the outlined prologue body, and the outlined function returns
@@ -7335,6 +7337,18 @@ static bool isAllowedCangjiePrologueLRUse(MachineInstr &MI) {
          hasCangjiePrologueAddressPrefixAtBlockBegin(*MI.getParent());
 }
 
+static bool isAArch64TailCallReturnOpcode(unsigned Opcode) {
+  switch (Opcode) {
+  case AArch64::TCRETURNdi:
+  case AArch64::TCRETURNri:
+  case AArch64::TCRETURNriALL:
+  case AArch64::TCRETURNriBTI:
+    return true;
+  default:
+    return false;
+  }
+}
+
 static bool isSupportedStatepointForOutlining(const MachineInstr &MI) {
   if (MI.getOpcode() != TargetOpcode::STATEPOINT)
     return false;
@@ -7374,6 +7388,59 @@ static bool canOutlineStatepointAsThunk(const MachineInstr &MI, bool HasBTI) {
 
   StatepointOpers SO(&MI);
   return SO.getCallTarget().getType() != MachineOperand::MO_Register || !HasBTI;
+}
+
+static unsigned countStatepointsInCandidate(outliner::Candidate &C) {
+  unsigned NumStatepoints = 0;
+  for (MachineInstr &MI : make_range(C.front(), std::next(C.back()))) {
+    if (MI.getOpcode() == TargetOpcode::STATEPOINT)
+      ++NumStatepoints;
+  }
+  return NumStatepoints;
+}
+
+static bool isSupportedMultiStatepointSequence(outliner::Candidate &C,
+                                               StringRef *RejectReason =
+                                                   nullptr) {
+  unsigned NumStatepoints = 0;
+  for (MachineInstr &MI : make_range(C.front(), std::next(C.back()))) {
+    if (MI.getOpcode() != TargetOpcode::STATEPOINT) {
+      if (isAArch64TailCallReturnOpcode(MI.getOpcode()) || MI.isTerminator()) {
+        if (RejectReason)
+          *RejectReason = "contains tail-call or terminator";
+        return false;
+      }
+
+      if (MI.isCall()) {
+        if (RejectReason)
+          *RejectReason = "contains non-statepoint call";
+        return false;
+      }
+
+      continue;
+    }
+
+    if (!isSupportedStatepointForOutlining(MI)) {
+      if (RejectReason)
+        *RejectReason = "unsupported statepoint form";
+      return false;
+    }
+
+    ++NumStatepoints;
+  }
+
+  if (NumStatepoints < 2) {
+    if (RejectReason)
+      *RejectReason = "contains fewer than two statepoints";
+    return false;
+  }
+
+  return true;
+}
+
+static bool isCJMachO(const MachineFunction &MF) {
+  return MF.getFunction().hasCangjieGC() &&
+         MF.getTarget().getTargetTriple().isOSBinFormatMachO();
 }
 
 Register
@@ -7637,7 +7704,8 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
   }
 
   // Returns true if an instructions is safe to fix up, false otherwise.
-  auto IsSafeToFixup = [this, &TRI](MachineInstr &MI) {
+  auto IsSafeToFixup = [this, &TRI](MachineInstr &MI,
+                                    int64_t StackAdjustment) {
     if (MI.isCall())
       return true;
 
@@ -7676,7 +7744,8 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
       unsigned DummyWidth;
       getMemOpInfo(MI.getOpcode(), Scale, DummyWidth, MinOffset, MaxOffset);
 
-      Offset += 16; // Update the offset to what it would be if we outlined.
+      // Update the offset to what it would be if we outlined.
+      Offset += StackAdjustment;
       if (Offset < MinOffset * (int64_t)Scale.getFixedSize() ||
           Offset > MaxOffset * (int64_t)Scale.getFixedSize())
         return false;
@@ -7694,7 +7763,54 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
   // True if it's possible to fix up each stack instruction in this sequence.
   // Important for frames/call variants that modify the stack.
   bool AllStackInstrsSafe = std::all_of(
-      FirstCand.front(), std::next(FirstCand.back()), IsSafeToFixup);
+      FirstCand.front(), std::next(FirstCand.back()),
+      [&](MachineInstr &MI) { return IsSafeToFixup(MI, 16); });
+
+  if (countStatepointsInCandidate(FirstCand) >= 2) {
+    if (!isSupportedMultiStatepointSequence(FirstCand))
+      return outliner::OutlinedFunction();
+
+    bool AllCangjieStackInstrsSafe = std::all_of(
+        FirstCand.front(), std::next(FirstCand.back()),
+        [&](MachineInstr &MI) { return IsSafeToFixup(MI, 32); });
+    if (!AllCangjieStackInstrsSafe)
+      return outliner::OutlinedFunction();
+
+    if (CFICount > 0)
+      return outliner::OutlinedFunction();
+
+    llvm::erase_if(RepeatedSequenceLocs, [&](outliner::Candidate &C) {
+      if (!isSupportedMultiStatepointSequence(C))
+        return true;
+
+      bool StackInstrsSafe = std::all_of(
+          C.front(), std::next(C.back()),
+          [&](MachineInstr &MI) { return IsSafeToFixup(MI, 32); });
+      if (!StackInstrsSafe)
+        return true;
+
+      if (!C.isAvailableAcrossAndOutOfSeq(AArch64::X9, TRI) ||
+          (isCJMachO(*C.getMF()) &&
+           !C.isAvailableAcrossAndOutOfSeq(AArch64::X10, TRI)))
+        return true;
+
+      if (!C.isAvailableAcrossAndOutOfSeq(AArch64::LR, TRI))
+        return true;
+
+      return false;
+    });
+
+    if (RepeatedSequenceLocs.size() < 2) {
+      RepeatedSequenceLocs.clear();
+      return outliner::OutlinedFunction();
+    }
+
+    SetCandidateCallInfo(MachineOutlinerNoLRSave, 4);
+    unsigned CangjieFrameOverhead = isCJMachO(*FirstCand.getMF()) ? 40 : 32;
+    return outliner::OutlinedFunction(RepeatedSequenceLocs, SequenceSize,
+                                      CangjieFrameOverhead,
+                                      MachineOutlinerStatepointCall);
+  }
 
   // If the last instruction in any candidate is a terminator, then we should
   // tail call all of the candidates.
@@ -8152,7 +8268,8 @@ AArch64InstrInfo::getOutliningType(MachineBasicBlock::iterator &MIT,
   return outliner::InstrType::Legal;
 }
 
-void AArch64InstrInfo::fixupPostOutline(MachineBasicBlock &MBB) const {
+void AArch64InstrInfo::fixupPostOutline(MachineBasicBlock &MBB,
+                                        int64_t SPAdjustment) const {
   for (MachineInstr &MI : MBB) {
     const MachineOperand *Base;
     unsigned Width;
@@ -8176,10 +8293,12 @@ void AArch64InstrInfo::fixupPostOutline(MachineBasicBlock &MBB) const {
     assert(Scale != 0 && "Unexpected opcode!");
     assert(!OffsetIsScalable && "Expected offset to be a byte offset");
 
-    // We've pushed the return address to the stack, so add 16 to the offset.
+    // We've pushed a frame to the stack, so add the stack adjustment to the
+    // offset.
     // This is safe, since we already checked if it would overflow when we
     // checked if this instruction was legal to outline.
-    int64_t NewImm = (Offset + 16) / (int64_t)Scale.getFixedSize();
+    int64_t NewImm =
+        (Offset + SPAdjustment) / (int64_t)Scale.getFixedSize();
     StackOffsetOperand.setImm(NewImm);
   }
 }
@@ -8252,11 +8371,150 @@ static void signOutlinedFunction(MachineFunction &MF, MachineBasicBlock &MBB,
   }
 }
 
+static void lowerOutlinedStatepointsToCalls(MachineBasicBlock &MBB,
+                                            MachineFunction &MF,
+                                            const AArch64InstrInfo &TII) {
+  for (auto I = MBB.begin(), E = MBB.end(); I != E;) {
+    MachineInstr *SP = &*I++;
+    if (SP->getOpcode() != TargetOpcode::STATEPOINT)
+      continue;
+
+    StatepointOpers SO(SP);
+    unsigned CallOpcode;
+    switch (SO.getCallTarget().getType()) {
+    case MachineOperand::MO_GlobalAddress:
+    case MachineOperand::MO_ExternalSymbol:
+    case MachineOperand::MO_Immediate:
+      CallOpcode = AArch64::BL;
+      break;
+    case MachineOperand::MO_Register:
+      CallOpcode = AArch64::BLR;
+      break;
+    default:
+      llvm_unreachable("unsupported outlined statepoint call target");
+    }
+
+    MachineInstrBuilder MIB =
+        BuildMI(MBB, SP->getIterator(), DebugLoc(), TII.get(CallOpcode))
+            .add(SO.getCallTarget());
+    MIB->setMemRefs(MF, SP->memoperands());
+    if (SP->shouldUpdateCallSiteInfo())
+      MF.eraseCallSiteInfo(SP);
+    SP->eraseFromParent();
+  }
+}
+
 void AArch64InstrInfo::buildOutlinedFrame(
     MachineBasicBlock &MBB, MachineFunction &MF,
     const outliner::OutlinedFunction &OF) const {
 
   AArch64FunctionInfo *FI = MF.getInfo<AArch64FunctionInfo>();
+
+  if (!OF.Candidates.empty() &&
+      OF.FrameConstructionID == MachineOutlinerStatepointCall) {
+    lowerOutlinedStatepointsToCalls(MBB, MF, *this);
+    assert(llvm::none_of(MBB.instrs(), [](const MachineInstr &MI) {
+             return MI.getOpcode() == TargetOpcode::STATEPOINT ||
+                    isAArch64TailCallReturnOpcode(MI.getOpcode());
+           }) &&
+           "multi-statepoint outlining must lower to regular calls only");
+
+    constexpr int64_t CangjieFrameSize = 32;
+    constexpr int64_t CangjieSavedFPLROffset = 2;
+
+    fixupPostOutline(MBB, CangjieFrameSize);
+
+    if (!MBB.isLiveIn(AArch64::FP))
+      MBB.addLiveIn(AArch64::FP);
+    if (!MBB.isLiveIn(AArch64::LR))
+      MBB.addLiveIn(AArch64::LR);
+
+    MachineBasicBlock::iterator It = MBB.begin();
+    BuildMI(MBB, It, DebugLoc(), get(AArch64::ADR), AArch64::X9)
+        .addGlobalAddress(&MF.getFunction())
+        .setMIFlag(MachineInstr::FrameSetup);
+
+    if (isCJMachO(MF))
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::ADRP), AArch64::X10)
+          .addGlobalAddress(&MF.getFunction())
+          .setMIFlag(MachineInstr::FrameSetup);
+
+    BuildMI(MBB, It, DebugLoc(), get(AArch64::SUBXri), AArch64::SP)
+        .addReg(AArch64::SP)
+        .addImm(CangjieFrameSize)
+        .addImm(0)
+        .setMIFlag(MachineInstr::FrameSetup);
+
+    if (FI->needsDwarfUnwindInfo()) {
+      int64_t StackPosEntry =
+          MF.addFrameInst(MCCFIInstruction::cfiDefCfaOffset(
+              nullptr, CangjieFrameSize));
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::CFI_INSTRUCTION))
+          .addCFIIndex(StackPosEntry)
+          .setMIFlags(MachineInstr::FrameSetup);
+    }
+
+    BuildMI(MBB, It, DebugLoc(), get(AArch64::STPXi))
+        .addReg(AArch64::FP)
+        .addReg(AArch64::LR)
+        .addReg(AArch64::SP)
+        .addImm(CangjieSavedFPLROffset)
+        .setMIFlag(MachineInstr::FrameSetup);
+    BuildMI(MBB, It, DebugLoc(), get(AArch64::ADDXri), AArch64::FP)
+        .addReg(AArch64::SP)
+        .addImm(CangjieFrameSize - 16)
+        .addImm(0)
+        .setMIFlag(MachineInstr::FrameSetup);
+
+    if (isCJMachO(MF)) {
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::STPXi))
+          .addReg(AArch64::X10)
+          .addReg(AArch64::X9)
+          .addReg(AArch64::FP)
+          .addImm(-2)
+          .setMIFlag(MachineInstr::FrameSetup);
+    } else {
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::STURXi))
+          .addReg(AArch64::X9)
+          .addReg(AArch64::FP)
+          .addImm(-8)
+          .setMIFlag(MachineInstr::FrameSetup);
+    }
+
+    if (FI->needsDwarfUnwindInfo()) {
+      const TargetSubtargetInfo &STI = MF.getSubtarget();
+      const MCRegisterInfo *MRI = STI.getRegisterInfo();
+      unsigned FPDwarfReg = MRI->getDwarfRegNum(AArch64::FP, true);
+      unsigned LRDwarfReg = MRI->getDwarfRegNum(AArch64::LR, true);
+      int64_t FPPosEntry = MF.addFrameInst(
+          MCCFIInstruction::createOffset(nullptr, FPDwarfReg, -16));
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::CFI_INSTRUCTION))
+          .addCFIIndex(FPPosEntry)
+          .setMIFlags(MachineInstr::FrameSetup);
+      int64_t LRPosEntry = MF.addFrameInst(
+          MCCFIInstruction::createOffset(nullptr, LRDwarfReg, -8));
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::CFI_INSTRUCTION))
+          .addCFIIndex(LRPosEntry)
+          .setMIFlags(MachineInstr::FrameSetup);
+    }
+
+    BuildMI(MBB, MBB.end(), DebugLoc(), get(AArch64::LDPXi))
+        .addReg(AArch64::FP, RegState::Define)
+        .addReg(AArch64::LR, RegState::Define)
+        .addReg(AArch64::SP)
+        .addImm(CangjieSavedFPLROffset)
+        .setMIFlag(MachineInstr::FrameDestroy);
+    BuildMI(MBB, MBB.end(), DebugLoc(), get(AArch64::ADDXri), AArch64::SP)
+        .addReg(AArch64::SP)
+        .addImm(CangjieFrameSize)
+        .addImm(0)
+        .setMIFlag(MachineInstr::FrameDestroy);
+    BuildMI(MBB, MBB.end(), DebugLoc(), get(AArch64::RET))
+        .addReg(AArch64::LR);
+
+    FI->setOutliningStyle("Cangjie Statepoint Function");
+    return;
+  }
 
   if (OF.FrameConstructionID == MachineOutlinerTailCall)
     FI->setOutliningStyle("Tail Call");
@@ -8444,21 +8702,29 @@ MachineBasicBlock::iterator AArch64InstrInfo::insertOutlinedCall(
     MachineFunction &MF, outliner::Candidate &C) const {
 
   if (C.CallConstructionID == MachineOutlinerStatepointThunk) {
-    MachineInstr &OrigSP = *C.back();
-    StatepointOpers SO(&OrigSP);
+    MachineInstr *OrigSP = nullptr;
+    for (MachineInstr &MI : make_range(C.front(), std::next(C.back()))) {
+      if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+        OrigSP = &MI;
+        break;
+      }
+    }
+    assert(OrigSP && "expected a STATEPOINT in the outlined candidate");
+
+    StatepointOpers SO(OrigSP);
     MachineInstr *NewMI =
         MF.CreateMachineInstr(get(TargetOpcode::STATEPOINT),
-                              OrigSP.getDebugLoc(), true);
-    NewMI->setFlags(OrigSP.getFlags());
-    NewMI->cloneInstrSymbols(MF, OrigSP);
+                              OrigSP->getDebugLoc(), true);
+    NewMI->setFlags(OrigSP->getFlags());
+    NewMI->cloneInstrSymbols(MF, *OrigSP);
     MachineInstrBuilder MIB(MF, NewMI);
 
-    unsigned NumDefs = OrigSP.getNumDefs();
+    unsigned NumDefs = OrigSP->getNumDefs();
     SmallVector<unsigned, 4> NewDefIndices;
     NewDefIndices.reserve(NumDefs);
     for (unsigned I = 0; I < NumDefs; ++I) {
       NewDefIndices.push_back(NewMI->getNumOperands());
-      MIB.add(OrigSP.getOperand(I));
+      MIB.add(OrigSP->getOperand(I));
     }
 
     MIB.addImm(SO.getID());
@@ -8466,20 +8732,20 @@ MachineBasicBlock::iterator AArch64InstrInfo::insertOutlinedCall(
     MIB.addImm(0);
     MIB.addGlobalAddress(M.getNamedValue(MF.getName()));
 
-    for (unsigned I = SO.getVarIdx(), E = OrigSP.getNumOperands(); I != E;
+    for (unsigned I = SO.getVarIdx(), E = OrigSP->getNumOperands(); I != E;
          ++I) {
-      MIB.add(OrigSP.getOperand(I));
+      MIB.add(OrigSP->getOperand(I));
       unsigned OldDef;
-      if (OrigSP.isRegTiedToDefOperand(I, &OldDef)) {
+      if (OrigSP->isRegTiedToDefOperand(I, &OldDef)) {
         assert(OldDef < NumDefs && "invalid statepoint def index");
         MIB->tieOperands(NewDefIndices[OldDef], MIB->getNumOperands() - 1);
       }
     }
 
-    NewMI->setMemRefs(MF, OrigSP.memoperands());
+    NewMI->setMemRefs(MF, OrigSP->memoperands());
     It = MBB.insert(It, NewMI);
-    if (OrigSP.shouldUpdateCallSiteInfo())
-      MBB.getParent()->moveCallSiteInfo(&OrigSP, NewMI);
+    if (OrigSP->shouldUpdateCallSiteInfo())
+      MBB.getParent()->moveCallSiteInfo(OrigSP, NewMI);
     return It;
   }
 

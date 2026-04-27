@@ -358,7 +358,8 @@ private:
   /// so that they will be valid post-outlining.
   ///
   /// \param MBB A \p MachineBasicBlock in an outlined function.
-  void fixupPostOutline(MachineBasicBlock &MBB) const;
+  void fixupPostOutline(MachineBasicBlock &MBB,
+                        int64_t SPAdjustment = 16) const;
 
   void instantiateCondBranch(MachineBasicBlock &MBB, const DebugLoc &DL,
                              MachineBasicBlock *TBB,
