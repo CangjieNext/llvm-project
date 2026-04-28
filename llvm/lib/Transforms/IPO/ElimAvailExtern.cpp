@@ -17,6 +17,7 @@
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Metadata.h"
@@ -40,6 +41,19 @@ static bool isLTOPostLink(const Module &M) {
          cast<ConstantInt>(LTOPostLinkMD->getValue())->getZExtValue() != 0;
 }
 
+static void collectReferencedGVAndAliasees(
+    const Value *V, DenseSet<const GlobalValue *> &ReferencedGVs) {
+  const Value *Cur = V->stripPointerCasts();
+  const auto *GV = dyn_cast<GlobalValue>(Cur);
+  while (GV && ReferencedGVs.insert(GV).second) {
+    const auto *GA = dyn_cast<GlobalAlias>(GV);
+    if (!GA)
+      break;
+    Cur = GA->getAliasee()->stripPointerCasts();
+    GV = dyn_cast<GlobalValue>(Cur);
+  }
+}
+
 static DenseSet<const GlobalValue *>
 collectCJStaticGenericTIReferencedGVs(const Module &M) {
   DenseSet<const GlobalValue *> ReferencedGVs;
@@ -48,11 +62,8 @@ collectCJStaticGenericTIReferencedGVs(const Module &M) {
       continue;
 
     const Constant *Init = GV.getInitializer();
-    for (unsigned I = 0, E = Init->getNumOperands(); I != E; ++I) {
-      const Value *Op = Init->getOperand(I)->stripPointerCasts();
-      if (const auto *RefGV = dyn_cast<GlobalValue>(Op))
-        ReferencedGVs.insert(RefGV);
-    }
+    for (unsigned I = 0, E = Init->getNumOperands(); I != E; ++I)
+      collectReferencedGVAndAliasees(Init->getOperand(I), ReferencedGVs);
   }
   return ReferencedGVs;
 }
