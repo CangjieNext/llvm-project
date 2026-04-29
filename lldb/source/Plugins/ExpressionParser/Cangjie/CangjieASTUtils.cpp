@@ -359,7 +359,7 @@ OwnedPtr<AST::Type> CangjieASTBuiler::CreateRefType(AstTypeInfo info, Ptr<Decl> 
   return ret;
 }
 
-bool CangjieASTBuiler::IsRefType(const Ptr<AST::Ty>& ty) {
+bool CangjieASTBuiler::IsRefType(Ptr<AST::Ty> ty) {
   CJC_NULLPTR_CHECK(ty);
   if (ty->IsClassLike()) {
     return true;
@@ -601,7 +601,7 @@ OwnedPtr<Cangjie::AST::VarDecl> CangjieASTBuiler::CreateEnumVarDecl(
   decl->EnableAttr(Attribute::PUBLIC, Attribute::EXTERNAL);
   decl->isVar = true;
   if (decl->type) {
-    decl->ty = decl->type->ty;
+    decl->SetTy(decl->type->GetTy());
   }
   return decl;
 }
@@ -614,7 +614,7 @@ OwnedPtr<Cangjie::AST::VarDecl> CangjieASTBuiler::CreateVarDecl(
   decl->EnableAttr(Attribute::PUBLIC, Attribute::GLOBAL);
   decl->isVar = true;
   if (decl->type) {
-    decl->ty = decl->type->ty;
+    decl->SetTy(decl->type->GetTy());
   }
   return decl;
 }

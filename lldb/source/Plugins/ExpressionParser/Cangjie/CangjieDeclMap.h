@@ -88,22 +88,22 @@ public:
     CompilerType GetPrimitiveTypeByName(std::string &name);
     bool IsInterfaceType(CompilerType& type);
     bool IsInstantiatedOfGenericDecl(std::string name);
-    CompilerType GetDynamicTypeFromTy(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType);
-    lldb_private::CompilerType GetDynamicTypeFromGenericTypeInfo(Ptr<AST::Ty>& ty, std::string& demangled_name);
-    CompilerType GetDynamicClassType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType);
-    CompilerType GetDynamicFuncType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType);
-    CompilerType GetDynamicStructType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType);
-    CompilerType GetDynamicInterfaceType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType);
-    CompilerType GetDynamicTupleType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType);
-    CompilerType GetDynamicEnumType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType);
-    CompilerType GetEnumType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType);
-    CompilerType CreateOptionReturnType(Ptr<Cangjie::AST::Ty>& ty, std::string& typeName);
-    void CreateAndAddInheritTypeToRecordType(Ptr<AST::Ty>& ty, CompilerType& enum_type, CompilerType& instancetiateType, CompilerType& generic_type);
+    CompilerType GetDynamicTypeFromTy(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
+    lldb_private::CompilerType GetDynamicTypeFromGenericTypeInfo(Ptr<AST::Ty> ty, std::string& demangled_name);
+    CompilerType GetDynamicClassType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
+    CompilerType GetDynamicFuncType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
+    CompilerType GetDynamicStructType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
+    CompilerType GetDynamicInterfaceType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
+    CompilerType GetDynamicTupleType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
+    CompilerType GetDynamicEnumType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
+    CompilerType GetEnumType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
+    CompilerType CreateOptionReturnType(Ptr<Cangjie::AST::Ty> ty, std::string& typeName);
+    void CreateAndAddInheritTypeToRecordType(Ptr<AST::Ty> ty, CompilerType& enum_type, CompilerType& instancetiateType, CompilerType& generic_type);
 
-    CompilerType GetDynamicArrayType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType);
-    CompilerType GetDynamicRawArrayType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType);
-    void AddFieldToRecordType(CompilerType& instancedType, Ptr<AST::Ty>& ty, std::string& resultTypeName, CompilerType& genericType);
-    Ptr<AST::Ty> GetMemberDeclTyByName(Ptr<AST::Ty>& ty, std::string& memberName, std::string& parentTypeName);
+    CompilerType GetDynamicArrayType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
+    CompilerType GetDynamicRawArrayType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
+    void AddFieldToRecordType(CompilerType& instancedType, Ptr<AST::Ty> ty, std::string& resultTypeName, CompilerType& genericType);
+    Ptr<AST::Ty> GetMemberDeclTyByName(Ptr<AST::Ty> ty, std::string& memberName, std::string& parentTypeName);
     size_t GetSubGenericTyIndex(const Ptr<Cangjie::AST::Decl>& decl, std::string memberName);
 
     lldb_private::CompilerType dynamic_type;
