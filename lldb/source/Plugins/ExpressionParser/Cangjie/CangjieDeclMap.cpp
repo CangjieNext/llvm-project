@@ -65,6 +65,13 @@ void CangjieDeclMap::CacheParsedVars(ConstString name, lldb::VariableSP& var, Va
       }
       m_parsed_vars.insert({name, var});
   }
+  // Also cache to CangjiePersistentVariables with type info for cross-expression optimization
+  if (m_persistent_vars && kind != VariableKind::LocalVariable) {
+    std::string mangled_name = (kind == VariableKind::StaticVariable)
+        ? var->GetMangledName().AsCString() : "";
+    bool is_let = type.IsConst();
+    m_persistent_vars->AddVariable(name, var, type, mangled_name, is_let);
+  }
 }
 
 lldb::VariableSP CangjieDeclMap::GetVariableByName(const std::string& sname, VariableKind kind) {
@@ -164,12 +171,18 @@ void CangjieDeclMap::CollectVarDecl(const std::string& sname, CompilerType& type
 }
 
 CompilerType CangjieDeclMap::LookUpVariable(const std::string& sname, VariableKind kind) {
+    // Check cache first to avoid duplicate queries
+    ConstString name(sname.c_str());
+    auto cacheIt = m_parsed_vars.find(name);
+    if (cacheIt != m_parsed_vars.end()) {
+      return GetVariableType(cacheIt->second);
+    }
+
     lldb::VariableSP var = GetVariableByName(sname, kind);
     if (!var) {
       return CompilerType();
     }
     CompilerType type = GetVariableType(var);
-    ConstString name(sname.c_str());
     CacheParsedVars(name, var, kind);
     return type;
 }
@@ -411,6 +424,22 @@ std::vector<CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::LookUpFunction(std
   if (!target || !frame) {
     return result;
   }
+
+  // Check m_parsed_functions cache first to avoid duplicate expensive queries
+  for (const auto& pf : m_parsed_functions) {
+    if (pf.FuncName == name || pf.ScopeName == name) {
+      bool matchGlobal = (pf.ScopeName == m_current_pkgname);
+      if ((find_global && matchGlobal) || (!find_global && pf.ScopeName != m_current_pkgname)) {
+        CompilerTypeInfo tempInfo(pf.funcType, 0, "");
+        tempInfo.SetDeclInfo(DeclKind::FuncDecl, pf.FuncName, find_global);
+        result.emplace_back(tempInfo);
+      }
+    }
+  }
+  if (!result.empty()) {
+    return result;
+  }
+
   SymbolContextList sc_list;
   SymbolContextList sc_generic_list;
   ModuleFunctionSearchOptions function_options;
@@ -420,9 +449,15 @@ std::vector<CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::LookUpFunction(std
   target->GetImages().FindFunctions(ConstString(name),
       lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options, sc_list);
 
-  std::string re_cstr = std::string("^") + llvm::Regex::escape(name) + std::string("<.+>$");
-  target->GetImages().FindFunctions(RegularExpression(llvm::StringRef(re_cstr)), function_options, sc_generic_list);
-  sc_list.Append(sc_generic_list);
+  // Only do expensive regex search when basic search finds nothing
+  if (sc_list.IsEmpty()) {
+    std::string re_cstr = std::string("^") + llvm::Regex::escape(name) + std::string("<.+>$");
+    target->GetImages().FindFunctions(RegularExpression(llvm::StringRef(re_cstr)), function_options, sc_generic_list);
+    sc_list.Append(sc_generic_list);
+  }
+  if (sc_list.IsEmpty()) {
+    return result;
+  }
   if (sc_list.IsEmpty()) {
     return result;
   }
@@ -477,16 +512,33 @@ std::vector<CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::LookUpFunction(std
       builder.m_type_names.insert(identifier);
     }
     m_parsed_functions.emplace_back(ParsedFunction(funcScope, funcName, type_name, funcType));
+    // Cache function for cross-expression use
+    if (m_persistent_vars) {
+      m_persistent_vars->AddFunction(funcScope, funcName, type_name, funcType);
+    }
   }
   return result;
 }
 
 CompilerType CangjieDeclMap::LookUpType(std::string name)
 {
+  // Check cache first to avoid duplicate type lookups
+  name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
+  auto cacheIt = m_parsed_types.find(name);
+  if (cacheIt != m_parsed_types.end()) {
+    return cacheIt->second;
+  }
+
+  // Check cross-expression cache if available
+  if (m_persistent_vars && m_persistent_vars->HasType(name)) {
+    CompilerType cached_type = m_persistent_vars->GetType(name);
+    m_parsed_types.insert({name, cached_type});
+    return cached_type;
+  }
+
   TypeList types;
   llvm::DenseSet<SymbolFile *> searched_symbol_files;
   auto target = m_exe_ctx.GetTargetSP();
-  name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
   target->GetImages().FindTypes(nullptr, ConstString(name), false, 1, searched_symbol_files, types);
 
   size_t num_types = types.GetSize();
@@ -520,10 +572,17 @@ CompilerType CangjieDeclMap::LookUpType(std::string name)
       } else {
         m_parsed_types.insert({type.GetTypeName().AsCString(), enumType});
       }
+      if (m_persistent_vars) {
+        m_persistent_vars->AddType(name, enumType);
+      }
       return enumType;
     }
     if (type.IsValid()) {
       ReplaceTypeDefWithInterfaceType(type);
+      m_parsed_types.insert({name, type});
+      if (m_persistent_vars) {
+        m_persistent_vars->AddType(name, type);
+      }
       return type;
     }
   }
@@ -1578,6 +1637,40 @@ CompilerType CangjieDeclMap::GetGenericTypeByPartName(const std::string& name) {
 
 void CangjieDeclMap::LookUpTypeByName(const std::string& name, std::vector<CompilerTypeInfo>& m_translate_decls) {
   Log *log = GetLog(LLDBLog::Expressions);
+  // Check cross-expression cache first (if available)
+  if (m_persistent_vars && m_persistent_vars->HasQueriedIdentifier(name)) {
+    // Already queried in previous expression, skip expensive lookups
+    // But still check local variables as they may be context-specific
+    CompilerType type_local = LookUpVariable(name, VariableKind::LocalVariable);
+    if (type_local.IsValid()) {
+      CollectVarDecl(name, type_local, VariableKind::LocalVariable, m_translate_decls);
+    }
+    // Try cached type if available
+    CompilerType cached_type = m_persistent_vars->GetType(name);
+    if (cached_type.IsValid()) {
+      CompilerTypeInfo tempInfo(cached_type, 0, "");
+      tempInfo.SetDeclInfo(DeclKind::UserDefinedDecl, name, true);
+      m_translate_decls.emplace_back(tempInfo);
+    }
+    // Try cached functions if available
+    auto cached_funcs = m_persistent_vars->GetFunctions(name);
+    for (const auto& cf : cached_funcs) {
+      CompilerTypeInfo tempInfo(cf.func_type, 0, "");
+      tempInfo.SetDeclInfo(DeclKind::FuncDecl, cf.func_name, true);
+      m_translate_decls.emplace_back(tempInfo);
+    }
+    return;
+  }
+
+  // Check if this identifier has already been queried in this expression
+  if (m_queried_identifiers.find(name) != m_queried_identifiers.end()) {
+    return;
+  }
+  m_queried_identifiers.insert(name);
+  if (m_persistent_vars) {
+    m_persistent_vars->AddQueriedIdentifier(name);
+  }
+
   // Find and create local, global variables.
   CompilerType type_local = LookUpVariable(name, VariableKind::LocalVariable);
   CollectVarDecl(name, type_local, VariableKind::LocalVariable, m_translate_decls);
@@ -1610,6 +1703,9 @@ void CangjieDeclMap::LookUpTypeByName(const std::string& name, std::vector<Compi
       LLDB_LOGF(log, "[Generic]: find type decl with generic param by part name[%s] -> [%s]. \n",
                 ConstString(name).AsCString(), userDefinedType.GetTypeName().GetCString());
       m_generic_types.insert({ConstString(name), userDefinedType});
+      if (m_persistent_vars) {
+        m_persistent_vars->AddGenericType(ConstString(name), userDefinedType);
+      }
       builder.m_type_names.insert(userDefinedType.GetTypeName().AsCString());
     }
   }
@@ -1617,6 +1713,10 @@ void CangjieDeclMap::LookUpTypeByName(const std::string& name, std::vector<Compi
     CompilerTypeInfo tempInfo(userDefinedType, 0, "");
     tempInfo.SetDeclInfo(DeclKind::UserDefinedDecl, name, true);
     m_translate_decls.emplace_back(tempInfo);
+    // Cache the type for future expressions
+    if (m_persistent_vars) {
+      m_persistent_vars->AddType(name, userDefinedType);
+    }
   }
 }
 

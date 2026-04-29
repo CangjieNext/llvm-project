@@ -16,6 +16,7 @@
 #include "lldb/Symbol/CompilerType.h"
 #include "lldb/Target/ExecutionContext.h"
 #include "CangjieASTUtils.h"
+#include "CangjiePersistentVariables.h"
 #include "Plugins/TypeSystem/Clang/TypeSystemClang.h"
 
 using namespace Cangjie;
@@ -30,10 +31,17 @@ class CangjieDeclMap {
 
 public:
     CangjieDeclMap(lldb_private::ExecutionContext exe_ctx,
-        std::vector<std::string> identifiers, unsigned int fileID, std::string fileName)
-        : m_exe_ctx(exe_ctx), m_identifys(identifiers), m_file_id(fileID), m_current_filename(fileName) {
+        std::vector<std::string> identifiers, unsigned int fileID, std::string fileName,
+        std::shared_ptr<CangjiePersistentVariables> persistent_vars = nullptr)
+        : m_exe_ctx(exe_ctx), m_file_id(fileID), m_current_filename(fileName), m_persistent_vars(persistent_vars) {
+        // Deduplicate identifiers to avoid duplicate lookups
+        std::set<std::string> unique_ids(identifiers.begin(), identifiers.end());
+        m_identifys.assign(unique_ids.begin(), unique_ids.end());
         InitVariable();
     };
+
+    void SetPersistentVariables(std::shared_ptr<CangjiePersistentVariables> vars) { m_persistent_vars = vars; }
+    std::shared_ptr<CangjiePersistentVariables> GetPersistentVariables() const { return m_persistent_vars; }
     enum class DeclKind{
         VarDecl,
         FuncDecl,
@@ -138,6 +146,10 @@ private:
     std::map<lldb_private::ConstString, lldb::VariableSP> m_parsed_vars;
     std::map<std::string, lldb_private::CompilerType> m_parsed_types;
     std::map<std::string, uint64_t> m_captured_var_addrs;
+    // Cache for already queried identifiers to avoid duplicate lookups within one expression
+    std::set<std::string> m_queried_identifiers;
+    // Persistent variables for cross-expression caching (shared across multiple expression evaluations)
+    std::shared_ptr<CangjiePersistentVariables> m_persistent_vars;
 
     TypeSystemClang *m_type_system = nullptr;
 

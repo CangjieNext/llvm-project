@@ -26,6 +26,7 @@ set_property(SOURCE
   CangjieExpressionSourceCode.cpp
   CangjieExpressionParser.cpp
   CangjieIRForTarget.cpp
+  CangjiePersistentVariables.cpp
   APPEND PROPERTY COMPILE_FLAGS "-fexceptions -DCANGJIE_CODEGEN_CJNATIVE_BACKEND")
 
 if(WIN32 AND uppercase_CMAKE_BUILD_TYPE STREQUAL "DEBUG")
@@ -37,8 +38,10 @@ add_lldb_library(lldbPluginExpressionParserCangjie
   CangjieExpressionSourceCode.cpp
   CangjieExpressionParser.cpp
   CangjieIRForTarget.cpp
+  CangjiePersistentVariables.cpp
   LINK_LIBS
     lldbExpression
+    lldbTarget
     cangjie-frontend
     boundscheck
 )
@@ -51,8 +54,10 @@ add_lldb_library(lldbPluginExpressionParserCangjie
   CangjieExpressionSourceCode.cpp
   CangjieExpressionParser.cpp
   CangjieIRForTarget.cpp
+  CangjiePersistentVariables.cpp
   LINK_LIBS
     lldbExpression
+    lldbTarget
     cangjie-frontend
     cangjie-lsp
     boundscheck

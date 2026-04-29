@@ -224,6 +224,7 @@ class TargetList;
 class TargetProperties;
 class Thread;
 class CJThread;
+class CangjiePersistentVariables;
 class MixedDebugger;
 class MixedArkTSDebugger;
 class ThreadCollection;
