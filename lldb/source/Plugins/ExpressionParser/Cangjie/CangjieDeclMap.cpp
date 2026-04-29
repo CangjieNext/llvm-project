@@ -551,7 +551,7 @@ OwnedPtr<Cangjie::AST::VarDecl> CangjieDeclMap::CreateVariable(const CompilerTyp
   return vardecl;
 }
 
-lldb_private::CompilerType CangjieDeclMap::GetDynamicTypeFromGenericTypeInfo(Ptr<AST::Ty>& ty, std::string& demangled_name) {
+lldb_private::CompilerType CangjieDeclMap::GetDynamicTypeFromGenericTypeInfo(Ptr<AST::Ty> ty, std::string& demangled_name) {
   std::string genericDeclName = lldb_private::GetGenericDeclName(demangled_name);
   auto genericType = this->FindParsedTypesByName(genericDeclName);
   if (!genericType.IsValid()) {
@@ -1827,7 +1827,7 @@ CompilerType CangjieDeclMap::GetPrimitiveTypeByName(std::string &name) {
   return CompilerType();
 }
 
-CompilerType CangjieDeclMap::GetDynamicTypeFromTy(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType) {
+CompilerType CangjieDeclMap::GetDynamicTypeFromTy(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType) {
   Log *log = GetLog(LLDBLog::Expressions);
   if (log && !ty->IsPrimitive()) {
     LLDB_LOGF(log, "[Generic]: instantiated [%s] by [%s]. \n", genericType.GetTypeName().AsCString(), ConstString(typeName).AsCString());
@@ -1868,7 +1868,7 @@ CompilerType CangjieDeclMap::GetDynamicTypeFromTy(Ptr<AST::Ty>& ty, std::string 
   return CompilerType();
 }
 
-void CangjieDeclMap::AddFieldToRecordType(CompilerType& instancedType, Ptr<AST::Ty>& ty, std::string& typeName, CompilerType& genericType)
+void CangjieDeclMap::AddFieldToRecordType(CompilerType& instancedType, Ptr<AST::Ty> ty, std::string& typeName, CompilerType& genericType)
 {
   Log *log = GetLog(LLDBLog::Expressions);
   CJC_ASSERT(ty->IsStruct() || ty->IsEnum() || ty->IsClass() || ty->IsInterface()|| ty->IsArray() );
@@ -1928,7 +1928,7 @@ void CangjieDeclMap::AddFieldToRecordType(CompilerType& instancedType, Ptr<AST::
   }
 }
 
-Ptr<AST::Ty> CangjieDeclMap::GetMemberDeclTyByName(Ptr<AST::Ty>& ty, std::string& memberName, std::string& typeName)
+Ptr<AST::Ty> CangjieDeclMap::GetMemberDeclTyByName(Ptr<AST::Ty> ty, std::string& memberName, std::string& typeName)
 {
   // class A<T> {
   //     public var value: T
@@ -1944,13 +1944,13 @@ Ptr<AST::Ty> CangjieDeclMap::GetMemberDeclTyByName(Ptr<AST::Ty>& ty, std::string
       continue;
     }
     if (memberDecls[i]->identifier.Val() == memberName) {
-      return memberDecls[i]->ty;
+      return memberDecls[i]->GetTy();
     }
   }
-  return decl->ty;
+  return decl->GetTy();
 }
 
-CompilerType CangjieDeclMap::GetEnumType(Ptr<AST::Ty>& ty, std::string enum_name, CompilerType& genericType) {
+CompilerType CangjieDeclMap::GetEnumType(Ptr<AST::Ty> ty, std::string enum_name, CompilerType& genericType) {
   TypeSystemClang* ast = this->GetTypeSystem();
   CompilerType basic_type = ast->GetBasicType(lldb::eBasicTypeInt).CreateTypedef(
           "Int32", ast->CreateDeclContext(ast->GetTranslationUnitDecl()), 0);
@@ -1970,7 +1970,7 @@ CompilerType CangjieDeclMap::GetEnumType(Ptr<AST::Ty>& ty, std::string enum_name
   return enumType;
 }
 
-void CangjieDeclMap::CreateAndAddInheritTypeToRecordType(Ptr<AST::Ty>& ty, CompilerType& enum_type,
+void CangjieDeclMap::CreateAndAddInheritTypeToRecordType(Ptr<AST::Ty> ty, CompilerType& enum_type,
                                                          CompilerType& instancetiatedType, CompilerType& genericType) {
   TypeSystemClang* ast = this->GetTypeSystem();
   auto ti_type = ast->GetBasicType(lldb::eBasicTypeVoid).GetPointerType();
@@ -1996,7 +1996,7 @@ void CangjieDeclMap::CreateAndAddInheritTypeToRecordType(Ptr<AST::Ty>& ty, Compi
     std::string member_name;
     std::vector<std::string> instantiatedNames = builder.SplitCollectionName(enum_name);
     for (size_t j = 0; j < paramSize; j++) {
-      auto subTy = ctorDecl->funcBody->paramLists[0]->params[j].get()->ty;
+      auto subTy = ctorDecl->funcBody->paramLists[0]->params[j].get()->GetTy();
       CompilerType ctor_para_type = ctorFuncType.GetFieldAtIndex(j + 1, member_name, nullptr, nullptr, nullptr);
       auto tempGenericType = ctor_para_type;
       if (subTy->IsGeneric()) {
@@ -2025,7 +2025,7 @@ void CangjieDeclMap::CreateAndAddInheritTypeToRecordType(Ptr<AST::Ty>& ty, Compi
   ast->TransferBaseClasses(instancetiatedType.GetOpaqueQualType(), std::move(bases));
 }
 
-CompilerType CangjieDeclMap::GetDynamicEnumType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType) {
+CompilerType CangjieDeclMap::GetDynamicEnumType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType) {
   std::string genericName = genericType.GetTypeName().AsCString();
   EnumLayout enumKind = GetEnumLayout(genericName);
   // case: enum without args , compilerType is enumType.
@@ -2079,7 +2079,7 @@ lldb_private::CangjieDeclMap::EnumLayout CangjieDeclMap::GetEnumLayout(const std
   return EnumLayout::E1Arg;
 }
 
-CompilerType CangjieDeclMap::GetDynamicFuncType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType) {
+CompilerType CangjieDeclMap::GetDynamicFuncType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType) {
   CJC_ASSERT(ty->IsFunc());
   TypeSystemClang* ast = this->GetTypeSystem();
   auto funcTy = RawStaticCast<FuncTy*>(ty.get());
@@ -2111,7 +2111,7 @@ CompilerType CangjieDeclMap::GetDynamicFuncType(Ptr<AST::Ty>& ty, std::string ty
   return dynamic_type;
 }
 
-CompilerType CangjieDeclMap::GetDynamicClassType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType) {
+CompilerType CangjieDeclMap::GetDynamicClassType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType) {
   Ptr<Cangjie::AST::Decl> decl = AST::Ty::GetDeclOfTy(ty);
   CJC_ASSERT(decl->generic && !decl->generic->typeParameters.empty());
 
@@ -2127,7 +2127,7 @@ CompilerType CangjieDeclMap::GetDynamicClassType(Ptr<AST::Ty>& ty, std::string t
   return type;
 }
 
-CompilerType CangjieDeclMap::GetDynamicStructType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType) {
+CompilerType CangjieDeclMap::GetDynamicStructType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType) {
   lldb_private::CompilerType type = this->GetTypeSystem()->CreateRecordType(nullptr, lldb_private::OptionalClangModuleID(), lldb::eAccessPublic,
                   lldb_private::ConstString(typeName).GetStringRef(), clang::TTK_Struct, lldb::eLanguageTypeC);
   this->GetTypeSystem()->StartTagDeclarationDefinition(type);
@@ -2136,7 +2136,7 @@ CompilerType CangjieDeclMap::GetDynamicStructType(Ptr<AST::Ty>& ty, std::string 
   return type;
 }
 
-CompilerType CangjieDeclMap::GetDynamicTupleType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType)
+CompilerType CangjieDeclMap::GetDynamicTupleType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType)
 {
   CompilerType instancedType = this->GetTypeSystem()->CreateRecordType(nullptr, OptionalClangModuleID(), lldb::eAccessPublic,
                   lldb_private::ConstString(typeName).GetStringRef(), clang::TTK_Struct, lldb::eLanguageTypeC);
@@ -2153,7 +2153,7 @@ CompilerType CangjieDeclMap::GetDynamicTupleType(Ptr<AST::Ty>& ty, std::string t
   return instancedType;
 }
 
-CompilerType CangjieDeclMap::GetDynamicRawArrayType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType) {
+CompilerType CangjieDeclMap::GetDynamicRawArrayType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType) {
   auto tyName = ty->String();
   Ptr<Cangjie::AST::Decl> decl = AST::Ty::GetDeclOfTy(ty);
   if (decl) {
@@ -2188,7 +2188,7 @@ CompilerType CangjieDeclMap::GetDynamicRawArrayType(Ptr<AST::Ty>& ty, std::strin
   return type;
 }
 
-CompilerType CangjieDeclMap::GetDynamicArrayType(Ptr<AST::Ty>& ty, std::string typeName, CompilerType& genericType) {
+CompilerType CangjieDeclMap::GetDynamicArrayType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType) {
   Ptr<Cangjie::AST::Decl> decl = AST::Ty::GetDeclOfTy(ty);
   if (decl) {
     auto demangle_info = Cangjie::Demangle(decl->mangledName);
@@ -2238,7 +2238,7 @@ size_t CangjieDeclMap::GetSubGenericTyIndex(const Ptr<Cangjie::AST::Decl>& decl,
   return index;
 }
 
-CompilerType CangjieDeclMap::CreateOptionReturnType(Ptr<Cangjie::AST::Ty>& ty, std::string& typeName) {
+CompilerType CangjieDeclMap::CreateOptionReturnType(Ptr<Cangjie::AST::Ty> ty, std::string& typeName) {
   auto valTypeName = builder.GetInstantiatedParamDeclName(typeName);
   auto valType = CompilerType();
   if (m_parsed_types.find(valTypeName[0]) != m_parsed_types.end()) {

@@ -77,7 +77,7 @@ public:
     void CreateDeclGeneric(Ptr<AST::Decl> ret, std::string& typeName);
     void CreateFuncDeclGeneric(Ptr<AST::FuncDecl> ret, CompilerType& type, std::string& name, Ptr<AST::Decl> pdecl);
     Ptr<AST::Decl> GetTargetOfGenericDecl(Ptr<AST::Decl> pdecl, std::string& retTypeStr);
-    bool IsRefType(const Ptr<AST::Ty>& ty);
+    bool IsRefType(Ptr<AST::Ty> ty);
     std::string m_current_pkgname;
     std::set<std::string> m_type_names;
     std::map<std::string, lldb_private::CompilerType> m_capture_vars;
