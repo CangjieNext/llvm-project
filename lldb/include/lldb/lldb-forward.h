@@ -224,6 +224,8 @@ class TargetList;
 class TargetProperties;
 class Thread;
 class CJThread;
+class MixedDebugger;
+class MixedArkTSDebugger;
 class ThreadCollection;
 class ThreadList;
 class ThreadPlan;

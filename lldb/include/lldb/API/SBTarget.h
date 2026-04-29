@@ -873,6 +873,7 @@ protected:
   friend class SBExecutionContext;
   friend class SBFunction;
   friend class SBInstruction;
+  friend class SBMixedArkTSDebugger;
   friend class SBModule;
   friend class SBPlatform;
   friend class SBProcess;
