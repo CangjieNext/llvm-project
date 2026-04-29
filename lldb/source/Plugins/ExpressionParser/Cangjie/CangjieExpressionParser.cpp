@@ -11,11 +11,13 @@
 #include "CangjieExpressionParser.h"
 #include "CangjieIRForTarget.h"
 #include "CangjieCompilerInstance.h"
+#include "CangjiePersistentVariables.h"
 #include "cangjie/Frontend/CompilerInstance.h"
 #include "cangjie/Frontend/CompilerInvocation.h"
 
 #include "lldb/Expression/IRExecutionUnit.h"
 #include "lldb/Target/ExecutionContext.h"
+#include "lldb/Target/Target.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
 
@@ -40,7 +42,16 @@ bool CangjieExpressionParser::Complete(CompletionRequest &request,
 
 void CangjieExpressionParser::ResetDeclMap(
     ExecutionContext &exe_ctx, std::vector<std::string> identifiers, unsigned int fileID, std::string fileName) {
-  m_expr_decl_map_up = std::make_unique<CangjieDeclMap>(exe_ctx, identifiers, fileID, fileName);
+  // Get the Target-level persistent variables for cross-expression optimization
+  Target *target = exe_ctx.GetTargetPtr();
+  auto persistent_vars = target ? target->GetCangjiePersistentVariables() : nullptr;
+  if (!persistent_vars) {
+    persistent_vars = std::make_shared<CangjiePersistentVariables>();
+    if (target) {
+      target->SetCangjiePersistentVariables(persistent_vars);
+    }
+  }
+  m_expr_decl_map_up = std::make_unique<CangjieDeclMap>(exe_ctx, identifiers, fileID, fileName, persistent_vars);
 }
 
 void CangjieExpressionParser::PrepareContextInfo(ExecutionContext &exeCtx, Cangjie::SourceManager& sm)

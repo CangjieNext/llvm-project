@@ -24,7 +24,7 @@ class ExpressionVariable
     : public std::enable_shared_from_this<ExpressionVariable> {
 public:
   // See TypeSystem.h for how to add subclasses to this.
-  enum LLVMCastKind { eKindClang, eKindSwift, eKindGo, kNumKinds };
+  enum LLVMCastKind { eKindClang, eKindSwift, eKindGo, eKindCangjie, kNumKinds };
 
   LLVMCastKind getKind() const { return m_kind; }
 
@@ -203,7 +203,7 @@ private:
 class PersistentExpressionState : public ExpressionVariableList {
 public:
   // See TypeSystem.h for how to add subclasses to this.
-  enum LLVMCastKind { eKindClang, eKindSwift, eKindGo, kNumKinds };
+  enum LLVMCastKind { eKindClang, eKindSwift, eKindGo, eKindCangjie, kNumKinds };
 
   LLVMCastKind getKind() const { return m_kind; }
 

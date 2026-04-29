@@ -1542,6 +1542,8 @@ protected:
   /// more usefully in the Dummy target where you can't know exactly what
   /// signals you will have.
   llvm::StringMap<DummySignalValues> m_dummy_signals;
+  /// Persistent variables and cache for Cangjie expression evaluation
+  std::shared_ptr<CangjiePersistentVariables> m_cangjie_persistent_variables_sp;
 
   static void ImageSearchPathsChanged(const PathMappingList &path_list,
                                       void *baton);
@@ -1564,6 +1566,26 @@ public:
   llvm::json::Value ReportStatistics();
 
   TargetStats &GetStatistics() { return m_stats; }
+
+  /// Get the Cangjie persistent variables for this target.
+  /// Returns nullptr if not yet initialized. Use SetCangjiePersistentVariables
+  /// to initialize from the Cangjie expression parser plugin.
+  std::shared_ptr<CangjiePersistentVariables> GetCangjiePersistentVariables() {
+    return m_cangjie_persistent_variables_sp;
+  }
+
+  /// Set the Cangjie persistent variables for this target.
+  /// Called by the Cangjie expression parser to initialize the cache.
+  void SetCangjiePersistentVariables(std::shared_ptr<CangjiePersistentVariables> vars) {
+    m_cangjie_persistent_variables_sp = vars;
+  }
+
+  /// Clear the Cangjie persistent variables cache.
+  void ClearCangjiePersistentVariables() {
+    if (m_cangjie_persistent_variables_sp) {
+      m_cangjie_persistent_variables_sp->Clear();
+    }
+  }
 
   struct CJThread {
     std::vector<lldb::StackFrameSP> Frames;
