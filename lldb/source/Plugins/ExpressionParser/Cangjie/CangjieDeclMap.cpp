@@ -1944,10 +1944,10 @@ Ptr<AST::Ty> CangjieDeclMap::GetMemberDeclTyByName(Ptr<AST::Ty>& ty, std::string
       continue;
     }
     if (memberDecls[i]->identifier.Val() == memberName) {
-      return memberDecls[i]->ty;
+      return memberDecls[i]->GetTy();
     }
   }
-  return decl->ty;
+  return decl->GetTy();
 }
 
 CompilerType CangjieDeclMap::GetEnumType(Ptr<AST::Ty>& ty, std::string enum_name, CompilerType& genericType) {
@@ -1996,7 +1996,7 @@ void CangjieDeclMap::CreateAndAddInheritTypeToRecordType(Ptr<AST::Ty>& ty, Compi
     std::string member_name;
     std::vector<std::string> instantiatedNames = builder.SplitCollectionName(enum_name);
     for (size_t j = 0; j < paramSize; j++) {
-      auto subTy = ctorDecl->funcBody->paramLists[0]->params[j].get()->ty;
+      auto subTy = ctorDecl->funcBody->paramLists[0]->params[j].get()->GetTy();
       CompilerType ctor_para_type = ctorFuncType.GetFieldAtIndex(j + 1, member_name, nullptr, nullptr, nullptr);
       auto tempGenericType = ctor_para_type;
       if (subTy->IsGeneric()) {
