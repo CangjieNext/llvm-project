@@ -79,6 +79,9 @@ const char *CangjieOutlinedMultiStatepointAttr =
     "cangjie-outlined-multistatepoint";
 const char *CangjieOutlinedMultiStatepointName =
     "OUTLINED_FUNCTION_CANGJIE_STATEPOINT";
+const char *CangjieOutlinedStatepointFPToSPOffsetAttr =
+    "cangjie-outlined-statepoint-fp-sp-offset";
+constexpr int64_t CangjieOutlinedStatepointEntrySPToFPOffset = 16;
 
 // unordered_map<regNo, bitIdx>, regNo can be used to find callee saved reg
 // while bitIdx is used in prologue
@@ -473,7 +476,8 @@ StackMaps::parseStructArgsOperand(MachineInstr::const_mop_iterator MOI,
     (void)FI;
 
 #ifndef NDEBUG
-    const AllocaInst *Inst = AP.MF->getFrameInfo().getObjectAllocation(FI);
+    const AllocaInst *Inst =
+        AP.MF->getFrameInfo().getObjectAllocationIncludingOutlined(FI);
     assert(Inst && "The FI is not alloca inst!");
     const DataLayout &DL = AP.MF->getDataLayout();
     StructType *ST = dyn_cast<StructType>(Inst->getAllocatedType());
@@ -511,7 +515,8 @@ StackMaps::parseAllocaOperand(MachineInstr::const_mop_iterator MOI,
   GCStrategy *GS = AP.getAnalysisIfAvailable<GCModuleInfo>()->getGCStrategy(
       StringRef("cangjie")); // cfile ref strategy.
   // add FI in FOLocation
-  const AllocaInst *Inst = AP.MF->getFrameInfo().getObjectAllocation(FI);
+  const AllocaInst *Inst =
+      AP.MF->getFrameInfo().getObjectAllocationIncludingOutlined(FI);
   if (Inst != nullptr) {
     if (auto *ST = dyn_cast<StructType>(Inst->getAllocatedType())) {
       processAllocaStructType(ST, Imm, Locations, Reg, GS);
@@ -741,6 +746,43 @@ StackMaps::parseRegisterLiveOutMask(const uint32_t *Mask) const {
   return LiveOuts;
 }
 
+static bool isSingleStatepointCangjieOutlinedFunction(
+    const MachineFunction *MF) {
+  if (!MF ||
+      !MF->getFunction().hasFnAttribute(CangjieOutlinedMultiStatepointAttr))
+    return false;
+
+  unsigned NumStatepoints = 0;
+  for (const MachineBasicBlock &MBB : *MF)
+    for (const MachineInstr &MI : MBB)
+      if (MI.getOpcode() == TargetOpcode::STATEPOINT && ++NumStatepoints > 1)
+        return false;
+
+  return NumStatepoints == 1;
+}
+
+static void addCangjieAArch64OutlinedFPLRStackMapInfo(
+    std::map<unsigned, int> &CSReg2Stack) {
+  // AArch64 DWARF register numbers: x29/fp = 29, x30/lr = 30.
+  // The custom outlined helper frame sets x29 to the saved FP slot:
+  //   stp x29, x30, [sp, #16]
+  //   add x29, sp, #16
+  CSReg2Stack[29] = 0;
+  CSReg2Stack[30] = 8;
+}
+
+static int64_t
+getCangjieAArch64OutlinedSlotBaseOffsetAdjustment(const Function &F) {
+  StringRef FPToSPOffset =
+      F.getFnAttribute(CangjieOutlinedStatepointFPToSPOffsetAttr)
+          .getValueAsString();
+  int64_t OriginalFPToSP = 0;
+  if (FPToSPOffset.empty() || FPToSPOffset.getAsInteger(10, OriginalFPToSP))
+    return 0;
+
+  return OriginalFPToSP + CangjieOutlinedStatepointEntrySPToFPOffset;
+}
+
 void StackMaps::updateOrInsertFnInfo(const MCSymbol *FnSym,
                                      CallsiteInfo &CallInfo,
                                      const MachineInstr *OriginMI) {
@@ -775,7 +817,17 @@ void StackMaps::updateOrInsertFnInfo(const MCSymbol *FnSym,
       CSReg2Stack[RegNo] =
           TFI->getFrameIndexRefForCJ(*AP.MF, CS.getFrameIdx(), Reg).getFixed();
     }
-    FnInfos.insert(std::make_pair(FnSym, FunctionInfo(FrameSize, CSReg2Stack)));
+    int64_t SlotBaseOffsetAdjustment = 0;
+    if (CJPipeline && isAArch64() &&
+        isSingleStatepointCangjieOutlinedFunction(AP.MF)) {
+      addCangjieAArch64OutlinedFPLRStackMapInfo(CSReg2Stack);
+      SlotBaseOffsetAdjustment =
+          getCangjieAArch64OutlinedSlotBaseOffsetAdjustment(
+              AP.MF->getFunction());
+    }
+    FnInfos.insert(std::make_pair(
+        FnSym,
+        FunctionInfo(FrameSize, CSReg2Stack, SlotBaseOffsetAdjustment)));
     Itr = FnInfos.find(FnSym);
   }
 
@@ -1070,12 +1122,7 @@ void StackMaps::recordCangjieOutlinedFunctionStackMap() {
   OffsetStepSize = 8;
 
   std::map<unsigned, int> CSReg2Stack;
-  // AArch64 DWARF register numbers: x29/fp = 29, x30/lr = 30.
-  // The custom outlined helper frame sets x29 to the saved FP slot:
-  //   stp x29, x30, [sp, #16]
-  //   add x29, sp, #16
-  CSReg2Stack[29] = 0;
-  CSReg2Stack[30] = 8;
+  addCangjieAArch64OutlinedFPLRStackMapInfo(CSReg2Stack);
   FnInfos.insert(
       std::make_pair(FnSym, FunctionInfo(/*StackSize=*/32, CSReg2Stack)));
 }
@@ -1606,6 +1653,21 @@ static void genStackMapInfo(CompressedInfo &Data,
   }
 }
 
+static void adjustSlotBaseOffsets(CompressedInfo &Data,
+                                  MaxWidthOfRefInfo &WidthInfo,
+                                  int64_t Adjustment) {
+  if (Adjustment == 0)
+    return;
+
+  for (unsigned I = 1, E = Data.SlotItems.Items.size(); I != E; ++I) {
+    CompressedInfo::SlotItem &Slot = Data.SlotItems.Items[I];
+    Slot.BaseOffset += Adjustment;
+    unsigned BaseOffsetBytes = getMinBytesForInt(Slot.BaseOffset);
+    WidthInfo.BaseOffsetBytes =
+        std::max(WidthInfo.BaseOffsetBytes, BaseOffsetBytes);
+  }
+}
+
 void StackMaps::prepareCompressedData(CompressedInfo &Data,
                                       const FunctionInfo &FnInfo,
                                       unsigned CSIdx, unsigned CSIdxEnd) const {
@@ -1628,6 +1690,9 @@ void StackMaps::prepareCompressedData(CompressedInfo &Data,
     Data.StackMapItem.back().second.LNIdxPlusOne =
         Data.LNItems.getOrInsertIndex(LineNumber);
   }
+
+  adjustSlotBaseOffsets(Data, WidthInfo, FnInfo.SlotBaseOffsetAdjustment);
+
   // stackMapItem, the data width of each column is recorded based on the
   // maximum size.
   Data.MaxBits.RegIdx = getValidBitNums(Data.RegItems.Items.size());
