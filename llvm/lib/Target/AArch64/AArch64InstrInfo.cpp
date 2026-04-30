@@ -7073,6 +7073,7 @@ enum MachineOutlinerClass {
   MachineOutlinerThunk,    /// Emit a call and tail-call.
   MachineOutlinerStatepointThunk, /// Emit a STATEPOINT and tail-call.
   MachineOutlinerStatepointCall, /// Lower outlined STATEPOINTs to calls.
+  MachineOutlinerCangjieStatepointStackMap, /// Keep one outlined STATEPOINT.
   MachineOutlinerRegSave,  /// Same as default, but save to a register.
   /// Cangjie prologue outlining. The caller keeps the ADR/ADRP/ADD prefix,
   /// branches to the outlined prologue body, and the outlined function returns
@@ -7384,6 +7385,43 @@ static bool isSupportedStatepointForOutlining(const MachineInstr &MI) {
   default:
     return false;
   }
+}
+
+static bool readsCangjieStatepointStackMapScratchReg(const MachineInstr &MI) {
+  const TargetRegisterInfo *TRI =
+      MI.getMF()->getSubtarget().getRegisterInfo();
+
+  for (const MachineOperand &MO : MI.operands()) {
+    if (!MO.isReg() || !MO.readsReg())
+      continue;
+
+    Register Reg = MO.getReg();
+    if (!Reg)
+      continue;
+
+    if (TRI->regsOverlap(Reg, AArch64::X9) ||
+        TRI->regsOverlap(Reg, AArch64::X10))
+      return true;
+  }
+
+  return false;
+}
+
+static bool isSupportedCangjieStatepointStackMapCandidate(
+    const MachineInstr &MI) {
+  if (!isSupportedStatepointForOutlining(MI))
+    return false;
+
+  StatepointOpers SO(&MI);
+  switch (SO.getCallTarget().getType()) {
+  case MachineOperand::MO_GlobalAddress:
+  case MachineOperand::MO_ExternalSymbol:
+    break;
+  default:
+    return false;
+  }
+
+  return !readsCangjieStatepointStackMapScratchReg(MI);
 }
 
 static bool canOutlineStatepointAsThunk(const MachineInstr &MI, bool HasBTI) {
@@ -7769,6 +7807,25 @@ outliner::OutlinedFunction AArch64InstrInfo::getOutliningCandidateInfo(
   bool AllStackInstrsSafe = std::all_of(
       FirstCand.front(), std::next(FirstCand.back()),
       [&](MachineInstr &MI) { return IsSafeToFixup(MI, 16); });
+
+  if (FirstCand.IsCangjieStatepointStackMapCandidate) {
+    llvm::erase_if(RepeatedSequenceLocs, [&](outliner::Candidate &C) {
+      return !C.IsCangjieStatepointStackMapCandidate || C.getLength() != 1 ||
+             C.front()->getOpcode() != TargetOpcode::STATEPOINT ||
+             !isSupportedCangjieStatepointStackMapCandidate(*C.front());
+    });
+
+    if (RepeatedSequenceLocs.size() < 2)
+      return outliner::OutlinedFunction();
+
+    SetCandidateCallInfo(MachineOutlinerNoLRSave, 4);
+    unsigned CangjieFrameOverhead =
+        isCJMachO(*RepeatedSequenceLocs[0].getMF()) ? 40 : 32;
+    constexpr unsigned StackMapRecordSaving = 6;
+    return outliner::OutlinedFunction(
+        RepeatedSequenceLocs, SequenceSize + StackMapRecordSaving,
+        CangjieFrameOverhead, MachineOutlinerCangjieStatepointStackMap);
+  }
 
   if (countStatepointsInCandidate(FirstCand) >= 2) {
     if (!isSupportedMultiStatepointSequence(FirstCand))
@@ -8419,6 +8476,107 @@ void AArch64InstrInfo::buildOutlinedFrame(
     const outliner::OutlinedFunction &OF) const {
 
   AArch64FunctionInfo *FI = MF.getInfo<AArch64FunctionInfo>();
+
+  if (!OF.Candidates.empty() &&
+      OF.FrameConstructionID == MachineOutlinerCangjieStatepointStackMap) {
+    assert(countStatepointsInCandidate(
+               const_cast<outliner::Candidate &>(OF.Candidates.front())) == 1 &&
+           "expected exactly one outlined STATEPOINT");
+
+    constexpr int64_t CangjieFrameSize = 32;
+    constexpr int64_t CangjieSavedFPLROffset = 2;
+
+    if (!MBB.isLiveIn(AArch64::FP))
+      MBB.addLiveIn(AArch64::FP);
+    if (!MBB.isLiveIn(AArch64::LR))
+      MBB.addLiveIn(AArch64::LR);
+
+    MachineBasicBlock::iterator It = MBB.begin();
+    BuildMI(MBB, It, DebugLoc(), get(AArch64::ADR), AArch64::X9)
+        .addGlobalAddress(&MF.getFunction())
+        .setMIFlag(MachineInstr::FrameSetup);
+
+    if (isCJMachO(MF))
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::ADRP), AArch64::X10)
+          .addGlobalAddress(&MF.getFunction())
+          .setMIFlag(MachineInstr::FrameSetup);
+
+    BuildMI(MBB, It, DebugLoc(), get(AArch64::SUBXri), AArch64::SP)
+        .addReg(AArch64::SP)
+        .addImm(CangjieFrameSize)
+        .addImm(0)
+        .setMIFlag(MachineInstr::FrameSetup);
+
+    if (FI->needsDwarfUnwindInfo()) {
+      int64_t StackPosEntry =
+          MF.addFrameInst(MCCFIInstruction::cfiDefCfaOffset(
+              nullptr, CangjieFrameSize));
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::CFI_INSTRUCTION))
+          .addCFIIndex(StackPosEntry)
+          .setMIFlags(MachineInstr::FrameSetup);
+    }
+
+    BuildMI(MBB, It, DebugLoc(), get(AArch64::STPXi))
+        .addReg(AArch64::FP)
+        .addReg(AArch64::LR)
+        .addReg(AArch64::SP)
+        .addImm(CangjieSavedFPLROffset)
+        .setMIFlag(MachineInstr::FrameSetup);
+    BuildMI(MBB, It, DebugLoc(), get(AArch64::ADDXri), AArch64::FP)
+        .addReg(AArch64::SP)
+        .addImm(CangjieFrameSize - 16)
+        .addImm(0)
+        .setMIFlag(MachineInstr::FrameSetup);
+
+    if (isCJMachO(MF)) {
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::STPXi))
+          .addReg(AArch64::X10)
+          .addReg(AArch64::X9)
+          .addReg(AArch64::FP)
+          .addImm(-2)
+          .setMIFlag(MachineInstr::FrameSetup);
+    } else {
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::STURXi))
+          .addReg(AArch64::X9)
+          .addReg(AArch64::FP)
+          .addImm(-8)
+          .setMIFlag(MachineInstr::FrameSetup);
+    }
+
+    if (FI->needsDwarfUnwindInfo()) {
+      const TargetSubtargetInfo &STI = MF.getSubtarget();
+      const MCRegisterInfo *MRI = STI.getRegisterInfo();
+      unsigned FPDwarfReg = MRI->getDwarfRegNum(AArch64::FP, true);
+      unsigned LRDwarfReg = MRI->getDwarfRegNum(AArch64::LR, true);
+      int64_t FPPosEntry = MF.addFrameInst(
+          MCCFIInstruction::createOffset(nullptr, FPDwarfReg, -16));
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::CFI_INSTRUCTION))
+          .addCFIIndex(FPPosEntry)
+          .setMIFlags(MachineInstr::FrameSetup);
+      int64_t LRPosEntry = MF.addFrameInst(
+          MCCFIInstruction::createOffset(nullptr, LRDwarfReg, -8));
+      BuildMI(MBB, It, DebugLoc(), get(AArch64::CFI_INSTRUCTION))
+          .addCFIIndex(LRPosEntry)
+          .setMIFlags(MachineInstr::FrameSetup);
+    }
+
+    BuildMI(MBB, MBB.end(), DebugLoc(), get(AArch64::LDPXi))
+        .addReg(AArch64::FP, RegState::Define)
+        .addReg(AArch64::LR, RegState::Define)
+        .addReg(AArch64::SP)
+        .addImm(CangjieSavedFPLROffset)
+        .setMIFlag(MachineInstr::FrameDestroy);
+    BuildMI(MBB, MBB.end(), DebugLoc(), get(AArch64::ADDXri), AArch64::SP)
+        .addReg(AArch64::SP)
+        .addImm(CangjieFrameSize)
+        .addImm(0)
+        .setMIFlag(MachineInstr::FrameDestroy);
+    BuildMI(MBB, MBB.end(), DebugLoc(), get(AArch64::RET))
+        .addReg(AArch64::LR);
+
+    FI->setOutliningStyle("Cangjie Statepoint StackMap Function");
+    return;
+  }
 
   if (!OF.Candidates.empty() &&
       OF.FrameConstructionID == MachineOutlinerStatepointCall) {
