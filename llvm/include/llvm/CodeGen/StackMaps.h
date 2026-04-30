@@ -365,10 +365,13 @@ public:
     uint64_t StackSize = 0;
     uint64_t RecordCount = 0;
     std::map<unsigned, int> CSReg2Stack; // <reg, stackOffset>
+    int64_t SlotBaseOffsetAdjustment = 0;
 
     FunctionInfo() = default;
-    FunctionInfo(uint64_t StackSize, std::map<unsigned, int> &Info)
-        : StackSize(StackSize), CSReg2Stack(Info) {}
+    FunctionInfo(uint64_t StackSize, std::map<unsigned, int> &Info,
+                 int64_t SlotBaseOffsetAdjustment = 0)
+        : StackSize(StackSize), CSReg2Stack(Info),
+          SlotBaseOffsetAdjustment(SlotBaseOffsetAdjustment) {}
   };
 
   struct CallsiteInfo {
