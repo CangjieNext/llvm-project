@@ -17,6 +17,7 @@
 #include "llvm/CodeGen/Register.h"
 #include "llvm/Support/Alignment.h"
 #include <cassert>
+#include <utility>
 #include <vector>
 
 namespace llvm {
@@ -209,6 +210,11 @@ private:
 
   /// The list of stack objects allocated.
   std::vector<StackObject> Objects;
+
+  /// Original IR allocas for frame indices copied into compiler-created
+  /// outlined functions. These entries describe metadata only; they do not
+  /// create stack objects in this frame.
+  SmallVector<std::pair<int, const AllocaInst *>, 8> OutlinedObjectAllocations;
 
   /// This contains the number of fixed objects contained on
   /// the stack.  Because fixed objects are stored at a negative index in the
@@ -506,6 +512,32 @@ public:
     assert(unsigned(ObjectIdx+NumFixedObjects) < Objects.size() &&
            "Invalid Object Idx!");
     return Objects[ObjectIdx+NumFixedObjects].Alloca;
+  }
+
+  /// Record the original IR allocation for a frame index copied from another
+  /// function into an outlined function.
+  void setOutlinedObjectAllocation(int ObjectIdx, const AllocaInst *Alloca) {
+    for (auto &Entry : OutlinedObjectAllocations) {
+      if (Entry.first == ObjectIdx) {
+        Entry.second = Alloca;
+        return;
+      }
+    }
+    OutlinedObjectAllocations.emplace_back(ObjectIdx, Alloca);
+  }
+
+  /// Return the underlying Alloca of the specified object if it exists, falling
+  /// back to metadata copied from the original function during outlining.
+  const AllocaInst *getObjectAllocationIncludingOutlined(int ObjectIdx) const {
+    if (unsigned(ObjectIdx + NumFixedObjects) < Objects.size())
+      if (const AllocaInst *Alloca =
+              Objects[ObjectIdx + NumFixedObjects].Alloca)
+        return Alloca;
+
+    for (const auto &Entry : OutlinedObjectAllocations)
+      if (Entry.first == ObjectIdx)
+        return Entry.second;
+    return nullptr;
   }
 
   /// Remove the underlying Alloca of the specified stack object if it
