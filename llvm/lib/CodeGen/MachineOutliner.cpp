@@ -67,6 +67,7 @@
 #include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineOptimizationRemarkEmitter.h"
 #include "llvm/CodeGen/Passes.h"
@@ -101,6 +102,9 @@ extern cl::opt<bool> CJPipeline;
 using namespace llvm;
 using namespace ore;
 using namespace outliner;
+
+static const char *CangjieOutlinedStatepointFPToSPOffsetAttr =
+    "cangjie-outlined-statepoint-fp-sp-offset";
 
 // Statistics for outlined functions.
 STATISTIC(NumOutlined, "Number of candidates outlined");
@@ -390,6 +394,16 @@ struct MachineOutliner : public ModulePass {
   DenseMap<const MachineInstr *, unsigned> StatepointToStackMapIdx;
 
   DenseMap<const MachineInstr *, std::string> StackMapValueMap;
+
+  DenseMap<const MachineInstr *, bool> StatepointHasNonEmptyDerivedStartIdx;
+
+  struct StatepointHashCallTargetGroup {
+    std::string Hash;
+    int64_t FPToSPOffset = 0;
+    const MachineInstr *Representative = nullptr;
+    std::vector<const MachineInstr *> Statepoints;
+  };
+
   /// Set to true if the outliner should consider functions with
   /// linkonceodr linkage.
   bool OutlineFromLinkOnceODRs = false;
@@ -482,6 +496,16 @@ struct MachineOutliner : public ModulePass {
   createStatepointCompressedInfo(const MachineInstr &MI) const;
 
   std::string getStatepointCompressedInfoHash(const MachineInstr &MI) const;
+
+  /// Collect STATEPOINT instructions with the same stack map hash and the same
+  /// call target into groups.
+  std::vector<StatepointHashCallTargetGroup>
+  collectStatepointGroupsByHashAndCallTarget() const;
+
+  /// Find single-STATEPOINT groups that can share one outlined STATEPOINT to
+  /// reduce emitted stack map records.
+  void findCangjieStatepointStackMapCandidates(
+      InstructionMapper &Mapper, std::vector<OutlinedFunction> &FunctionList);
 
   /// Return a DISubprogram for OF if one exists, and null otherwise. Helper
   /// function for remark emission.
@@ -663,6 +687,75 @@ static bool hasCangjieSpecificCallInRange(
   return false;
 }
 
+static std::string getStatepointCallTargetKey(const MachineInstr &MI) {
+  StatepointOpers SO(&MI);
+  std::string Key;
+  raw_string_ostream OS(Key);
+  SO.getCallTarget().print(OS);
+  return OS.str();
+}
+
+static int64_t getFunctionFPToSPOffset(const MachineFunction &MF) {
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  return static_cast<int64_t>(MFI.getStackSize());
+}
+
+static bool isMachineOutlinerCreatedFunction(const MachineFunction &MF) {
+  return MF.getName().startswith("OUTLINED_FUNCTION");
+}
+
+static bool hasNonEmptyDerivedStartIdx(const CompressedInfo &Data) {
+  for (const auto &StackMapItem : Data.StackMapItem)
+    if (StackMapItem.second.DerivedInfoStartIdx != 0)
+      return true;
+  return false;
+}
+
+static bool isCangjieThrowExceptionStatepoint(const MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+    return false;
+
+  StatepointOpers SO(&MI);
+  const Function *Callee = SO.getCalledFunction();
+  return Callee && Callee->isCangjieThrowException();
+}
+
+static bool isCangjieStackCheckStatepoint(const MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+    return false;
+
+  StatepointOpers SO(&MI);
+  return SO.getID() == Cangjie::CJStatepointID::StackCheck;
+}
+
+static void copyStatepointAllocaObjectAllocations(const MachineInstr &MI,
+                                                  MachineFunction &OutlinedMF) {
+  if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+    return;
+
+  StatepointOpers SO(&MI);
+  unsigned NumAllocasIdx = SO.getNumAllocaIdx();
+  unsigned NumAllocas =
+      static_cast<unsigned>(MI.getOperand(NumAllocasIdx).getImm());
+  if (!NumAllocas)
+    return;
+
+  int AllocaIdx = SO.getFirstAllocaIdx();
+  assert(AllocaIdx != -1 && "expected first alloca operand");
+
+  const MachineFrameInfo &OrigMFI = MI.getMF()->getFrameInfo();
+  MachineFrameInfo &OutlinedMFI = OutlinedMF.getFrameInfo();
+  while (NumAllocas--) {
+    const MachineOperand &Kind = MI.getOperand(AllocaIdx);
+    if (Kind.isImm() && Kind.getImm() == StackMaps::DirectMemRefOp) {
+      int FI = static_cast<int>(MI.getOperand(AllocaIdx + 3).getImm());
+      OutlinedMFI.setOutlinedObjectAllocation(
+          FI, OrigMFI.getObjectAllocationIncludingOutlined(FI));
+    }
+    AllocaIdx = StackMaps::getNextMetaArgIdx(&MI, AllocaIdx);
+  }
+}
+
 static bool isMappedLegalInstruction(const InstructionMapper &Mapper,
                                      unsigned Idx) {
   assert(Idx < Mapper.UnsignedVec.size() && "Index out of bounds!");
@@ -837,6 +930,130 @@ static MachineBasicBlock::iterator replaceOutlinedCallWithStatepoint(
   MachineBasicBlock::iterator NewIt = MBB.insert(CallIt, Wrapper);
   MBB.erase(CallIt);
   return NewIt;
+}
+
+std::vector<MachineOutliner::StatepointHashCallTargetGroup>
+MachineOutliner::collectStatepointGroupsByHashAndCallTarget() const {
+  std::vector<StatepointHashCallTargetGroup> Groups;
+  DenseMap<const MachineFunction *, int64_t> FunctionFPToSPOffsetMap;
+  DenseMap<const MachineInstr *, std::string> ExtendedStackMapValueMap;
+  StringMap<unsigned> GroupIndexMap;
+
+  for (const auto &Entry : StackMapValueMap) {
+    const MachineInstr *MI = Entry.first;
+    if (!MI || MI->getOpcode() != TargetOpcode::STATEPOINT)
+      continue;
+
+    const MachineFunction *MF = MI->getMF();
+    if (!MF)
+      continue;
+
+    FunctionFPToSPOffsetMap.try_emplace(MF, getFunctionFPToSPOffset(*MF));
+  }
+
+  for (const auto &Entry : StackMapValueMap) {
+    const MachineInstr *MI = Entry.first;
+    if (!MI || MI->getOpcode() != TargetOpcode::STATEPOINT)
+      continue;
+
+    const MachineFunction *MF = MI->getMF();
+    if (!MF)
+      continue;
+
+    auto OffsetIt = FunctionFPToSPOffsetMap.find(MF);
+    if (OffsetIt == FunctionFPToSPOffsetMap.end())
+      continue;
+
+    std::string ExtendedHash = Entry.second;
+    ExtendedHash += "|fp-sp=" + std::to_string(OffsetIt->second);
+    ExtendedStackMapValueMap[MI] = ExtendedHash;
+
+    std::string GroupKey = ExtendedHash;
+    GroupKey += "|call-target=" + getStatepointCallTargetKey(*MI);
+    auto GroupIt = GroupIndexMap.find(GroupKey);
+    if (GroupIt != GroupIndexMap.end()) {
+      StatepointHashCallTargetGroup &Group = Groups[GroupIt->second];
+      Group.Statepoints.push_back(MI);
+      continue;
+    }
+
+    StatepointHashCallTargetGroup Group;
+    Group.Hash = ExtendedStackMapValueMap[MI];
+    Group.FPToSPOffset = OffsetIt->second;
+    Group.Representative = MI;
+    Group.Statepoints.push_back(MI);
+    GroupIndexMap[GroupKey] = Groups.size();
+    Groups.push_back(std::move(Group));
+  }
+
+  return Groups;
+}
+
+void MachineOutliner::findCangjieStatepointStackMapCandidates(
+    InstructionMapper &Mapper, std::vector<OutlinedFunction> &FunctionList) {
+  FunctionList.clear();
+
+  std::vector<StatepointHashCallTargetGroup> Groups =
+      collectStatepointGroupsByHashAndCallTarget();
+  for (StatepointHashCallTargetGroup &Group : Groups) {
+    if (Group.Statepoints.size() < 2)
+      continue;
+
+    std::vector<Candidate> CandidatesForGroup;
+    for (const MachineInstr *ConstMI : Group.Statepoints) {
+      MachineInstr *MI = const_cast<MachineInstr *>(ConstMI);
+      if (!MI || MI->getOpcode() != TargetOpcode::STATEPOINT)
+        continue;
+      if (StatepointHasNonEmptyDerivedStartIdx.lookup(MI))
+        continue;
+
+      if (isCangjieThrowExceptionStatepoint(*MI))
+        continue;
+      if (isCangjieStackCheckStatepoint(*MI))
+        continue;
+
+      MachineBasicBlock *MBB = MI->getParent();
+      if (!MBB)
+        continue;
+
+      if (isMachineOutlinerCreatedFunction(*MBB->getParent()))
+        continue;
+
+      const TargetInstrInfo *TII =
+          MBB->getParent()->getSubtarget().getInstrInfo();
+      unsigned Flags = 0;
+      if (!TII->isMBBSafeToOutlineFrom(*MBB, Flags))
+        continue;
+
+      unsigned StartIdx = Mapper.UnsignedVec.size();
+      MachineBasicBlock::iterator It = MI->getIterator();
+      Mapper.InstrList.push_back(It);
+      Mapper.UnsignedVec.push_back(StartIdx);
+      Mapper.MBBFlagsMap[MBB] = Flags;
+
+      Candidate C(StartIdx, /*Len=*/1, It, It, MBB, FunctionList.size(),
+                  Flags);
+      C.IsCangjieStatepointStackMapCandidate = true;
+      C.CangjieStatepointStackMapFPToSPOffset = Group.FPToSPOffset;
+      CandidatesForGroup.push_back(C);
+    }
+
+    if (CandidatesForGroup.size() < 2)
+      continue;
+
+    const TargetInstrInfo *TII =
+        CandidatesForGroup[0].getMF()->getSubtarget().getInstrInfo();
+    OutlinedFunction OF = TII->getOutliningCandidateInfo(CandidatesForGroup);
+    if (OF.Candidates.size() < 2)
+      continue;
+
+    if (OF.getBenefit() < 1) {
+      emitNotOutliningCheaperRemark(/*StringLen=*/1, CandidatesForGroup, OF);
+      continue;
+    }
+
+    FunctionList.push_back(std::move(OF));
+  }
 }
 
 void MachineOutliner::findMultiStatepointHashCandidates(
@@ -1107,10 +1324,15 @@ MachineFunction *MachineOutliner::createOutlinedFunction(
                                  Function::ExternalLinkage, FunctionName, M);
 
   Candidate &FirstCand = OF.Candidates.front();
-  if (isMultiStatepointCandidate(FirstCand)) {
+  if (isMultiStatepointCandidate(FirstCand) ||
+      FirstCand.IsCangjieStatepointStackMapCandidate) {
     F->setGC("cangjie");
     F->setCallingConv(CallingConv::CangjieGC);
     F->addFnAttr("cangjie-outlined-multistatepoint");
+    if (FirstCand.IsCangjieStatepointStackMapCandidate)
+      F->addFnAttr(
+          CangjieOutlinedStatepointFPToSPOffsetAttr,
+          std::to_string(FirstCand.CangjieStatepointStackMapFPToSPOffset));
   }
 
   // NOTE: If this is linkonceodr, then we can take advantage of linker deduping
@@ -1167,6 +1389,7 @@ MachineFunction *MachineOutliner::createOutlinedFunction(
       MachineInstr *NewMI = MF.CloneMachineInstr(&*I);
       NewMI->dropMemRefs(MF);
       NewMI->setDebugLoc(DL);
+      copyStatepointAllocaObjectAllocations(*I, MF);
       MBB.insert(MBB.end(), NewMI);
     }
   }
@@ -1280,7 +1503,7 @@ bool MachineOutliner::outline(Module &M,
       MachineBasicBlock::iterator EndIt = C.back();
       MachineInstr *PrototypeStatepoint = findFirstStatepointInCandidate(C);
       bool NeedsStatepointWrapper =
-          PrototypeStatepoint &&
+          !C.IsCangjieStatepointStackMapCandidate && PrototypeStatepoint &&
           shouldWrapOutlinedCallWithStatepoint(C, StackMapValueMap);
 
       // Insert the call.
@@ -1396,6 +1619,8 @@ void MachineOutliner::populateMapper(
     // Function.
     if (!MF)
       continue;
+    if (isMachineOutlinerCreatedFunction(*MF))
+      continue;
     if (AllowedMFs && !AllowedMFs->count(MF))
       continue;
 
@@ -1440,6 +1665,7 @@ void MachineOutliner::collectStatepointStackMaps(Module &M,
                                                  MachineModuleInfo &MMI) {
   StatepointToStackMapIdx.clear();
   StackMapValueMap.clear();
+  StatepointHasNonEmptyDerivedStartIdx.clear();
   if (!ASM || !SM)
     return;
 
@@ -1450,6 +1676,8 @@ void MachineOutliner::collectStatepointStackMaps(Module &M,
 
     MachineFunction *MF = MMI.getMachineFunction(F);
     if (!MF)
+      continue;
+    if (isMachineOutlinerCreatedFunction(*MF))
       continue;
 
     const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
@@ -1478,6 +1706,8 @@ void MachineOutliner::collectStatepointStackMaps(Module &M,
     MachineFunction *MF = MMI.getMachineFunction(F);
     if (!MF)
       continue;
+    if (isMachineOutlinerCreatedFunction(*MF))
+      continue;
 
     const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
     if (!RunOnAllFunctions && !TII->shouldOutlineFromFunctionByDefault(*MF))
@@ -1497,8 +1727,14 @@ void MachineOutliner::collectStatepointStackMaps(Module &M,
 
         assert(It->second < SM->getCSInfos().size() &&
                "invalid stack map index");
-        
-        StackMapValueMap[&MI] = getStatepointCompressedInfoHash(MI);
+
+        std::unique_ptr<CompressedInfo> Data = createStatepointCompressedInfo(MI);
+        if (!Data)
+          continue;
+
+        StatepointHasNonEmptyDerivedStartIdx[&MI] =
+            hasNonEmptyDerivedStartIdx(*Data);
+        StackMapValueMap[&MI] = SM->getCompressedInfoHash(*Data);
       }
     }
   }
@@ -1686,6 +1922,7 @@ bool MachineOutliner::doOutline(Module &M, unsigned &OutlinedFunctionNum) {
       OriginalMFs.insert(MF);
   }
 
+  std::vector<OutlinedFunction> StatepointStackMapFunctionList;
   std::vector<OutlinedFunction> MultiStatepointFunctionList;
   std::vector<OutlinedFunction> FunctionList;
 
@@ -1703,6 +1940,14 @@ bool MachineOutliner::doOutline(Module &M, unsigned &OutlinedFunctionNum) {
   if (ShouldEmitSizeRemarks)
     initSizeRemarkInfo(M, MMI, FunctionToInstrCount);
 
+  InstructionMapper StatepointStackMapMapper;
+  findCangjieStatepointStackMapCandidates(StatepointStackMapMapper,
+                                          StatepointStackMapFunctionList);
+
+  bool OutlinedSomething = false;
+  OutlinedSomething |= outline(M, StatepointStackMapFunctionList,
+                               StatepointStackMapMapper, OutlinedFunctionNum);
+
   InstructionMapper MultiStatepointMapper;
 
   // Build a dedicated mapper for the multi-STATEPOINT flow where STATEPOINT
@@ -1714,7 +1959,6 @@ bool MachineOutliner::doOutline(Module &M, unsigned &OutlinedFunctionNum) {
   findMultiStatepointHashCandidates(MultiStatepointMapper,
                                     MultiStatepointFunctionList);
 
-  bool OutlinedSomething = false;
   OutlinedSomething |= outline(M, MultiStatepointFunctionList,
                                MultiStatepointMapper, OutlinedFunctionNum);
 
