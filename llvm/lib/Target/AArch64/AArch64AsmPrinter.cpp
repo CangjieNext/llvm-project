@@ -89,6 +89,13 @@ static const char *CangjieOutlinedMultiStatepointAttr =
     "cangjie-outlined-multistatepoint";
 static const char *CangjieOutlinedMultiStatepointName =
     "OUTLINED_FUNCTION_CANGJIE_STATEPOINT";
+static const char *CangjieOutlinedStatepointFPToSPOffsetAttr =
+    "cangjie-outlined-statepoint-fp-sp-offset";
+
+static bool usesSharedCangjieOutlinedMethodDesc(const Function &F) {
+  return F.hasFnAttribute(CangjieOutlinedMultiStatepointAttr) &&
+         !F.hasFnAttribute(CangjieOutlinedStatepointFPToSPOffsetAttr);
+}
 
 static StringRef getCallTargetName(const MachineOperand &MO) {
   if (MO.isGlobal()) {
@@ -1623,7 +1630,7 @@ void AArch64AsmPrinter::emitInstruction(const MachineInstr *MI) {
       }
       StringRef PACKAGEID = dyn_cast<MDString>(MD)->getString();
       StringRef MethodDescName =
-          Func.hasFnAttribute(CangjieOutlinedMultiStatepointAttr)
+          usesSharedCangjieOutlinedMethodDesc(Func)
               ? StringRef(CangjieOutlinedMultiStatepointName)
               : MF->getName();
       MCSymbol *DescSymbol = OutContext.getOrCreateSymbol(

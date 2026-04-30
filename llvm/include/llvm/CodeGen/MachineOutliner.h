@@ -18,6 +18,7 @@
 #include "llvm/CodeGen/LiveRegUnits.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include <cstdint>
 #include <initializer_list>
 
 namespace llvm {
@@ -115,6 +116,14 @@ public:
 
   /// Target-specific flags for this Candidate's MBB.
   unsigned Flags = 0x0;
+
+  /// True when this candidate is a single Cangjie STATEPOINT outlined to reduce
+  /// stack map records instead of instruction bytes.
+  bool IsCangjieStatepointStackMapCandidate = false;
+
+  /// FP-to-SP offset at the original call site for a single STATEPOINT
+  /// stackmap outline candidate.
+  int64_t CangjieStatepointStackMapFPToSPOffset = 0;
 
   /// Return the number of instructions in this Candidate.
   unsigned getLength() const { return Len; }

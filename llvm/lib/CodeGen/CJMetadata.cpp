@@ -62,6 +62,13 @@ const char *CangjieOutlinedMultiStatepointAttr =
     "cangjie-outlined-multistatepoint";
 const char *CangjieOutlinedMultiStatepointName =
     "OUTLINED_FUNCTION_CANGJIE_STATEPOINT";
+const char *CangjieOutlinedStatepointFPToSPOffsetAttr =
+    "cangjie-outlined-statepoint-fp-sp-offset";
+
+bool usesSharedCangjieOutlinedMethodDesc(const Function &F) {
+  return F.hasFnAttribute(CangjieOutlinedMultiStatepointAttr) &&
+         !F.hasFnAttribute(CangjieOutlinedStatepointFPToSPOffsetAttr);
+}
 } // namespace
 CJMetadataInfo::CJMetadataInfo(AsmPrinter &AP, StackMaps &SM)
     : AP(AP), SM(SM), OS(*AP.OutStreamer), Context(AP.OutContext),
@@ -258,7 +265,7 @@ void CJMetadataInfo::recordCurrentFunc() {
   if (!F.hasCangjieGC() || F.hasFnAttribute("leaf-function"))
     return;
 
-  if (F.hasFnAttribute(CangjieOutlinedMultiStatepointAttr)) {
+  if (usesSharedCangjieOutlinedMethodDesc(F)) {
     if (RecordedCangjieOutlinedMultiStatepoint)
       return;
 
