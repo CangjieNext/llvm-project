@@ -136,6 +136,13 @@ static const char *CangjieOutlinedMultiStatepointAttr =
     "cangjie-outlined-multistatepoint";
 static const char *CangjieOutlinedMultiStatepointName =
     "OUTLINED_FUNCTION_CANGJIE_STATEPOINT";
+static const char *CangjieOutlinedStatepointFPToSPOffsetAttr =
+    "cangjie-outlined-statepoint-fp-sp-offset";
+
+static bool usesSharedCangjieOutlinedMethodDesc(const Function &F) {
+  return F.hasFnAttribute(CangjieOutlinedMultiStatepointAttr) &&
+         !F.hasFnAttribute(CangjieOutlinedStatepointFPToSPOffsetAttr);
+}
 
 namespace llvm {
 extern cl::opt<unsigned> CangjieStackCheckSize;
@@ -1060,7 +1067,7 @@ void AsmPrinter::emitFunctionHeader() {
   if (F.hasCangjieGC() && !F.hasFnAttribute("leaf-function") &&
       !TT.isOSBinFormatMachO()) {
     StringRef MethodDescName =
-        F.hasFnAttribute(CangjieOutlinedMultiStatepointAttr)
+        usesSharedCangjieOutlinedMethodDesc(F)
             ? StringRef(CangjieOutlinedMultiStatepointName)
             : CurrentFnSym->getName();
     MCSymbol *DescSymbol = OutContext.getOrCreateSymbol(
