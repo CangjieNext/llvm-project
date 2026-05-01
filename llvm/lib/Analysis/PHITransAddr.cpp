@@ -213,14 +213,13 @@ Value *PHITransAddr::PHITranslateSubExpr(Value *V, BasicBlock *CurBB,
         if (CastInst *CastI = dyn_cast<CastInst>(U))
           if (CastI->getOpcode() == Cast->getOpcode() &&
               CastI->getType() == Cast->getType() &&
-              (!DT || DT->dominates(CastI->getParent(), PredBB))){
-                return CastI;
-                if(V != PHIIn){
-                  RemoveInstInputs(PHIIn, InstInputs);
-                  AddAsInput(CastI->getOperand(0));
-
-                }
-              }
+              (!DT || DT->dominates(CastI->getParent(), PredBB))) {
+            if (V != PHIIn) {
+              RemoveInstInputs(PHIIn, InstInputs);
+              AddAsInput(CastI->getOperand(0));
+            }
+            return CastI;
+          }
       }
     }
     return nullptr;
