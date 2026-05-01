@@ -217,7 +217,7 @@ Value *PHITransAddr::PHITranslateSubExpr(Value *V, BasicBlock *CurBB,
                 return CastI;
                 if(V != PHIIn){
                   RemoveInstInputs(PHIIn, InstInputs);
-                  AddAsInput(CastI->getOperand(0));
+                  //AddAsInput(CastI->getOperand(0));
 
                 }
               }
