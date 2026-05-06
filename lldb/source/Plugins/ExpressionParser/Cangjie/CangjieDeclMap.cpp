@@ -25,6 +25,25 @@ using namespace lldb_private;
 using namespace Cangjie;
 using namespace Cangjie::AST;
 
+static std::map<std::string, lldb::BasicType> basic_clang_type_map = {
+    { "Bool", lldb::eBasicTypeBool },
+    { "Unit", lldb::eBasicTypeSignedChar },
+    { "Rune", lldb::eBasicTypeChar32 },
+    { "Int8", lldb::eBasicTypeSignedChar },
+    { "Int16", lldb::eBasicTypeShort },
+    { "Int32", lldb::eBasicTypeInt },
+    { "Int64", lldb::eBasicTypeLongLong },
+    { "IntNative", lldb::eBasicTypeLongLong },
+    { "UInt8", lldb::eBasicTypeUnsignedChar },
+    { "UInt16", lldb::eBasicTypeUnsignedShort },
+    { "UInt32", lldb::eBasicTypeUnsignedInt },
+    { "UInt64", lldb::eBasicTypeUnsignedLongLong },
+    { "UIntNative", lldb::eBasicTypeUnsignedLongLong },
+    { "Float16", lldb::eBasicTypeHalf },
+    { "Float32", lldb::eBasicTypeFloat },
+    { "Float64", lldb::eBasicTypeDouble },
+};
+
 bool CangjieDeclMap::IsInterfaceType(CompilerType& type) {
   if (type.GetTypeClass() == lldb::eTypeClassClass) {
     std::string typeName = SafeAsCString(type.GetTypeName());
@@ -237,8 +256,9 @@ CompilerType CangjieDeclMap::LookUpGlobalVariable(lldb::ModuleSP module,  ConstS
   VariableList vars;
   if (module && namespace_decl) {
     module->FindGlobalVariables(name, namespace_decl, -1, vars);
-  } else {
-    target->GetImages().FindGlobalVariables(name, -1, vars);
+  } else if (m_current_module_sp) {
+    // Use cached current module
+    m_current_module_sp->FindGlobalVariables(name, -1, vars);
   }
 
   if (vars.GetSize() == 0) {
@@ -255,10 +275,11 @@ CompilerType CangjieDeclMap::LookUptype(lldb::ModuleSP module,
   llvm::DenseSet<SymbolFile *> searched_symbol_files;
   if (module && namespace_decl) {
     module->FindTypesInNamespace(name, namespace_decl, 1, types);
-  } else {
-    auto target = m_exe_ctx.GetTargetSP();
-    target->GetImages().FindTypes(
-        module.get(), name, exact_match, 1, searched_symbol_files, types);
+  } else if (m_current_module_sp) {
+    // Use cached current module
+    m_current_module_sp->FindTypes(name, exact_match, 1, searched_symbol_files, types);
+    Log *log = GetLog(LLDBLog::Expressions);
+    LLDB_LOGF(log, "find %s in current module %s", name.AsCString(), m_current_module_sp->GetObjectName().AsCString());
   }
 
   size_t num_types = types.GetSize();
@@ -275,22 +296,18 @@ CompilerType CangjieDeclMap::LookUptype(lldb::ModuleSP module,
 }
 
 bool CangjieDeclMap::LookUpPackage(ConstString name) {
-  auto target = m_exe_ctx.GetTargetSP();
   NamespaceMapSP parsed_package = std::make_shared<NamespaceMap>();
-  for (lldb::ModuleSP image : target->GetImages().Modules()) {
-    if (!image) {
-      continue;
-    }
 
-    SymbolFile *symbol_file = image->GetSymbolFile();
-    if (!symbol_file) {
-      continue;
-    }
-    CompilerDeclContext namespace_decl;
-    CompilerDeclContext found_namespace_decl = symbol_file->FindNamespace(name, namespace_decl);
-    if (found_namespace_decl) {
-      parsed_package->push_back(
-          std::pair<lldb::ModuleSP, CompilerDeclContext>(image, found_namespace_decl));
+  // Use cached current module
+  if (m_current_module_sp) {
+    SymbolFile *symbol_file = m_current_module_sp->GetSymbolFile();
+    if (symbol_file) {
+      CompilerDeclContext namespace_decl;
+      CompilerDeclContext found_namespace_decl = symbol_file->FindNamespace(name, namespace_decl);
+      if (found_namespace_decl) {
+        parsed_package->push_back(
+            std::pair<lldb::ModuleSP, CompilerDeclContext>(m_current_module_sp, found_namespace_decl));
+      }
     }
   }
 
@@ -306,21 +323,17 @@ std::vector<lldb_private::CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::Look
     ConstString name, const CompilerDeclContext &namespace_decl) {
   std::vector<CompilerTypeInfo> result;
   SymbolContextList sc_list;
-  auto target = m_exe_ctx.GetTargetPtr();
-  if (namespace_decl && module) {
-    ModuleFunctionSearchOptions function_options;
-    function_options.include_inlines = false;
-    function_options.include_symbols = false;
+  ModuleFunctionSearchOptions function_options;
+  function_options.include_inlines = false;
+  function_options.include_symbols = true;
 
+  if (namespace_decl && module) {
     module->FindFunctions(name, namespace_decl, lldb::eFunctionNameTypeBase,
                              function_options, sc_list);
-  } else if (target && !namespace_decl) {
-    ModuleFunctionSearchOptions function_options;
-    function_options.include_inlines = false;
-    function_options.include_symbols = true;
-    target->GetImages().FindFunctions(
-        name, lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options,
-        sc_list);
+  } else if (m_current_module_sp) {
+    // Use cached current module
+    m_current_module_sp->FindFunctions(name,
+        lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options, sc_list);
   }
 
   if (!sc_list.GetSize()) {
@@ -406,32 +419,36 @@ bool CheckNestedGenericFunction(lldb_private::ConstString funcname) {
 
 std::vector<CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::LookUpFunction(std::string name, bool find_global) {
   std::vector<CangjieDeclMap::CompilerTypeInfo> result;
-  auto target = m_exe_ctx.GetTargetPtr();
   auto frame = m_exe_ctx.GetFramePtr();
-  if (!target || !frame) {
+  if (!frame) {
     return result;
   }
+
   SymbolContextList sc_list;
   SymbolContextList sc_generic_list;
   ModuleFunctionSearchOptions function_options;
   function_options.include_inlines = false;
   function_options.include_symbols = true;
 
-  target->GetImages().FindFunctions(ConstString(name),
-      lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options, sc_list);
+  // Use cached current module
+  if (m_current_module_sp) {
+    m_current_module_sp->FindFunctions(ConstString(name),
+        lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options, sc_list);
 
-  std::string re_cstr = std::string("^") + llvm::Regex::escape(name) + std::string("<.+>$");
-  target->GetImages().FindFunctions(RegularExpression(llvm::StringRef(re_cstr)), function_options, sc_generic_list);
-  sc_list.Append(sc_generic_list);
+    std::string re_cstr = std::string("^") + llvm::Regex::escape(name) + std::string("<.+>$");
+    m_current_module_sp->FindFunctions(RegularExpression(llvm::StringRef(re_cstr)), function_options, sc_generic_list);
+    sc_list.Append(sc_generic_list);
+  }
+
   if (sc_list.IsEmpty()) {
     return result;
   }
   std::string globalScope = m_current_pkgname;
   std::string localScope;
-  // Collect some info about our frame's context.
-  auto frame_sym_ctx = frame->GetSymbolContext(lldb::eSymbolContextFunction | lldb::eSymbolContextBlock);
-  if (frame_sym_ctx.function) {
-    localScope = SafeAsCString(frame_sym_ctx.function->GetNameNoArguments());
+  // Collect some info about our frame's context for scope filtering.
+  SymbolContext func_sym_ctx = frame->GetSymbolContext(lldb::eSymbolContextFunction | lldb::eSymbolContextBlock);
+  if (func_sym_ctx.function) {
+    localScope = SafeAsCString(func_sym_ctx.function->GetNameNoArguments());
   }
   Log *log = GetLog(LLDBLog::Expressions);
   auto num_indices = sc_list.GetSize();
@@ -485,9 +502,14 @@ CompilerType CangjieDeclMap::LookUpType(std::string name)
 {
   TypeList types;
   llvm::DenseSet<SymbolFile *> searched_symbol_files;
-  auto target = m_exe_ctx.GetTargetSP();
   name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
-  target->GetImages().FindTypes(nullptr, ConstString(name), false, 1, searched_symbol_files, types);
+
+  // Use cached current module
+  if (m_current_module_sp) {
+    m_current_module_sp->FindTypes(ConstString(name), false, 1, searched_symbol_files, types);
+    Log *log = GetLog(LLDBLog::Expressions);
+    LLDB_LOGF(log, "1 find %s in current module %s", name.c_str(), m_current_module_sp->GetObjectName().AsCString());
+  }
 
   size_t num_types = types.GetSize();
   for (size_t ti = 0; ti < num_types; ++ti) {
@@ -1096,6 +1118,11 @@ void CangjieDeclMap::InitVariable() {
   if (!frame) {
     return;
   }
+
+  // Cache current module from execution context
+  SymbolContext module_sym_ctx = frame->GetSymbolContext(lldb::eSymbolContextModule);
+  m_current_module_sp = module_sym_ctx.module_sp;
+
   SymbolContext sym_ctx = frame->GetSymbolContext(lldb::eSymbolContextCompUnit);
   if (sym_ctx.comp_unit) {
     // Get current package name
@@ -1543,35 +1570,53 @@ CompilerType CangjieDeclMap::GetGenericTypeByPartName(const std::string& name) {
   if (!symfile) {
     return CompilerType();
   }
-  lldb_private::TypeList type_list;
-  symfile->GetTypes(nullptr, lldb::eTypeClassClass|lldb::eTypeClassStruct, type_list);
-  size_t ntypes = type_list.GetSize();
-  std::string combine_name = name + "<" + GENERIC_TYPE_PREFIX_NAME;
-  auto subName = name;
-  if (subName = GetSubNameWithoutPkgname(subName, m_current_pkgname); !subName.empty()) {
-    combine_name = subName + "<" + GENERIC_TYPE_PREFIX_NAME;
+
+  // Skip basic types - they are never generic types
+  if (basic_clang_type_map.find(name) != basic_clang_type_map.end()) {
+    return CompilerType();
   }
-  for (size_t i = 0; i < ntypes; ++i) {
-    lldb::TypeSP type = type_list.GetTypeAtIndex(i);
-    std::string tmpName = type->GetName().AsCString();
-    auto tpos = tmpName.find("<");
-    auto dcpos = tmpName.find(PACKAGE_SUFFIX);
-    if (dcpos != std::string::npos && tpos > dcpos) {
-      // tmpName: "ohos.ark_interop::Slab<T>"  -->  "Slab<T>"
-      tmpName = tmpName.substr(dcpos + PACKAGE_SUFFIX.size());
+
+  // Build the generic type index cache on first call
+  if (!m_generic_type_index_initialized) {
+    lldb_private::TypeList type_list;
+    symfile->GetTypes(nullptr, lldb::eTypeClassClass|lldb::eTypeClassStruct, type_list);
+    size_t ntypes = type_list.GetSize();
+    for (size_t i = 0; i < ntypes; ++i) {
+      lldb::TypeSP type = type_list.GetTypeAtIndex(i);
+      std::string fullName = type->GetName().AsCString();
+      // Only process generic types (containing '<')
+      auto tpos = fullName.find("<");
+      if (tpos == std::string::npos) {
+        continue;
+      }
+      // Extract base name before '<': "array<T>" -> "array", "Slab<T>" -> "Slab"
+      std::string baseName = fullName.substr(0, tpos);
+      // Remove package prefix if present: "ohos.ark_interop::Slab" -> "Slab"
+      auto dcpos = baseName.find(
+        
+      );
+      if (dcpos != std::string::npos) {
+        baseName = baseName.substr(dcpos + PACKAGE_SUFFIX.size());
+      }
+      // Also handle types like "E1$Time<...>" - remove prefix
+      baseName = DeletePrefixOfType(baseName);
+      // Skip basic types - they should not be cached as generic types
+      if (!baseName.empty() && basic_clang_type_map.find(baseName) == basic_clang_type_map.end()) {
+        m_generic_type_index[baseName] = type->GetFullCompilerType();
+      }
     }
-    auto tlpos = tmpName.find(combine_name);
-    if (tlpos == 0) {
-      CompilerType full_type = type->GetFullCompilerType();
-      return full_type;
-    }
-    //  tmpName: "E1$Time<Default::Bar>"  -->  "Time<Default::Bar>"
-    tmpName = DeletePrefixOfType(tmpName);
-    tlpos = tmpName.find(combine_name);
-    if (tlpos == 0) {
-      CompilerType full_type = type->GetFullCompilerType();
-      return full_type;
-    }
+    m_generic_type_index_initialized = true;
+  }
+
+  // Look up in the cached index
+  std::string searchName = name;
+  auto subName = GetSubNameWithoutPkgname(searchName, m_current_pkgname);
+  if (!subName.empty()) {
+    searchName = subName;
+  }
+  auto it = m_generic_type_index.find(searchName);
+  if (it != m_generic_type_index.end()) {
+    return it->second;
   }
   return CompilerType();
 }
@@ -1796,25 +1841,6 @@ lldb_private::CompilerType CangjieDeclMap::FindParsedTypesByName(std::string nam
   }
   return GetPrimitiveTypeByName(name);
 }
-
-static std::map<std::string, lldb::BasicType> basic_clang_type_map = {
-    { "Bool", lldb::eBasicTypeBool },
-    { "Unit", lldb::eBasicTypeSignedChar },
-    { "Rune", lldb::eBasicTypeChar32 },
-    { "Int8", lldb::eBasicTypeSignedChar },
-    { "Int16", lldb::eBasicTypeShort },
-    { "Int32", lldb::eBasicTypeInt },
-    { "Int64", lldb::eBasicTypeLongLong },
-    { "IntNative", lldb::eBasicTypeLongLong },
-    { "UInt8", lldb::eBasicTypeUnsignedChar },
-    { "UInt16", lldb::eBasicTypeUnsignedShort },
-    { "UInt32", lldb::eBasicTypeUnsignedInt },
-    { "UInt64", lldb::eBasicTypeUnsignedLongLong },
-    { "UIntNative", lldb::eBasicTypeUnsignedLongLong },
-    { "Float16", lldb::eBasicTypeHalf },
-    { "Float32", lldb::eBasicTypeFloat },
-    { "Float64", lldb::eBasicTypeDouble },
-};
 
 CompilerType CangjieDeclMap::GetPrimitiveTypeByName(std::string &name) {
   if (!m_type_system) {
