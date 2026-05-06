@@ -256,9 +256,16 @@ CompilerType CangjieDeclMap::LookUptype(lldb::ModuleSP module,
   if (module && namespace_decl) {
     module->FindTypesInNamespace(name, namespace_decl, 1, types);
   } else {
-    auto target = m_exe_ctx.GetTargetSP();
-    target->GetImages().FindTypes(
-        module.get(), name, exact_match, 1, searched_symbol_files, types);
+    auto frame = m_exe_ctx.GetFramePtr();
+    lldb::ModuleSP module_sp;
+    if (frame) {
+      SymbolContext sym_ctx = frame->GetSymbolContext(lldb::eSymbolContextModule);
+      module_sp = sym_ctx.module_sp;
+    }
+    
+    module_sp->FindTypes(name, exact_match, 1, searched_symbol_files, types);
+    Log *log = GetLog(LLDBLog::Expressions);
+    LLDB_LOGF(log, "find %s in current module %s", name.AsCString(), module_sp->GetObjectName().AsCString());
   }
 
   size_t num_types = types.GetSize();
@@ -487,7 +494,21 @@ CompilerType CangjieDeclMap::LookUpType(std::string name)
   llvm::DenseSet<SymbolFile *> searched_symbol_files;
   auto target = m_exe_ctx.GetTargetSP();
   name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
-  target->GetImages().FindTypes(nullptr, ConstString(name), false, 1, searched_symbol_files, types);
+
+  // Get the current module from the execution context
+  auto frame = m_exe_ctx.GetFramePtr();
+  lldb::ModuleSP module_sp;
+  if (frame) {
+    SymbolContext sym_ctx = frame->GetSymbolContext(lldb::eSymbolContextModule);
+    module_sp = sym_ctx.module_sp;
+  }
+
+  // Search types in the current module first, then fall back to all images if not found
+  if (module_sp) {
+    module_sp->FindTypes(ConstString(name), false, 1, searched_symbol_files, types);
+    Log *log = GetLog(LLDBLog::Expressions);
+    LLDB_LOGF(log, "1 find %s in current module %s", name.c_str(), module_sp->GetObjectName().AsCString());
+  }
 
   size_t num_types = types.GetSize();
   for (size_t ti = 0; ti < num_types; ++ti) {
@@ -1543,35 +1564,51 @@ CompilerType CangjieDeclMap::GetGenericTypeByPartName(const std::string& name) {
   if (!symfile) {
     return CompilerType();
   }
-  lldb_private::TypeList type_list;
-  symfile->GetTypes(nullptr, lldb::eTypeClassClass|lldb::eTypeClassStruct, type_list);
-  size_t ntypes = type_list.GetSize();
-  std::string combine_name = name + "<" + GENERIC_TYPE_PREFIX_NAME;
-  auto subName = name;
-  if (subName = GetSubNameWithoutPkgname(subName, m_current_pkgname); !subName.empty()) {
-    combine_name = subName + "<" + GENERIC_TYPE_PREFIX_NAME;
+
+  // Skip basic types - they are never generic types
+  if (basic_clang_type_map.find(name) != basic_clang_type_map.end()) {
+    return CompilerType();
   }
-  for (size_t i = 0; i < ntypes; ++i) {
-    lldb::TypeSP type = type_list.GetTypeAtIndex(i);
-    std::string tmpName = type->GetName().AsCString();
-    auto tpos = tmpName.find("<");
-    auto dcpos = tmpName.find(PACKAGE_SUFFIX);
-    if (dcpos != std::string::npos && tpos > dcpos) {
-      // tmpName: "ohos.ark_interop::Slab<T>"  -->  "Slab<T>"
-      tmpName = tmpName.substr(dcpos + PACKAGE_SUFFIX.size());
+
+  // Build the generic type index cache on first call
+  if (!m_generic_type_index_initialized) {
+    lldb_private::TypeList type_list;
+    symfile->GetTypes(nullptr, lldb::eTypeClassClass|lldb::eTypeClassStruct, type_list);
+    size_t ntypes = type_list.GetSize();
+    for (size_t i = 0; i < ntypes; ++i) {
+      lldb::TypeSP type = type_list.GetTypeAtIndex(i);
+      std::string fullName = type->GetName().AsCString();
+      // Only process generic types (containing '<')
+      auto tpos = fullName.find("<");
+      if (tpos == std::string::npos) {
+        continue;
+      }
+      // Extract base name before '<': "array<T>" -> "array", "Slab<T>" -> "Slab"
+      std::string baseName = fullName.substr(0, tpos);
+      // Remove package prefix if present: "ohos.ark_interop::Slab" -> "Slab"
+      auto dcpos = baseName.find(PACKAGE_SUFFIX);
+      if (dcpos != std::string::npos) {
+        baseName = baseName.substr(dcpos + PACKAGE_SUFFIX.size());
+      }
+      // Also handle types like "E1$Time<...>" - remove prefix
+      baseName = DeletePrefixOfType(baseName);
+      // Skip basic types - they should not be cached as generic types
+      if (!baseName.empty() && basic_clang_type_map.find(baseName) == basic_clang_type_map.end()) {
+        m_generic_type_index[baseName] = type->GetFullCompilerType();
+      }
     }
-    auto tlpos = tmpName.find(combine_name);
-    if (tlpos == 0) {
-      CompilerType full_type = type->GetFullCompilerType();
-      return full_type;
-    }
-    //  tmpName: "E1$Time<Default::Bar>"  -->  "Time<Default::Bar>"
-    tmpName = DeletePrefixOfType(tmpName);
-    tlpos = tmpName.find(combine_name);
-    if (tlpos == 0) {
-      CompilerType full_type = type->GetFullCompilerType();
-      return full_type;
-    }
+    m_generic_type_index_initialized = true;
+  }
+
+  // Look up in the cached index
+  std::string searchName = name;
+  auto subName = GetSubNameWithoutPkgname(searchName, m_current_pkgname);
+  if (!subName.empty()) {
+    searchName = subName;
+  }
+  auto it = m_generic_type_index.find(searchName);
+  if (it != m_generic_type_index.end()) {
+    return it->second;
   }
   return CompilerType();
 }

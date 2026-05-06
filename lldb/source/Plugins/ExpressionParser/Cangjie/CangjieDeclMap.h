@@ -130,6 +130,10 @@ private:
     lldb::VariableListSP m_static_variables;
 
     std::map<ConstString, lldb_private::CompilerType> m_generic_types;
+    // Cache for generic type lookup by partial name (e.g., "array" -> "array<T>")
+    // Built once per expression session from SymbolFile's all class/struct types
+    std::map<std::string, lldb_private::CompilerType> m_generic_type_index;
+    bool m_generic_type_index_initialized = false;
     std::vector<OwnedPtr<Cangjie::AST::Decl>> m_local_decls;
     std::vector<OwnedPtr<Cangjie::AST::Decl>> m_global_decls;
     std::vector<OwnedPtr<Cangjie::AST::Decl>> m_captured_vars;
