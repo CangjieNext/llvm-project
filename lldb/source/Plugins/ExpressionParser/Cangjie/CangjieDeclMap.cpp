@@ -256,9 +256,16 @@ CompilerType CangjieDeclMap::LookUptype(lldb::ModuleSP module,
   if (module && namespace_decl) {
     module->FindTypesInNamespace(name, namespace_decl, 1, types);
   } else {
-    auto target = m_exe_ctx.GetTargetSP();
-    target->GetImages().FindTypes(
-        module.get(), name, exact_match, 1, searched_symbol_files, types);
+    auto frame = m_exe_ctx.GetFramePtr();
+    lldb::ModuleSP module_sp;
+    if (frame) {
+      SymbolContext sym_ctx = frame->GetSymbolContext(lldb::eSymbolContextModule);
+      module_sp = sym_ctx.module_sp;
+    }
+    
+    module_sp->FindTypes(name, exact_match, 1, searched_symbol_files, types);
+    Log *log = GetLog(LLDBLog::Expressions);
+    LLDB_LOGF(log, "find %s in current module %s", name.AsCString(), module_sp->GetName().AsCString());
   }
 
   size_t num_types = types.GetSize();
@@ -487,7 +494,21 @@ CompilerType CangjieDeclMap::LookUpType(std::string name)
   llvm::DenseSet<SymbolFile *> searched_symbol_files;
   auto target = m_exe_ctx.GetTargetSP();
   name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
-  target->GetImages().FindTypes(nullptr, ConstString(name), false, 1, searched_symbol_files, types);
+
+  // Get the current module from the execution context
+  auto frame = m_exe_ctx.GetFramePtr();
+  lldb::ModuleSP module_sp;
+  if (frame) {
+    SymbolContext sym_ctx = frame->GetSymbolContext(lldb::eSymbolContextModule);
+    module_sp = sym_ctx.module_sp;
+  }
+
+  // Search types in the current module first, then fall back to all images if not found
+  if (module_sp) {
+    module_sp->FindTypes(ConstString(name), false, 1, searched_symbol_files, types);
+    Log *log = GetLog(LLDBLog::Expressions);
+    LLDB_LOGF(log, "1 find %s in current module %s", name.AsCString(), module_sp->GetName().AsCString());
+  }
 
   size_t num_types = types.GetSize();
   for (size_t ti = 0; ti < num_types; ++ti) {
