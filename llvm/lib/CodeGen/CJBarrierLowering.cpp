@@ -46,6 +46,8 @@ static cl::opt<bool> EnableGCPhase("enable-gc-phase", cl::init(true),
                                    cl::Hidden);
 static cl::opt<bool> EnableGCFastPath("enable-gc-fast-path", cl::init(true),
                                       cl::Hidden);
+static cl::opt<bool> EnableMSGCReadBarrierLowering(
+  "enable-msgc-read-barrier-lowering", cl::init(true), cl::Hidden);
 static cl::opt<bool> EnableGCStateLoop("cj-gcstate-dup-loop", cl::init(false),
                                        cl::ReallyHidden);
 
@@ -137,15 +139,19 @@ public:
       II->setTailCall(false);
     }
 
+    if (shouldLowerMSGCReadBarrier(II)) {
+      replaceInstWithMSGCReadAccess(II);
+      return;
+    }
+
     Function *Callee = getOrInsertRuntimeFunc(II);
     switch (II->getIntrinsicID()) {
     case Intrinsic::cj_gcwrite_struct: {
-      Value *GCTib = getOrInsertGCTib(II);
-      Value *Param[6] = {II->getArgOperand(GCWriteStruct::BaseObj),
+      Value *Param[5] = {II->getArgOperand(GCWriteStruct::BaseObj),
                          II->getArgOperand(GCWriteStruct::Dst),
                          II->getArgOperand(GCWriteStruct::Size),
                          II->getArgOperand(GCWriteStruct::Src),
-                         II->getArgOperand(GCWriteStruct::Size), GCTib};
+                         II->getArgOperand(GCWriteStruct::Size)};
       // gcwrite.agg src has two case:
       // i8* on the stack and i8 addrspace(1)* on the heap.
       // The runtime function has only one signature. Here, the src of i8*
@@ -159,11 +165,10 @@ public:
       break;
     }
     case Intrinsic::cj_gcread_struct: {
-      Value *GCTib = getOrInsertGCTib(II);
-      Value *Param[5] = {II->getArgOperand(GCReadStruct::Dst),
+      Value *Param[4] = {II->getArgOperand(GCReadStruct::Dst),
                          II->getArgOperand(GCReadStruct::BaseObj),
                          II->getArgOperand(GCReadStruct::Src),
-                         II->getArgOperand(GCReadStruct::Size), GCTib};
+                         II->getArgOperand(GCReadStruct::Size)};
       // Replace the original intrinsic with the runtime function.
       replaceCallInst(Callee, Param, II);
       break;
@@ -216,6 +221,66 @@ private:
   Type *I64;
   Type *I32;
 
+  bool shouldLowerMSGCReadBarrier(IntrinsicInst *II) const {
+    if (!EnableMSGCReadBarrierLowering) {
+      return false;
+    }
+
+    switch (II->getIntrinsicID()) {
+    case Intrinsic::cj_gcread_ref:
+    case Intrinsic::cj_gcread_weakref:
+    case Intrinsic::cj_gcread_struct:
+    case Intrinsic::cj_gcread_static_ref:
+    case Intrinsic::cj_gcread_static_struct:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  void replaceInstWithMSGCReadAccess(IntrinsicInst *II) const {
+    switch (II->getIntrinsicID()) {
+    case Intrinsic::cj_gcread_ref:
+      replaceWithDirectLoad(II, II->getArgOperand(GCReadRef::FieldPtr));
+      return;
+    case Intrinsic::cj_gcread_weakref:
+      replaceWithDirectLoad(II, II->getArgOperand(GCReadRef::FieldPtr));
+      return;
+    case Intrinsic::cj_gcread_static_ref:
+      replaceWithDirectLoad(II, II->getArgOperand(GCReadStaticRef::Ptr));
+      return;
+    case Intrinsic::cj_gcread_struct:
+      replaceWithMemcpy(II, II->getArgOperand(GCReadStruct::Dst),
+                        II->getArgOperand(GCReadStruct::Src),
+                        II->getArgOperand(GCReadStruct::Size));
+      return;
+    case Intrinsic::cj_gcread_static_struct:
+      replaceWithMemcpy(II, II->getArgOperand(GCReadStaticStruct::Dst),
+                        II->getArgOperand(GCReadStaticStruct::Src),
+                        II->getArgOperand(GCReadStaticStruct::Size));
+      return;
+    default:
+      llvm_unreachable("unexpected MSGC read barrier intrinsic");
+    }
+  }
+
+  void replaceWithDirectLoad(IntrinsicInst *II, Value *Ptr) const {
+    IRBuilder<> Builder(II);
+    LoadInst *Load = Builder.CreateLoad(II->getType(), Ptr);
+    Load->setDebugLoc(II->getDebugLoc());
+    II->replaceAllUsesWith(Load);
+    II->eraseFromParent();
+  }
+
+  void replaceWithMemcpy(IntrinsicInst *II, Value *Dst, Value *Src,
+                         Value *Size) const {
+    IRBuilder<> Builder(II);
+    CallInst *Memcpy = Builder.CreateMemCpy(Dst, MaybeAlign(), Src,
+                                            MaybeAlign(), Size);
+    Memcpy->setDebugLoc(II->getDebugLoc());
+    II->eraseFromParent();
+  }
+
   StringRef getRuntimeFuncName(IntrinsicInst *II) {
     Intrinsic::ID IID = II->getIntrinsicID();
     auto Itr = IntrinsicMap.find(IID);
@@ -235,14 +300,14 @@ private:
     auto isARM = TT.isARM();
     switch (II->getIntrinsicID()) {
     case Intrinsic::cj_gcwrite_struct: {
-      Type *ParamType[6] = {GCPtr, GCPtr, I64, GCPtr, I64, I8Ptr};
+      Type *ParamType[5] = {GCPtr, GCPtr, I64, GCPtr, I64};
       if (isARM)
         ParamType[2] = ParamType[4] = I32;
       FuncType = FunctionType::get(Type::getVoidTy(C), ParamType, false);
       break;
     }
     case Intrinsic::cj_gcread_struct: {
-      Type *ParamType[5] = {I8Ptr, GCPtr, GCPtr, I64, I8Ptr};
+      Type *ParamType[4] = {I8Ptr, GCPtr, GCPtr, I64};
       if (isARM)
         ParamType[3] = I32;
       FuncType = FunctionType::get(Type::getVoidTy(C), ParamType, false);
@@ -1208,7 +1273,8 @@ bool CJBarrierLowering::runOnFunction(Function &F) {
 
   if (OptLevel != CodeGenOpt::None) {
     writeBarrierFastPath(F, Barriers);
-    readBarrierFastPath(F, Barriers);
+    if (!EnableMSGCReadBarrierLowering)
+      readBarrierFastPath(F, Barriers);
   }
   doLowering(F);
   return true;
