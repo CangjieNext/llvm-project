@@ -945,6 +945,10 @@ def object_path_lto : Separate<["-"], "object_path_lto">,
     MetaVarName<"<path>">,
     HelpText<"Retain any temporary mach-o file in <path> that would otherwise be deleted during LTO">,
     Group<grp_rare>;
+def lto_emit_obj_only : Flag<["-"], "lto-emit-obj-only">,
+    HelpText<"Stop after emitting LTO native object files">,
+    Flags<[HelpHidden]>,
+    Group<grp_rare>;
 def cache_path_lto : Separate<["-"], "cache_path_lto">,
     MetaVarName<"<path>">,
     HelpText<"Use <path> as a directory for the incremental LTO cache">,
