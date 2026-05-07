@@ -16,6 +16,7 @@
 #include "llvm/Transforms/Scalar/CJBarrierOpt.h"
 
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -462,8 +463,95 @@ private:
       BasePtr = Barrier->getArgOperand(0);
       break;
     }
-    return {getUnderlyingObject(BasePtr),
-            FieldPtr ? getUnderlyingObject(FieldPtr) : nullptr};
+    return {BasePtr, FieldPtr};
+  }
+
+  bool hasGlobalOrArgumentOriginInInt(Value *V,
+                                      SmallPtrSetImpl<Value *> &Visited) {
+    if (!Visited.insert(V).second) {
+      return false;
+    }
+
+    auto *Op = dyn_cast<Operator>(V);
+    if (Op == nullptr) {
+      return false;
+    }
+
+    switch (Op->getOpcode()) {
+    case Instruction::PtrToInt:
+      return hasGlobalOrArgumentOrigin(Op->getOperand(0), Visited);
+    case Instruction::Add:
+    case Instruction::Or:
+    case Instruction::And:
+    case Instruction::Xor:
+      for (Value *Operand : Op->operands()) {
+        if (isa<ConstantInt>(Operand)) {
+          continue;
+        }
+        if (hasGlobalOrArgumentOriginInInt(Operand, Visited)) {
+          return true;
+        }
+      }
+      return false;
+    case Instruction::Sub:
+      return isa<ConstantInt>(Op->getOperand(1)) &&
+             hasGlobalOrArgumentOriginInInt(Op->getOperand(0), Visited);
+    case Instruction::ZExt:
+    case Instruction::SExt:
+    case Instruction::Trunc:
+      return hasGlobalOrArgumentOriginInInt(Op->getOperand(0), Visited);
+    default:
+      return false;
+    }
+  }
+
+  bool hasGlobalOrArgumentOrigin(Value *Ptr,
+                                 SmallPtrSetImpl<Value *> &Visited) {
+    Ptr = Ptr->stripPointerCasts();
+    if (!Visited.insert(Ptr).second) {
+      return false;
+    }
+
+    if (isa<GlobalValue>(Ptr) || isa<Argument>(Ptr)) {
+      return true;
+    }
+
+    if (auto *GEP = dyn_cast<GEPOperator>(Ptr)) {
+      return hasGlobalOrArgumentOrigin(GEP->getPointerOperand(), Visited);
+    }
+
+    if (auto *GA = dyn_cast<GlobalAlias>(Ptr)) {
+      if (GA->isInterposable()) {
+        return true;
+      }
+      return hasGlobalOrArgumentOrigin(GA->getAliasee(), Visited);
+    }
+
+    auto *Op = dyn_cast<Operator>(Ptr);
+    if (Op == nullptr) {
+      return false;
+    }
+
+    switch (Op->getOpcode()) {
+    case Instruction::IntToPtr:
+      return hasGlobalOrArgumentOriginInInt(Op->getOperand(0), Visited);
+    case Instruction::PHI:
+    case Instruction::Select:
+      for (Value *Operand : Op->operands()) {
+        if (Operand->getType()->isPointerTy() &&
+            hasGlobalOrArgumentOrigin(Operand, Visited)) {
+          return true;
+        }
+      }
+      return false;
+    default:
+      return false;
+    }
+  }
+
+  bool hasGlobalOrArgumentOrigin(Value *Ptr) {
+    SmallPtrSet<Value *, 8> Visited;
+    return hasGlobalOrArgumentOrigin(Ptr, Visited);
   }
 
   bool optStructBarrier(CallBase *Barrier) {
@@ -492,9 +580,8 @@ private:
           return true;
         return false;
       });
-      bool IsFieldNotGV = PtrCheck(FieldPtr, [](Value *Ptr) {
-        Value *BP = Ptr->stripPointerCasts();
-        return !isa<GlobalValue>(BP) && !isa<Argument>(BP);
+      bool IsFieldNotGV = PtrCheck(FieldPtr, [this](Value *Ptr) {
+        return !hasGlobalOrArgumentOrigin(Ptr);
       });
       // gcread/gcwrite to static pointer cannot be replace, even if base is
       // nullptr.
