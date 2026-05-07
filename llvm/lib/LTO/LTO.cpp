@@ -84,6 +84,46 @@ cl::opt<bool> EnableLTOInternalization(
     "enable-lto-internalization", cl::init(true), cl::Hidden,
     cl::desc("Enable global value internalization in LTO"));
 
+static void dumpDeadSymbolsInCombinedIndex(ModuleSummaryIndex &Index,
+                                           StringRef Tag) {
+  errs() << "==== " << Tag << " dead symbols in CombinedIndex ====\n";
+
+  unsigned LiveGUIDs = 0;
+  unsigned DeadGUIDs = 0;
+  unsigned DeadSummaries = 0;
+
+  for (const auto &Entry : Index) {
+    ValueInfo VI = Index.getValueInfo(Entry);
+    bool IsGUIDLive = false;
+
+    for (const auto &S : VI.getSummaryList()) {
+      if (Index.isGlobalValueLive(S.get())) {
+        IsGUIDLive = true;
+        break;
+      }
+    }
+
+    if (IsGUIDLive)
+      ++LiveGUIDs;
+    else
+      ++DeadGUIDs;
+
+    for (const auto &S : VI.getSummaryList()) {
+      if (Index.isGlobalValueLive(S.get()))
+        continue;
+
+      ++DeadSummaries;
+      errs() << "DEAD: " << VI << " module=" << S->modulePath()
+             << " linkage=" << S->linkage()
+             << " summary-live=" << S->isLive() << "\n";
+    }
+  }
+
+  errs() << "==== " << Tag << " live-guids=" << LiveGUIDs
+         << " dead-guids=" << DeadGUIDs
+         << " dead-summaries=" << DeadSummaries << " ====\n";
+}
+
 // Computes a unique hash for the Module considering the current list of
 // export/import and other global analysis results.
 // The hash is produced in \p Key.
@@ -917,6 +957,9 @@ Error LTO::linkRegularLTO(RegularLTOState::AddedModule Mod,
   std::vector<GlobalValue *> Keep;
   for (GlobalValue *GV : Mod.Keep) {
     if (LivenessFromIndex && !ThinLTO.CombinedIndex.isGUIDLive(GV->getGUID())) {
+      errs() << "LTO dead, not added to combined module: " << GV->getName()
+             << " guid=" << GV->getGUID()
+             << " module=" << Mod.M->getModuleIdentifier() << "\n";
       if (Function *F = dyn_cast<Function>(GV)) {
         if (DiagnosticOutputFile) {
           if (Error Err = F->materialize())
@@ -1123,8 +1166,12 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
       return PrevailingType::Unknown;
     return It->second;
   };
+  dumpDeadSymbolsInCombinedIndex(ThinLTO.CombinedIndex,
+                                 "before computeDeadSymbolsWithConstProp");
   computeDeadSymbolsWithConstProp(ThinLTO.CombinedIndex, GUIDPreservedSymbols,
                                   isPrevailing, Conf.OptLevel > 0);
+  dumpDeadSymbolsInCombinedIndex(ThinLTO.CombinedIndex,
+                                 "after computeDeadSymbolsWithConstProp");
 
   // Setup output file to emit statistics.
   auto StatsFileOrErr = setupStatsFile(Conf.StatsFile);

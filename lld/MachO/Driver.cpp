@@ -1383,6 +1383,7 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     config->umbrella = arg->getValue();
   }
   config->ltoObjPath = args.getLastArgValue(OPT_object_path_lto);
+  config->ltoEmitObjOnly = args.hasArg(OPT_lto_emit_obj_only);
   config->ltoo = args::getInteger(args, OPT_lto_O, 2);
   if (config->ltoo > 3)
     error("--lto-O: invalid optimization level: " + Twine(config->ltoo));
@@ -1664,6 +1665,8 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
       parseClangOption(arg->getValue(), arg->getSpelling());
 
     compileBitcodeFiles();
+    if (config->ltoEmitObjOnly)
+      return !errorCount();
     replaceCommonSymbols();
 
     StringRef orderFile = args.getLastArgValue(OPT_order_file);
