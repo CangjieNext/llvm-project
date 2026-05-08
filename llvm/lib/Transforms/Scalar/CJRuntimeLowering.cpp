@@ -17,6 +17,7 @@
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Triple.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -60,6 +61,17 @@ const static StringRef ArithmeticExceptionMangleStr =
 const static StringRef C2NStubStr = "CJ_MCC_C2NStub";
 const static StringRef N2CStubStr = "CJ_MCC_N2CStub";
 const static StringRef FinalizerStr = "CJ_MCC_OnFinalizerCreated";
+const static StringRef MSGCFastSizeClassAttr = "cj-msgc-sizeclass";
+const static StringRef MSGCFastSlotSizeAttr = "cj-msgc-slotsize";
+
+static const uint32_t MSGCSizeClasses[] = {
+  8,     16,    24,    32,    48,    64,    80,    96,    112,
+  128,   160,   192,   224,   256,   320,   384,   448,   512,
+  640,   768,   896,   1024,  1280,  1536,  1792,  2048,  2560,
+  3072,  3584,  4096,  5120,  6144,  8192,  10240, 12288, 16384,
+};
+
+static constexpr uint32_t MSGCLargeObjectThreshold = 16384;
 
 template <typename KeyT, typename ValT>
 using StdMap = std::unordered_map<KeyT, ValT>;
@@ -399,6 +411,57 @@ public:
     CI->setCalledFunction(Func);
   }
 
+  static bool getMSGCFastArrayConfig(uint64_t ObjectSize, uint32_t &SizeClass,
+                                     uint32_t &SlotSize) {
+    if (ObjectSize == 0 || ObjectSize > MSGCLargeObjectThreshold) {
+      return false;
+    }
+
+    for (uint32_t Index = 0;
+         Index < sizeof(MSGCSizeClasses) / sizeof(MSGCSizeClasses[0]);
+         ++Index) {
+      if (ObjectSize <= MSGCSizeClasses[Index]) {
+        SizeClass = Index;
+        SlotSize = MSGCSizeClasses[Index];
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  Function *getOrCreateMSGCFastArrayWrapper(Function *Callee,
+                                            uint32_t SizeClass,
+                                            uint32_t SlotSize) {
+    std::string WrapperName =
+        (Twine(Callee->getName()) + "_MSGC_cls" + Twine(SizeClass) + "_sz" +
+         Twine(SlotSize))
+            .str();
+    Function *Wrapper = M.getFunction(WrapperName);
+    if (Wrapper == nullptr) {
+      Wrapper = M.declareCJRuntimeFunc(WrapperName, Callee->getFunctionType(),
+                                       true, true);
+      Wrapper->setLinkage(GlobalValue::InternalLinkage);
+      Wrapper->addFnAttr(Attribute::NoInline);
+    }
+
+    if (Wrapper->isDeclaration()) {
+      BasicBlock *BB = BasicBlock::Create(C, "entry", Wrapper);
+      IRBuilder<> IRB(BB);
+      SmallVector<Value *, 4> Args;
+      for (Argument &Arg : Wrapper->args()) {
+        Args.push_back(&Arg);
+      }
+      CallInst *Ret = IRB.CreateCall(Callee, Args);
+      Ret->setAttributes(Callee->getAttributes());
+      IRB.CreateRet(Ret);
+    }
+
+    Wrapper->addFnAttr(MSGCFastSizeClassAttr, std::to_string(SizeClass));
+    Wrapper->addFnAttr(MSGCFastSlotSizeAttr, std::to_string(SlotSize));
+    return Wrapper;
+  }
+
   // llvm.cj.alloca.generic(TypeInfo* ti, i64 size)
   void replaceAllocaGeneric(CallBase *CI, EscapeScope &ES) {
     if (replaceWithAlloca(CI, ES)) {
@@ -463,7 +526,15 @@ public:
     } else {
       CI->setArgOperand(2, PoisonValue::get(Type::getInt64Ty(C)));
     }
-    CI->setCalledFunction(getOrInsertRuntimeFunc(CI, false, true));
+    Function *Callee = getOrInsertRuntimeFunc(CI, false, true);
+    if (Size > 0) {
+      uint32_t SizeClass = 0;
+      uint32_t SlotSize = 0;
+      if (getMSGCFastArrayConfig(Size, SizeClass, SlotSize)) {
+        Callee = getOrCreateMSGCFastArrayWrapper(Callee, SizeClass, SlotSize);
+      }
+    }
+    CI->setCalledFunction(Callee);
     return;
   }
 

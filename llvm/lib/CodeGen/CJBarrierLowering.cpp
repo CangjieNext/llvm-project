@@ -26,6 +26,7 @@
 #include "llvm/IR/SafepointIRVerifier.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/CJStructTypeGCInfo.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/Support/CommandLine.h"
@@ -33,6 +34,7 @@
 #include "llvm/Transforms/Utils/LoopSimplify.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 
+#include <string>
 #include <unordered_map>
 
 using namespace llvm;
@@ -61,6 +63,18 @@ extern cl::opt<bool> EnableSafepointOutline;
 namespace {
 const static StringRef NewObjFastStr = "CJ_MCC_NewObjectFast";
 const static StringRef NewObjFinalizerFastStr = "CJ_MCC_NewFinalizerFast";
+const static StringRef MSGCFastSizeClassAttr = "cj-msgc-sizeclass";
+const static StringRef MSGCFastSlotSizeAttr = "cj-msgc-slotsize";
+
+static const uint32_t MSGCSizeClasses[] = {
+  8,     16,    24,    32,    48,    64,    80,    96,    112,
+  128,   160,   192,   224,   256,   320,   384,   448,   512,
+  640,   768,   896,   1024,  1280,  1536,  1792,  2048,  2560,
+  3072,  3584,  4096,  5120,  6144,  8192,  10240, 12288, 16384,
+};
+
+static constexpr uint32_t MSGCLargeObjectThreshold = 16384;
+static constexpr uint32_t InvalidMSGCSizeClass = ~0U;
 constexpr StringRef SafepointStub = "CJ_Safepoint_Stub";
 template <typename KeyT, typename ValT>
 using StdMap = std::unordered_map<KeyT, ValT>;
@@ -1146,8 +1160,40 @@ bool CJBarrierLowering::isCJBarrier(Instruction *I) {
   }
 }
 
+static bool getMSGCFastPathConfig(const GCStatepointInst &CI,
+                                  uint32_t &SizeClass,
+                                  uint32_t &SlotSize) {
+  if (CI.actual_arg_size() < 2) {
+    return false;
+  }
+
+  auto *ConstSize =
+      dyn_cast<ConstantInt>(CI.getArgOperand(GCStatepointInst::CallArgsBeginPos + 1));
+  if (ConstSize == nullptr) {
+    return false;
+  }
+
+  uint64_t ObjectSize = ConstSize->getZExtValue();
+  if (ObjectSize == 0 || ObjectSize > MSGCLargeObjectThreshold) {
+    return false;
+  }
+
+  for (uint32_t Index = 0; Index < sizeof(MSGCSizeClasses) / sizeof(MSGCSizeClasses[0]);
+       ++Index) {
+    if (ObjectSize <= MSGCSizeClasses[Index]) {
+      SizeClass = Index;
+      SlotSize = MSGCSizeClasses[Index];
+      return true;
+    }
+  }
+
+  return false;
+}
+
 static void replaceFastFunc(Function &F, GCStatepointInst *CI,
-                            StringRef FuncName) {
+                            StringRef FuncName,
+                            uint32_t SizeClass = InvalidMSGCSizeClass,
+                            uint32_t SlotSize = 0) {
   Module *M = F.getParent();
   Function *Func = M->getFunction(FuncName);
   if (Func == nullptr) {
@@ -1161,6 +1207,10 @@ static void replaceFastFunc(Function &F, GCStatepointInst *CI,
     auto Ret = IRB.CreateCall(Callee, {Func->getArg(0), Func->getArg(1)});
     IRB.CreateRet(Ret);
   }
+  if (SizeClass != InvalidMSGCSizeClass) {
+    Func->addFnAttr(MSGCFastSizeClassAttr, std::to_string(SizeClass));
+    Func->addFnAttr(MSGCFastSlotSizeAttr, std::to_string(SlotSize));
+  }
   CI->setArgOperand(GCStatepointInst::CalledFunctionPos, Func);
 }
 
@@ -1169,10 +1219,29 @@ static bool doNewFastPath(Function &F, SetVector<GCStatepointInst *> &NewObjs) {
     return false;
   for (GCStatepointInst *CI : NewObjs) {
     Function *Callee = CI->getActualCalledFunction();
+    uint32_t SizeClass = InvalidMSGCSizeClass;
+    uint32_t SlotSize = 0;
+    bool HasMSGCSpecialization = getMSGCFastPathConfig(*CI, SizeClass, SlotSize);
     if (Callee->getName().equals("CJ_MCC_NewObject")) {
-      replaceFastFunc(F, CI, NewObjFastStr);
+      if (HasMSGCSpecialization) {
+        std::string WrapperName =
+            (Twine(NewObjFastStr) + "_MSGC_cls" + Twine(SizeClass) + "_sz" +
+             Twine(SlotSize))
+                .str();
+        replaceFastFunc(F, CI, WrapperName, SizeClass, SlotSize);
+      } else {
+        replaceFastFunc(F, CI, NewObjFastStr);
+      }
     } else {
-      replaceFastFunc(F, CI, NewObjFinalizerFastStr);
+      if (HasMSGCSpecialization) {
+        std::string WrapperName =
+            (Twine(NewObjFinalizerFastStr) + "_MSGC_cls" + Twine(SizeClass) +
+             "_sz" + Twine(SlotSize))
+                .str();
+        replaceFastFunc(F, CI, WrapperName, SizeClass, SlotSize);
+      } else {
+        replaceFastFunc(F, CI, NewObjFinalizerFastStr);
+      }
     }
   }
   return true;

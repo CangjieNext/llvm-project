@@ -75,6 +75,44 @@ extern cl::opt<bool> EnableSafepointOutline;
 }
 namespace {
 
+constexpr const char MSGCFastSizeClassAttr[] = "cj-msgc-sizeclass";
+constexpr const char MSGCFastSlotSizeAttr[] = "cj-msgc-slotsize";
+constexpr uint8_t MSGCGCPhaseIdle = 1;
+constexpr uint8_t MSGCGCPhaseSweep = 23;
+constexpr uint8_t MSGCRegionBump = 1;
+constexpr uint8_t MSGCRegionPartial = 2;
+constexpr int64_t MSGCActiveRegionsOffsetInAllocBuffer = 8;
+constexpr int64_t MSRegionInfoAllocBitmapOffset = 24;
+constexpr int64_t MSRegionInfoFreeSlotCountOffset = 42;
+constexpr int64_t MSRegionInfoRegionTypeOffset = 50;
+constexpr int64_t MSRegionInfoReservedOffset = 56;
+constexpr uint32_t MSRegionSize = 32 * 1024;
+
+struct MSGCFastAllocConfig {
+  uint8_t SizeClass = 0;
+  uint16_t SlotSize = 0;
+};
+
+static bool getMSGCFastAllocConfig(const Function &Wrapper,
+                                   MSGCFastAllocConfig &Config) {
+  Attribute SizeClassAttr = Wrapper.getFnAttribute(MSGCFastSizeClassAttr);
+  Attribute SlotSizeAttr = Wrapper.getFnAttribute(MSGCFastSlotSizeAttr);
+  if (!SizeClassAttr.isStringAttribute() || !SlotSizeAttr.isStringAttribute()) {
+    return false;
+  }
+
+  unsigned SizeClass = 0;
+  unsigned SlotSize = 0;
+  if (SizeClassAttr.getValueAsString().getAsInteger(10, SizeClass) ||
+      SlotSizeAttr.getValueAsString().getAsInteger(10, SlotSize)) {
+    return false;
+  }
+
+  Config.SizeClass = static_cast<uint8_t>(SizeClass);
+  Config.SlotSize = static_cast<uint16_t>(SlotSize);
+  return true;
+}
+
 class AArch64AsmPrinter : public AsmPrinter {
   AArch64MCInstLower MCInstLowering;
   StackMaps SM;
@@ -247,9 +285,17 @@ private:
   };
 
   void emitMccNewObjectForCopyGC(const ParamForEmitNewObj &Param);
+  void emitMccNewObjectForMSGC(const ParamForEmitNewObj &Param,
+                               const MSGCFastAllocConfig &Config);
+  static bool isCangjieArrayAllocFunction(StringRef FuncName);
+  bool shouldEmitMSGCArrayFastPath(const MachineInstr *MI,
+                                   const MachineOperand &MOSym) const;
   void emitMccNewObjectFastPath(const MachineInstr *MI,
                                 const MachineOperand &MOSym,
                                 unsigned Opcode) override;
+  void emitCJNewArrayForMSGC(const MachineInstr &MI,
+                             const MachineOperand &MOSym,
+                             const MSGCFastAllocConfig &Config);
   void emitCJNewArrayFastPath(const MachineInstr &MI,
                               const MachineOperand &MOSym) override;
   void emitCJThrowException(const MachineInstr *MI,
@@ -1510,6 +1556,15 @@ void AArch64AsmPrinter::emitInstruction(const MachineInstr *MI) {
     OutStreamer->emitLabel(LOHLabel);
   }
 
+  if (MI->isCall() && MI->getOpcode() != TargetOpcode::STATEPOINT &&
+      MI->getNumOperands() > 0) {
+    const MachineOperand &MOSym = MI->getOperand(0);
+    if (shouldEmitMSGCArrayFastPath(MI, MOSym)) {
+      emitCJNewArrayFastPath(*MI, MOSym);
+      return;
+    }
+  }
+
   // try to process cangjie specific call
   if (tryEmitCangjieSpecificCall(MI)) {
     return;
@@ -2090,6 +2145,285 @@ void AArch64AsmPrinter::emitMccNewObjectForCopyGC(
   OutStreamer->emitLabel(Param.LFin);
 }
 
+  void AArch64AsmPrinter::emitMccNewObjectForMSGC(
+    const ParamForEmitNewObj &Param, const MSGCFastAllocConfig &Config) {
+    using namespace AArch64;
+
+    MCSymbol *LFastPath =
+        OutContext.createTempSymbol("NewObjMSGCFastPath", true);
+    MCSymbol *LBump = OutContext.createTempSymbol("NewObjMSGCBump", true);
+    MCSymbol *LSlow = OutContext.createTempSymbol("NewObjMSGCSlow", true);
+    MCSymbol *LPartialRetry =
+      OutContext.createTempSymbol("NewObjMSGCPartialRetry", true);
+    MCSymbol *LPartialRepair =
+      OutContext.createTempSymbol("NewObjMSGCPartialRepair", true);
+    MCSymbol *LPartialSummaryDone =
+      OutContext.createTempSymbol("NewObjMSGCPartialSummaryDone", true);
+
+    const MCSymbolRefExpr *FastPathExpr =
+        MCSymbolRefExpr::create(LFastPath, OutContext);
+    const MCSymbolRefExpr *BumpExpr = MCSymbolRefExpr::create(LBump, OutContext);
+    const MCSymbolRefExpr *SlowExpr = MCSymbolRefExpr::create(LSlow, OutContext);
+    const MCSymbolRefExpr *PartialRepairExpr =
+      MCSymbolRefExpr::create(LPartialRepair, OutContext);
+    const MCSymbolRefExpr *PartialSummaryDoneExpr =
+      MCSymbolRefExpr::create(LPartialSummaryDone, OutContext);
+    const MCSymbolRefExpr *PartialRetryExpr =
+      MCSymbolRefExpr::create(LPartialRetry, OutContext);
+
+    auto EmitFinalizerCreated = [&]() {
+    if (!Param.FastFuncName.equals("CJ_MCC_NewFinalizerFast")) {
+      return;
+    }
+    MCOperand FinalizerMC = setGAAndLower(
+      Param.MOSym, Param.MI->getMF()->getFunction().getParent()->getFunction(
+               "CJ_MCC_OnFinalizerCreated"));
+    EmitToStreamer(*OutStreamer,
+             MCInstBuilder(Param.Opcode).addOperand(FinalizerMC));
+    };
+
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRBBui)
+             .addReg(W9)
+             .addReg(X28)
+             .addImm(getEncodedGCPhaseOffsetInCJTLS()));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBSWri)
+             .addReg(WZR)
+             .addReg(W9)
+             .addImm(MSGCGCPhaseIdle)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+             MCInstBuilder(Bcc).addImm(AArch64CC::EQ).addExpr(FastPathExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBSWri)
+             .addReg(WZR)
+             .addReg(W9)
+             .addImm(MSGCGCPhaseSweep)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(Bcc).addImm(AArch64CC::NE).addExpr(SlowExpr));
+
+      OutStreamer->emitLabel(LFastPath);
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui)
+             .addReg(X9)
+             .addReg(X28)
+             .addImm(getMSAllocBufferOffsetInCJTLS() / 8));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CBZX).addReg(X9).addExpr(SlowExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui)
+             .addReg(X10)
+             .addReg(X9)
+             .addImm(MSGCActiveRegionsOffsetInAllocBuffer / 8 +
+                 Config.SizeClass));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CBZX).addReg(X10).addExpr(SlowExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi)
+             .addReg(X15)
+             .addImm(Config.SlotSize)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRBBui)
+             .addReg(W11)
+             .addReg(X10)
+             .addImm(MSRegionInfoRegionTypeOffset));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBSWri)
+             .addReg(WZR)
+             .addReg(W11)
+             .addImm(MSGCRegionBump)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(Bcc).addImm(AArch64CC::EQ).addExpr(BumpExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBSWri)
+             .addReg(WZR)
+             .addReg(W11)
+             .addImm(MSGCRegionPartial)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(Bcc).addImm(AArch64CC::NE).addExpr(SlowExpr));
+
+    OutStreamer->emitLabel(LPartialRetry);
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui)
+             .addReg(X12)
+             .addReg(X10)
+             .addImm(MSRegionInfoReservedOffset / 8));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CBZX).addReg(X12).addExpr(SlowExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(RBITXr).addReg(X13).addReg(X12));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CLZXr).addReg(X13).addReg(X13));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui)
+             .addReg(X14)
+             .addReg(X10)
+             .addImm(MSRegionInfoAllocBitmapOffset / 8));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(ADDXrs)
+             .addReg(X14)
+             .addReg(X14)
+             .addReg(X13)
+             .addImm(3));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui).addReg(X16).addReg(X14).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CBZX).addReg(X16).addExpr(PartialRepairExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(RBITXr).addReg(X17).addReg(X16));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CLZXr).addReg(X17).addReg(X17));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi).addReg(X11).addImm(1).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LSLVXr).addReg(X11).addReg(X11).addReg(X17));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(BICXrs)
+             .addReg(X16)
+             .addReg(X16)
+             .addReg(X11)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui).addReg(X16).addReg(X14).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRHHui)
+             .addReg(W11)
+             .addReg(X10)
+             .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBWri)
+             .addReg(W11)
+             .addReg(W11)
+             .addImm(1)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRHHui)
+             .addReg(W11)
+             .addReg(X10)
+             .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CBNZX)
+             .addReg(X16)
+             .addExpr(PartialSummaryDoneExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi).addReg(X11).addImm(1).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LSLVXr).addReg(X11).addReg(X11).addReg(X13));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(BICXrs)
+             .addReg(X12)
+             .addReg(X12)
+             .addReg(X11)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui)
+             .addReg(X12)
+             .addReg(X10)
+             .addImm(MSRegionInfoReservedOffset / 8));
+    OutStreamer->emitLabel(LPartialSummaryDone);
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi).addReg(X11).addImm(64).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MADDXrrr)
+             .addReg(X13)
+             .addReg(X13)
+             .addReg(X11)
+             .addReg(X17));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui).addReg(X14).addReg(X10).addImm(1));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi).addReg(X11).addImm(MSRegionSize).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBXrs)
+             .addReg(X14)
+             .addReg(X14)
+             .addReg(X11)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MADDXrrr)
+             .addReg(X16)
+             .addReg(X13)
+             .addReg(X15)
+             .addReg(X14));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui).addReg(X0).addReg(X16).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(ORRXrs).addReg(X0).addReg(XZR).addReg(X16).addImm(0));
+    EmitFinalizerCreated();
+    EmitToStreamer(*OutStreamer, MCInstBuilder(B).addExpr(Param.FinExpr));
+
+    OutStreamer->emitLabel(LPartialRepair);
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi).addReg(X11).addImm(1).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LSLVXr).addReg(X11).addReg(X11).addReg(X13));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(BICXrs)
+             .addReg(X12)
+             .addReg(X12)
+             .addReg(X11)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui)
+             .addReg(X12)
+             .addReg(X10)
+             .addImm(MSRegionInfoReservedOffset / 8));
+    EmitToStreamer(*OutStreamer, MCInstBuilder(B).addExpr(PartialRetryExpr));
+
+    OutStreamer->emitLabel(LBump);
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui).addReg(X12).addReg(X10).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui).addReg(X14).addReg(X10).addImm(1));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(ADDXrs)
+             .addReg(X13)
+             .addReg(X12)
+             .addReg(X15)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBSXrs)
+             .addReg(XZR)
+             .addReg(X13)
+             .addReg(X14)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(Bcc).addImm(AArch64CC::GT).addExpr(SlowExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui).addReg(X0).addReg(X12).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui).addReg(X13).addReg(X10).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRHHui)
+             .addReg(W11)
+             .addReg(X10)
+             .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBWri)
+             .addReg(W11)
+             .addReg(W11)
+             .addImm(1)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRHHui)
+             .addReg(W11)
+             .addReg(X10)
+             .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(ORRXrs).addReg(X0).addReg(XZR).addReg(X12).addImm(0));
+    EmitFinalizerCreated();
+    EmitToStreamer(*OutStreamer, MCInstBuilder(B).addExpr(Param.FinExpr));
+
+    OutStreamer->emitLabel(LSlow);
+    EmitToStreamer(*OutStreamer, Param.CallNewObjSlowPath);
+    OutStreamer->emitLabel(Param.LFin);
+  }
+
 void AArch64AsmPrinter::emitMccNewObjectFastPath(const MachineInstr *MI,
                                                  const MachineOperand &MOSym,
                                                  unsigned Opcode) {
@@ -2105,8 +2439,37 @@ void AArch64AsmPrinter::emitMccNewObjectFastPath(const MachineInstr *MI,
   MCInst CallNewObjSlowPath = MCInstBuilder(Opcode).addOperand(CallSlowPath);
   ParamForEmitNewObj Param(MI, MOSym, Opcode, LFinish, FinExpr,
                            CallNewObjSlowPath, FastFuncName);
-  emitMccNewObjectForCopyGC(Param);
+  MSGCFastAllocConfig Config;
+  if (getMSGCFastAllocConfig(MI->getMF()->getFunction(), Config)) {
+    emitMccNewObjectForMSGC(Param, Config);
+  } else {
+    emitMccNewObjectForCopyGC(Param);
+  }
   SM.recordCJStackMap(*MI);
+}
+
+bool AArch64AsmPrinter::isCangjieArrayAllocFunction(StringRef FuncName) {
+  return FuncName.equals("CJ_MCC_NewObjArray") ||
+         FuncName.equals("CJ_MCC_NewArray") ||
+         FuncName.equals("CJ_MCC_NewArray8") ||
+         FuncName.equals("CJ_MCC_NewArray16") ||
+         FuncName.equals("CJ_MCC_NewArray32") ||
+         FuncName.equals("CJ_MCC_NewArray64");
+}
+
+bool AArch64AsmPrinter::shouldEmitMSGCArrayFastPath(
+    const MachineInstr *MI, const MachineOperand &MOSym) const {
+  if (!MOSym.isGlobal()) {
+    return false;
+  }
+
+  const auto *Callee = dyn_cast<const Function>(MOSym.getGlobal());
+  if (Callee == nullptr || !isCangjieArrayAllocFunction(Callee->getName())) {
+    return false;
+  }
+
+  MSGCFastAllocConfig Config;
+  return getMSGCFastAllocConfig(MI->getMF()->getFunction(), Config);
 }
 
 void AArch64AsmPrinter::emitCJThrowException(const MachineInstr *MI,
@@ -2139,9 +2502,25 @@ void AArch64AsmPrinter::emitCJThrowException(const MachineInstr *MI,
 // .LNewArrayFin
 void AArch64AsmPrinter::emitCJNewArrayFastPath(const MachineInstr &MI,
                                                const MachineOperand &MOSym) {
-  if (MI.getOpcode() != TargetOpcode::STATEPOINT) {
-    report_fatal_error("New Obj Must be in Statepoint");
+  if (MI.getOpcode() != TargetOpcode::STATEPOINT && !MI.isCall()) {
+    report_fatal_error("New Array Must be a call or statepoint");
   }
+
+  MSGCFastAllocConfig Config;
+  if (getMSGCFastAllocConfig(MI.getMF()->getFunction(), Config)) {
+    emitCJNewArrayForMSGC(MI, MOSym, Config);
+    return;
+  }
+
+  if (MOSym.isGlobal()) {
+    if (const auto *Callee = dyn_cast<Function>(MOSym.getGlobal())) {
+      if (getMSGCFastAllocConfig(*Callee, Config)) {
+        emitCJNewArrayForMSGC(MI, MOSym, Config);
+        return;
+      }
+    }
+  }
+
   using namespace AArch64;
 
   MCSymbol *LFast = OutContext.createTempSymbol("NewArrayFastPath", true);
@@ -2193,6 +2572,291 @@ void AArch64AsmPrinter::emitCJNewArrayFastPath(const MachineInstr &MI,
   OutStreamer->emitLabel(LFinish);
   SM.recordCJStackMap(MI);
 }
+
+  void AArch64AsmPrinter::emitCJNewArrayForMSGC(
+    const MachineInstr &MI, const MachineOperand &MOSym,
+    const MSGCFastAllocConfig &Config) {
+    using namespace AArch64;
+
+    MCSymbol *LFastPath = OutContext.createTempSymbol("NewArrayMSGCFast", true);
+    MCSymbol *LBump = OutContext.createTempSymbol("NewArrayMSGCBump", true);
+    MCSymbol *LSlow = OutContext.createTempSymbol("NewArrayMSGCSlow", true);
+    MCSymbol *LPartialRetry =
+      OutContext.createTempSymbol("NewArrayMSGCPartialRetry", true);
+    MCSymbol *LPartialRepair =
+      OutContext.createTempSymbol("NewArrayMSGCPartialRepair", true);
+    MCSymbol *LPartialSummaryDone =
+      OutContext.createTempSymbol("NewArrayMSGCPartialSummaryDone", true);
+    MCSymbol *LFinish = OutContext.createTempSymbol("NewArrayMSGCFin", true);
+
+    const MCSymbolRefExpr *FastPathExpr =
+      MCSymbolRefExpr::create(LFastPath, OutContext);
+    const MCSymbolRefExpr *BumpExpr = MCSymbolRefExpr::create(LBump, OutContext);
+    const MCSymbolRefExpr *SlowExpr = MCSymbolRefExpr::create(LSlow, OutContext);
+    const MCSymbolRefExpr *PartialRetryExpr =
+      MCSymbolRefExpr::create(LPartialRetry, OutContext);
+    const MCSymbolRefExpr *PartialRepairExpr =
+      MCSymbolRefExpr::create(LPartialRepair, OutContext);
+    const MCSymbolRefExpr *PartialSummaryDoneExpr =
+      MCSymbolRefExpr::create(LPartialSummaryDone, OutContext);
+    const MCSymbolRefExpr *FinishExpr = MCSymbolRefExpr::create(LFinish, OutContext);
+
+    MCOperand CallSlowPath;
+    MCInstLowering.lowerOperand(MOSym, CallSlowPath);
+    MCInst CallNewArraySlowPath = MCInstBuilder(BL).addOperand(CallSlowPath);
+
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRBBui)
+             .addReg(W9)
+             .addReg(X28)
+             .addImm(getEncodedGCPhaseOffsetInCJTLS()));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBSWri)
+             .addReg(WZR)
+             .addReg(W9)
+             .addImm(MSGCGCPhaseIdle)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(Bcc).addImm(AArch64CC::EQ).addExpr(FastPathExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBSWri)
+             .addReg(WZR)
+             .addReg(W9)
+             .addImm(MSGCGCPhaseSweep)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(Bcc).addImm(AArch64CC::NE).addExpr(SlowExpr));
+
+    OutStreamer->emitLabel(LFastPath);
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui)
+             .addReg(X9)
+             .addReg(X28)
+             .addImm(getMSAllocBufferOffsetInCJTLS() / 8));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CBZX).addReg(X9).addExpr(SlowExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui)
+             .addReg(X10)
+             .addReg(X9)
+             .addImm(MSGCActiveRegionsOffsetInAllocBuffer / 8 +
+                 Config.SizeClass));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CBZX).addReg(X10).addExpr(SlowExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi)
+             .addReg(X15)
+             .addImm(Config.SlotSize)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRBBui)
+             .addReg(W11)
+             .addReg(X10)
+             .addImm(MSRegionInfoRegionTypeOffset));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBSWri)
+             .addReg(WZR)
+             .addReg(W11)
+             .addImm(MSGCRegionBump)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(Bcc).addImm(AArch64CC::EQ).addExpr(BumpExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBSWri)
+             .addReg(WZR)
+             .addReg(W11)
+             .addImm(MSGCRegionPartial)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(Bcc).addImm(AArch64CC::NE).addExpr(SlowExpr));
+
+    OutStreamer->emitLabel(LPartialRetry);
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui)
+             .addReg(X12)
+             .addReg(X10)
+             .addImm(MSRegionInfoReservedOffset / 8));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CBZX).addReg(X12).addExpr(SlowExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(RBITXr).addReg(X13).addReg(X12));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CLZXr).addReg(X13).addReg(X13));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui)
+             .addReg(X14)
+             .addReg(X10)
+             .addImm(MSRegionInfoAllocBitmapOffset / 8));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(ADDXrs)
+             .addReg(X14)
+             .addReg(X14)
+             .addReg(X13)
+             .addImm(3));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui).addReg(X16).addReg(X14).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CBZX).addReg(X16).addExpr(PartialRepairExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(RBITXr).addReg(X17).addReg(X16));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CLZXr).addReg(X17).addReg(X17));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi).addReg(X11).addImm(1).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LSLVXr).addReg(X11).addReg(X11).addReg(X17));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(BICXrs)
+             .addReg(X16)
+             .addReg(X16)
+             .addReg(X11)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui).addReg(X16).addReg(X14).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRHHui)
+             .addReg(W11)
+             .addReg(X10)
+             .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBWri)
+             .addReg(W11)
+             .addReg(W11)
+             .addImm(1)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRHHui)
+             .addReg(W11)
+             .addReg(X10)
+             .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(CBNZX)
+             .addReg(X16)
+             .addExpr(PartialSummaryDoneExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi).addReg(X11).addImm(1).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LSLVXr).addReg(X11).addReg(X11).addReg(X13));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(BICXrs)
+             .addReg(X12)
+             .addReg(X12)
+             .addReg(X11)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui)
+             .addReg(X12)
+             .addReg(X10)
+             .addImm(MSRegionInfoReservedOffset / 8));
+    OutStreamer->emitLabel(LPartialSummaryDone);
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi).addReg(X11).addImm(64).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MADDXrrr)
+             .addReg(X13)
+             .addReg(X13)
+             .addReg(X11)
+             .addReg(X17));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui).addReg(X14).addReg(X10).addImm(1));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi).addReg(X11).addImm(MSRegionSize).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBXrs)
+             .addReg(X14)
+             .addReg(X14)
+             .addReg(X11)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MADDXrrr)
+             .addReg(X16)
+             .addReg(X13)
+             .addReg(X15)
+             .addReg(X14));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui).addReg(X0).addReg(X16).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui).addReg(X1).addReg(X16).addImm(1));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(ORRXrs)
+             .addReg(X0)
+             .addReg(XZR)
+             .addReg(X16)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer, MCInstBuilder(B).addExpr(FinishExpr));
+
+    OutStreamer->emitLabel(LPartialRepair);
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(MOVZXi).addReg(X11).addImm(1).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LSLVXr).addReg(X11).addReg(X11).addReg(X13));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(BICXrs)
+             .addReg(X12)
+             .addReg(X12)
+             .addReg(X11)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui)
+             .addReg(X12)
+             .addReg(X10)
+             .addImm(MSRegionInfoReservedOffset / 8));
+    EmitToStreamer(*OutStreamer, MCInstBuilder(B).addExpr(PartialRetryExpr));
+
+    OutStreamer->emitLabel(LBump);
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui).addReg(X12).addReg(X10).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRXui).addReg(X14).addReg(X10).addImm(1));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(ADDXrs)
+             .addReg(X13)
+             .addReg(X12)
+             .addReg(X15)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBSXrs)
+             .addReg(XZR)
+             .addReg(X13)
+             .addReg(X14)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(Bcc).addImm(AArch64CC::GT).addExpr(SlowExpr));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui).addReg(X0).addReg(X12).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui).addReg(X1).addReg(X12).addImm(1));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRXui).addReg(X13).addReg(X10).addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(LDRHHui)
+             .addReg(W11)
+             .addReg(X10)
+             .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(SUBWri)
+             .addReg(W11)
+             .addReg(W11)
+             .addImm(1)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(STRHHui)
+             .addReg(W11)
+             .addReg(X10)
+             .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+    EmitToStreamer(*OutStreamer,
+           MCInstBuilder(ORRXrs)
+             .addReg(X0)
+             .addReg(XZR)
+             .addReg(X12)
+             .addImm(0));
+    EmitToStreamer(*OutStreamer, MCInstBuilder(B).addExpr(FinishExpr));
+
+    OutStreamer->emitLabel(LSlow);
+    EmitToStreamer(*OutStreamer, CallNewArraySlowPath);
+    OutStreamer->emitLabel(LFinish);
+    SM.recordCJStackMap(MI);
+  }
 
 void AArch64AsmPrinter::emitGetCJThreadId() {
   int64_t cjthreadIdOffset = 456;

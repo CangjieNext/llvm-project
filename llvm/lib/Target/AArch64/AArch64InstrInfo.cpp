@@ -30,8 +30,10 @@
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DebugLoc.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -69,6 +71,17 @@ static cl::opt<unsigned>
     BCCDisplacementBits("aarch64-bcc-offset-bits", cl::Hidden, cl::init(19),
                         cl::desc("Restrict range of Bcc instructions (DEBUG)"));
 
+namespace {
+constexpr char MSGCFastSizeClassAttr[] = "cj-msgc-sizeclass";
+constexpr char MSGCFastSlotSizeAttr[] = "cj-msgc-slotsize";
+
+static bool hasMSGCFastAllocConfig(const Function &Func) {
+  Attribute SizeClassAttr = Func.getFnAttribute(MSGCFastSizeClassAttr);
+  Attribute SlotSizeAttr = Func.getFnAttribute(MSGCFastSlotSizeAttr);
+  return SizeClassAttr.isStringAttribute() && SlotSizeAttr.isStringAttribute();
+}
+} // namespace
+
 AArch64InstrInfo::AArch64InstrInfo(const AArch64Subtarget &STI)
     : AArch64GenInstrInfo(AArch64::ADJCALLSTACKDOWN, AArch64::ADJCALLSTACKUP,
                           AArch64::CATCHRET),
@@ -88,6 +101,14 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
   if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
     StatepointOpers SO(&MI);
     if (SO.getID() == Cangjie::CJStatepointID::NewArrayFast) {
+      if (SO.getCallTarget().isGlobal()) {
+        if (const auto *Callee =
+                dyn_cast<Function>(SO.getCallTarget().getGlobal())) {
+          if (hasMSGCFastAllocConfig(*Callee)) {
+            return 256; // 256: upper bound for MSGC new array inline sequence
+          }
+        }
+      }
       return 52; // 52: 52 bytes(13 insts) for new array call
     }
     MOSym = &(SO.getCallTarget());

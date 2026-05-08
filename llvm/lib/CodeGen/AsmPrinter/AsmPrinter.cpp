@@ -168,6 +168,8 @@ constexpr int64_t ScheduleOffsetInCJTLS = CJThreadOffsetInCJTLS + 8;
 constexpr int64_t PreemptFlagOffsetInCJTLS = ScheduleOffsetInCJTLS + 8;
 constexpr int64_t ProtectAddrOffsetInCJTLS = PreemptFlagOffsetInCJTLS + 8;
 constexpr int64_t SafePollingAddrOffsetInCJTLS = ProtectAddrOffsetInCJTLS + 8;
+constexpr int64_t EncodedGCPhaseOffsetInCJTLS = 78;
+constexpr int64_t MSAllocBufferOffsetInCJTLS = 88;
 } // end anonymous namespace
 
 char AsmPrinter::ID = 0;
@@ -4211,6 +4213,14 @@ int64_t AsmPrinter::getAllocBufferOffsetInCJTLS() const {
 
 int64_t AsmPrinter::getMutatorOffsetInCJTLS() const {
   return MutatorOffsetInCJTLS;
+}
+
+int64_t AsmPrinter::getEncodedGCPhaseOffsetInCJTLS() const {
+  return EncodedGCPhaseOffsetInCJTLS;
+}
+
+int64_t AsmPrinter::getMSAllocBufferOffsetInCJTLS() const {
+  return MSAllocBufferOffsetInCJTLS;
 }
 
 int64_t AsmPrinter::getCJThreadOffsetInCJTLS() const {
