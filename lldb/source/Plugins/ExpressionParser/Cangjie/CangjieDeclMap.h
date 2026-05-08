@@ -140,8 +140,13 @@ private:
     std::map<std::string, uint64_t> m_captured_var_addrs;
 
     TypeSystemClang *m_type_system = nullptr;
+    // Cache for current module from execution context
+    lldb::ModuleSP m_current_module_sp;
+    // Cache for modules from CANGJIE_PATH environment variable
+    std::vector<lldb::ModuleSP> m_cangjie_path_modules;
 
     void InitVariable();
+    void InitModuleCache();
     void CreateInjectedThis();
     void CreateInjectedSuper(Ptr<AST::Decl>& thisdecl);
     void LookUpTypeByName(const std::string& id, std::vector<CompilerTypeInfo>& decls);

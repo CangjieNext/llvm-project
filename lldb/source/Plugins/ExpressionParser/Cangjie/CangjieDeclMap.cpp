@@ -21,6 +21,9 @@
 #include "clang/Sema/Sema.h"
 #include "Plugins/TypeSystem/Clang/TypeSystemClang.h"
 #include "CangjieDemangle.h"
+#include <cstdlib>
+#include <sstream>
+
 using namespace lldb_private;
 using namespace Cangjie;
 using namespace Cangjie::AST;
@@ -238,7 +241,18 @@ CompilerType CangjieDeclMap::LookUpGlobalVariable(lldb::ModuleSP module,  ConstS
   if (module && namespace_decl) {
     module->FindGlobalVariables(name, namespace_decl, -1, vars);
   } else {
-    target->GetImages().FindGlobalVariables(name, -1, vars);
+    if (m_current_module_sp) {
+      CompilerDeclContext empty_decl_ctx;
+      m_current_module_sp->FindGlobalVariables(name, empty_decl_ctx, -1, vars);
+    }
+    if (vars.GetSize() == 0) {
+      for (lldb::ModuleSP path_module : m_cangjie_path_modules) {
+        if (!path_module) continue;
+        CompilerDeclContext empty_decl_ctx;
+        path_module->FindGlobalVariables(name, empty_decl_ctx, -1, vars);
+        if (vars.GetSize() > 0) break;
+      }
+    }
   }
 
   if (vars.GetSize() == 0) {
@@ -256,9 +270,16 @@ CompilerType CangjieDeclMap::LookUptype(lldb::ModuleSP module,
   if (module && namespace_decl) {
     module->FindTypesInNamespace(name, namespace_decl, 1, types);
   } else {
-    auto target = m_exe_ctx.GetTargetSP();
-    target->GetImages().FindTypes(
-        module.get(), name, exact_match, 1, searched_symbol_files, types);
+    if (m_current_module_sp) {
+      m_current_module_sp->FindTypes(name, exact_match, 1, searched_symbol_files, types);
+    }
+    if (types.GetSize() == 0) {
+      for (lldb::ModuleSP path_module : m_cangjie_path_modules) {
+        if (!path_module) continue;
+        path_module->FindTypes(name, exact_match, 1, searched_symbol_files, types);
+        if (types.GetSize() > 0) break;
+      }
+    }
   }
 
   size_t num_types = types.GetSize();
@@ -275,22 +296,32 @@ CompilerType CangjieDeclMap::LookUptype(lldb::ModuleSP module,
 }
 
 bool CangjieDeclMap::LookUpPackage(ConstString name) {
-  auto target = m_exe_ctx.GetTargetSP();
   NamespaceMapSP parsed_package = std::make_shared<NamespaceMap>();
-  for (lldb::ModuleSP image : target->GetImages().Modules()) {
-    if (!image) {
-      continue;
-    }
 
-    SymbolFile *symbol_file = image->GetSymbolFile();
-    if (!symbol_file) {
-      continue;
+  if (m_current_module_sp) {
+    SymbolFile *symbol_file = m_current_module_sp->GetSymbolFile();
+    if (symbol_file) {
+      CompilerDeclContext namespace_decl;
+      CompilerDeclContext found_namespace_decl = symbol_file->FindNamespace(name, namespace_decl);
+      if (found_namespace_decl) {
+        parsed_package->push_back(
+            std::pair<lldb::ModuleSP, CompilerDeclContext>(m_current_module_sp, found_namespace_decl));
+      }
     }
-    CompilerDeclContext namespace_decl;
-    CompilerDeclContext found_namespace_decl = symbol_file->FindNamespace(name, namespace_decl);
-    if (found_namespace_decl) {
-      parsed_package->push_back(
-          std::pair<lldb::ModuleSP, CompilerDeclContext>(image, found_namespace_decl));
+  }
+
+  if (parsed_package->empty()) {
+    for (lldb::ModuleSP path_module : m_cangjie_path_modules) {
+      if (!path_module) continue;
+      SymbolFile *symbol_file = path_module->GetSymbolFile();
+      if (!symbol_file) continue;
+      CompilerDeclContext namespace_decl;
+      CompilerDeclContext found_namespace_decl = symbol_file->FindNamespace(name, namespace_decl);
+      if (found_namespace_decl) {
+        parsed_package->push_back(
+            std::pair<lldb::ModuleSP, CompilerDeclContext>(path_module, found_namespace_decl));
+        break;
+      }
     }
   }
 
@@ -306,21 +337,28 @@ std::vector<lldb_private::CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::Look
     ConstString name, const CompilerDeclContext &namespace_decl) {
   std::vector<CompilerTypeInfo> result;
   SymbolContextList sc_list;
-  auto target = m_exe_ctx.GetTargetPtr();
-  if (namespace_decl && module) {
-    ModuleFunctionSearchOptions function_options;
-    function_options.include_inlines = false;
-    function_options.include_symbols = false;
+  ModuleFunctionSearchOptions function_options;
+  function_options.include_inlines = false;
+  function_options.include_symbols = true;
 
+  if (namespace_decl && module) {
     module->FindFunctions(name, namespace_decl, lldb::eFunctionNameTypeBase,
                              function_options, sc_list);
-  } else if (target && !namespace_decl) {
-    ModuleFunctionSearchOptions function_options;
-    function_options.include_inlines = false;
-    function_options.include_symbols = true;
-    target->GetImages().FindFunctions(
-        name, lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options,
-        sc_list);
+  } else {
+    if (m_current_module_sp) {
+      CompilerDeclContext empty_decl_ctx;
+      m_current_module_sp->FindFunctions(name, empty_decl_ctx,
+          lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options, sc_list);
+    }
+    if (sc_list.GetSize() == 0) {
+      for (lldb::ModuleSP path_module : m_cangjie_path_modules) {
+        if (!path_module) continue;
+        CompilerDeclContext empty_decl_ctx;
+        path_module->FindFunctions(name, empty_decl_ctx,
+            lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options, sc_list);
+        if (sc_list.GetSize() > 0) break;
+      }
+    }
   }
 
   if (!sc_list.GetSize()) {
@@ -406,23 +444,41 @@ bool CheckNestedGenericFunction(lldb_private::ConstString funcname) {
 
 std::vector<CangjieDeclMap::CompilerTypeInfo> CangjieDeclMap::LookUpFunction(std::string name, bool find_global) {
   std::vector<CangjieDeclMap::CompilerTypeInfo> result;
-  auto target = m_exe_ctx.GetTargetPtr();
   auto frame = m_exe_ctx.GetFramePtr();
-  if (!target || !frame) {
+  if (!frame) {
     return result;
   }
+
   SymbolContextList sc_list;
   SymbolContextList sc_generic_list;
   ModuleFunctionSearchOptions function_options;
   function_options.include_inlines = false;
   function_options.include_symbols = true;
 
-  target->GetImages().FindFunctions(ConstString(name),
-      lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options, sc_list);
+  if (m_current_module_sp) {
+    CompilerDeclContext empty_decl_ctx;
+    m_current_module_sp->FindFunctions(ConstString(name), empty_decl_ctx,
+        lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options, sc_list);
 
-  std::string re_cstr = std::string("^") + llvm::Regex::escape(name) + std::string("<.+>$");
-  target->GetImages().FindFunctions(RegularExpression(llvm::StringRef(re_cstr)), function_options, sc_generic_list);
-  sc_list.Append(sc_generic_list);
+    std::string re_cstr = std::string("^") + llvm::Regex::escape(name) + std::string("<.+>$");
+    m_current_module_sp->FindFunctions(RegularExpression(llvm::StringRef(re_cstr)), function_options, sc_generic_list);
+    sc_list.Append(sc_generic_list);
+  }
+
+  if (sc_list.IsEmpty()) {
+    for (lldb::ModuleSP path_module : m_cangjie_path_modules) {
+      if (!path_module) continue;
+      CompilerDeclContext empty_decl_ctx;
+      path_module->FindFunctions(ConstString(name), empty_decl_ctx,
+          lldb::eFunctionNameTypeFull | lldb::eFunctionNameTypeBase, function_options, sc_list);
+
+      std::string re_cstr = std::string("^") + llvm::Regex::escape(name) + std::string("<.+>$");
+      path_module->FindFunctions(RegularExpression(llvm::StringRef(re_cstr)), function_options, sc_generic_list);
+      sc_list.Append(sc_generic_list);
+      if (!sc_list.IsEmpty()) break;
+    }
+  }
+
   if (sc_list.IsEmpty()) {
     return result;
   }
@@ -485,9 +541,19 @@ CompilerType CangjieDeclMap::LookUpType(std::string name)
 {
   TypeList types;
   llvm::DenseSet<SymbolFile *> searched_symbol_files;
-  auto target = m_exe_ctx.GetTargetSP();
   name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
-  target->GetImages().FindTypes(nullptr, ConstString(name), false, 1, searched_symbol_files, types);
+
+  if (m_current_module_sp) {
+    m_current_module_sp->FindTypes(ConstString(name), false, 1, searched_symbol_files, types);
+  }
+
+  if (types.GetSize() == 0) {
+    for (lldb::ModuleSP path_module : m_cangjie_path_modules) {
+      if (!path_module) continue;
+      path_module->FindTypes(ConstString(name), false, 1, searched_symbol_files, types);
+      if (types.GetSize() > 0) break;
+    }
+  }
 
   size_t num_types = types.GetSize();
   for (size_t ti = 0; ti < num_types; ++ti) {
@@ -1091,11 +1157,48 @@ void CangjieDeclMap::CreateInjectedThis()
   m_global_decls.emplace_back(std::move(thisvar));
 }
 
+void CangjieDeclMap::InitModuleCache() {
+  StackFrame *frame = m_exe_ctx.GetFramePtr();
+  if (!frame) {
+    return;
+  }
+
+  SymbolContext module_sym_ctx = frame->GetSymbolContext(lldb::eSymbolContextModule);
+  m_current_module_sp = module_sym_ctx.module_sp;
+
+  auto target = m_exe_ctx.GetTargetPtr();
+  if (!target) {
+    return;
+  }
+
+  auto cangjie_path = getenv("CANGJIE_PATH");
+  if (cangjie_path == nullptr) {
+    return;
+  }
+
+  std::stringstream sstream(cangjie_path);
+  std::string path_entry;
+  while (std::getline(sstream, path_entry, ':')) {
+    if (path_entry.empty()) continue;
+    for (lldb::ModuleSP module_sp : target->GetImages().Modules()) {
+      if (!module_sp) continue;
+      auto module_file = module_sp->GetFileSpec();
+      std::string module_path = module_file.GetPath();
+      if (module_path.find(path_entry) == 0) {
+        m_cangjie_path_modules.push_back(module_sp);
+      }
+    }
+  }
+}
+
 void CangjieDeclMap::InitVariable() {
   StackFrame *frame = m_exe_ctx.GetFramePtr();
   if (!frame) {
     return;
   }
+
+  InitModuleCache();
+
   SymbolContext sym_ctx = frame->GetSymbolContext(lldb::eSymbolContextCompUnit);
   if (sym_ctx.comp_unit) {
     // Get current package name
