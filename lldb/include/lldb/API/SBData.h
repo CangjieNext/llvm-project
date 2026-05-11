@@ -149,6 +149,7 @@ protected:
 
 private:
   friend class SBInstruction;
+  friend class SBMixedArkTSDebugger;
   friend class SBProcess;
   friend class SBSection;
   friend class SBTarget;

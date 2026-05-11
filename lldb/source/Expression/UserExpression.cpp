@@ -40,6 +40,7 @@
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/StreamString.h"
+#include "lldb/Target/CJThread.h"
 
 using namespace lldb_private;
 
@@ -202,6 +203,17 @@ UserExpression::Evaluate(ExecutionContext &exe_ctx,
       error.SetErrorString("expression needed to run but couldn't");
 
       return execution_results;
+    }
+  }
+  auto thread = exe_ctx.GetThreadPtr();
+  lldb::CJThreadSP old_cjthread = process->GetBindCJThread();
+  lldb::CJThreadSP new_cjthread = process->FindCJThreadByOSThreadID(thread->GetID(), false);
+  if (old_cjthread != new_cjthread) {
+    if (old_cjthread) {
+      old_cjthread->UnBindCJThreadToOSThread(*process);
+    }
+    if (new_cjthread) {
+      new_cjthread->BindCJThreadToOSThread(*process);
     }
   }
 

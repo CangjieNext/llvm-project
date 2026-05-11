@@ -21,6 +21,7 @@
 #include "lldb/Target/Process.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Target/Thread.h"
+#include "lldb/Target/CJThread.h"
 #include "lldb/Target/ThreadSpec.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
@@ -381,9 +382,31 @@ BreakpointOptions &BreakpointLocation::GetLocationOptions() {
 }
 
 bool BreakpointLocation::ValidForThisThread(Thread &thread) {
+  if (ValidForThisCJThread(thread)) {
+    return true;
+  }
+
   return thread.MatchesSpec(
       GetOptionsSpecifyingKind(BreakpointOptions::eThreadSpec)
           .GetThreadSpecNoCreate());
+}
+
+bool BreakpointLocation::ValidForThisCJThread(Thread &thread) {
+  if (m_owner.GetCJThreadID() != UINT64_MAX) {
+    Status error;
+    thread.GetProcess()->RefreshCJThreadList(error);
+    if (error.Fail()) {
+      return false;
+    }
+    auto cjthreads = thread.GetProcess()->GetCJThreadList();
+    for (size_t i = 0; i < cjthreads.GetSize(); i++) {
+      auto cjthread = std::dynamic_pointer_cast<CJThread>(cjthreads.GetThreadAtIndex(i));
+      if (cjthread && cjthread->GetHostThreadID() == thread.GetID()) {
+        return cjthread->GetCJThreadID() == m_owner.GetCJThreadID();
+      }
+    }
+  }
+  return false;
 }
 
 // RETURNS - true if we should stop at this breakpoint, false if we

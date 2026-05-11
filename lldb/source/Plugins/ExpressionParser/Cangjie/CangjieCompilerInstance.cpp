@@ -304,17 +304,6 @@ Ptr<Ty> CangjieCompilerInstance::GetTyFromASTType(Decl& decl, const std::vector<
       auto gpd = As<ASTKind::GENERIC_PARAM_DECL>(&decl);
       return typeManager->GetGenericsTy(*gpd);
     }
-    case ASTKind::BUILTIN_DECL: {
-      auto builtin = dynamic_cast<AST::BuiltInDecl *>(&decl);
-      auto type = builtin->type;
-      if (type == AST::BuiltInType::POINTER) {
-        auto argdecl = dynamic_cast<AST::StructTy *>(typeArgs[0].get());
-        if (argdecl) {
-          argdecl->declPtr->EnableAttr(Attribute::C);
-        }
-        return typeManager->GetPointerTy(typeArgs[0]);
-      }
-    }
     default:
       return decl.ty;
   }

@@ -1715,7 +1715,8 @@ size_t Thread::GetStatus(Stream &strm, uint32_t start_frame,
     strm.Indent();
     bool is_selected = false;
     if (process) {
-      if (process->GetThreadList().GetSelectedThread().get() == this)
+      if (process->GetThreadList().GetSelectedThread().get() == this ||
+          process->GetCJThreadList().GetSelectedThread().get() == this)
         is_selected = true;
     }
     strm.Printf("%c ", is_selected ? '*' : ' ');
@@ -1742,7 +1743,8 @@ size_t Thread::GetStatus(Stream &strm, uint32_t start_frame,
     const bool show_frame_unique = only_stacks;
     const char *selected_frame_marker = nullptr;
     if (num_frames == 1 || only_stacks ||
-        (GetID() != GetProcess()->GetThreadList().GetSelectedThread()->GetID()))
+        (GetID() != GetProcess()->GetThreadList().GetSelectedThread()->GetID() &&
+         GetID() != GetProcess()->GetCJThreadList().GetSelectedThread()->GetID()))
       strm.IndentMore();
     else
       selected_frame_marker = "* ";

@@ -9,7 +9,11 @@ lldb_tablegen(TargetPropertiesEnum.inc -gen-lldb-property-enum-defs
 add_lldb_library(lldbTarget
   ABI.cpp
   AssertFrameRecognizer.cpp
+  CJRegisterContext.cpp
+  CJThread.cpp
   DynamicRegisterInfo.cpp
+  MixedDebugger.cpp
+  MixedArkTSDebugger.cpp
   ExecutionContext.cpp
   InstrumentationRuntime.cpp
   InstrumentationRuntimeStopInfo.cpp

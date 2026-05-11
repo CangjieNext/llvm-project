@@ -12,64 +12,72 @@
 #include "lldb/Target/StackFrame.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Target/Thread.h"
+#include "lldb/Target/CJThread.h"
 #include "lldb/Utility/State.h"
+#include "lldb/lldb-forward.h"
 
 using namespace lldb_private;
 
 ExecutionContext::ExecutionContext()
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {}
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {}
 
 ExecutionContext::ExecutionContext(const ExecutionContext &rhs) = default;
 
 ExecutionContext::ExecutionContext(const lldb::TargetSP &target_sp,
                                    bool get_process)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   if (target_sp)
     SetContext(target_sp, get_process);
 }
 
 ExecutionContext::ExecutionContext(const lldb::ProcessSP &process_sp)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   if (process_sp)
     SetContext(process_sp);
 }
 
 ExecutionContext::ExecutionContext(const lldb::ThreadSP &thread_sp)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   if (thread_sp)
     SetContext(thread_sp);
 }
 
+ExecutionContext::ExecutionContext(const lldb::CJThreadSP &cjthread_sp)
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
+  if (cjthread_sp)
+    SetContext(cjthread_sp);
+}
+
 ExecutionContext::ExecutionContext(const lldb::StackFrameSP &frame_sp)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   if (frame_sp)
     SetContext(frame_sp);
 }
 
 ExecutionContext::ExecutionContext(const lldb::TargetWP &target_wp,
                                    bool get_process)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   lldb::TargetSP target_sp(target_wp.lock());
   if (target_sp)
     SetContext(target_sp, get_process);
 }
 
 ExecutionContext::ExecutionContext(const lldb::ProcessWP &process_wp)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   lldb::ProcessSP process_sp(process_wp.lock());
   if (process_sp)
     SetContext(process_sp);
 }
 
 ExecutionContext::ExecutionContext(const lldb::ThreadWP &thread_wp)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   lldb::ThreadSP thread_sp(thread_wp.lock());
   if (thread_sp)
     SetContext(thread_sp);
 }
 
 ExecutionContext::ExecutionContext(const lldb::StackFrameWP &frame_wp)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   lldb::StackFrameSP frame_sp(frame_wp.lock());
   if (frame_sp)
     SetContext(frame_sp);
@@ -77,7 +85,7 @@ ExecutionContext::ExecutionContext(const lldb::StackFrameWP &frame_wp)
 
 ExecutionContext::ExecutionContext(Target *t,
                                    bool fill_current_process_thread_frame)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   if (t) {
     m_target_sp = t->shared_from_this();
     if (fill_current_process_thread_frame) {
@@ -93,7 +101,7 @@ ExecutionContext::ExecutionContext(Target *t,
 
 ExecutionContext::ExecutionContext(Process *process, Thread *thread,
                                    StackFrame *frame)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   if (process) {
     m_process_sp = process->shared_from_this();
     m_target_sp = process->GetTarget().shared_from_this();
@@ -108,17 +116,19 @@ ExecutionContext::ExecutionContext(const ExecutionContextRef &exe_ctx_ref)
     : m_target_sp(exe_ctx_ref.GetTargetSP()),
       m_process_sp(exe_ctx_ref.GetProcessSP()),
       m_thread_sp(exe_ctx_ref.GetThreadSP()),
+      m_cjthread_sp(exe_ctx_ref.GetCJThreadSP()),
       m_frame_sp(exe_ctx_ref.GetFrameSP()) {}
 
 ExecutionContext::ExecutionContext(const ExecutionContextRef *exe_ctx_ref_ptr,
                                    bool thread_and_frame_only_if_stopped)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   if (exe_ctx_ref_ptr) {
     m_target_sp = exe_ctx_ref_ptr->GetTargetSP();
     m_process_sp = exe_ctx_ref_ptr->GetProcessSP();
     if (!thread_and_frame_only_if_stopped ||
         (m_process_sp && StateIsStoppedState(m_process_sp->GetState(), true))) {
       m_thread_sp = exe_ctx_ref_ptr->GetThreadSP();
+      m_cjthread_sp = exe_ctx_ref_ptr->GetCJThreadSP();
       m_frame_sp = exe_ctx_ref_ptr->GetFrameSP();
     }
   }
@@ -126,7 +136,7 @@ ExecutionContext::ExecutionContext(const ExecutionContextRef *exe_ctx_ref_ptr,
 
 ExecutionContext::ExecutionContext(const ExecutionContextRef *exe_ctx_ref_ptr,
                                    std::unique_lock<std::recursive_mutex> &lock)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   if (exe_ctx_ref_ptr) {
     m_target_sp = exe_ctx_ref_ptr->GetTargetSP();
     if (m_target_sp) {
@@ -134,6 +144,7 @@ ExecutionContext::ExecutionContext(const ExecutionContextRef *exe_ctx_ref_ptr,
 
       m_process_sp = exe_ctx_ref_ptr->GetProcessSP();
       m_thread_sp = exe_ctx_ref_ptr->GetThreadSP();
+      m_cjthread_sp = exe_ctx_ref_ptr->GetCJThreadSP();
       m_frame_sp = exe_ctx_ref_ptr->GetFrameSP();
     }
   }
@@ -141,19 +152,20 @@ ExecutionContext::ExecutionContext(const ExecutionContextRef *exe_ctx_ref_ptr,
 
 ExecutionContext::ExecutionContext(const ExecutionContextRef &exe_ctx_ref,
                                    std::unique_lock<std::recursive_mutex> &lock)
-    : m_target_sp(exe_ctx_ref.GetTargetSP()), m_process_sp(), m_thread_sp(),
+    : m_target_sp(exe_ctx_ref.GetTargetSP()), m_process_sp(), m_thread_sp(), m_cjthread_sp(),
       m_frame_sp() {
   if (m_target_sp) {
     lock = std::unique_lock<std::recursive_mutex>(m_target_sp->GetAPIMutex());
 
     m_process_sp = exe_ctx_ref.GetProcessSP();
     m_thread_sp = exe_ctx_ref.GetThreadSP();
+    m_cjthread_sp = exe_ctx_ref.GetCJThreadSP();
     m_frame_sp = exe_ctx_ref.GetFrameSP();
   }
 }
 
 ExecutionContext::ExecutionContext(ExecutionContextScope *exe_scope_ptr)
-    : m_target_sp(), m_process_sp(), m_thread_sp(), m_frame_sp() {
+    : m_target_sp(), m_process_sp(), m_thread_sp(), m_cjthread_sp(), m_frame_sp() {
   if (exe_scope_ptr)
     exe_scope_ptr->CalculateExecutionContext(*this);
 }
@@ -166,6 +178,7 @@ void ExecutionContext::Clear() {
   m_target_sp.reset();
   m_process_sp.reset();
   m_thread_sp.reset();
+  m_cjthread_sp.reset();
   m_frame_sp.reset();
 }
 
@@ -192,6 +205,8 @@ RegisterContext *ExecutionContext::GetRegisterContext() const {
     return m_frame_sp->GetRegisterContext().get();
   else if (m_thread_sp)
     return m_thread_sp->GetRegisterContext().get();
+  else if (m_cjthread_sp)
+    return m_cjthread_sp->GetRegisterContext().get();
   return nullptr;
 }
 
@@ -216,6 +231,8 @@ ExecutionContextScope *ExecutionContext::GetBestExecutionContextScope() const {
     return m_frame_sp.get();
   if (m_thread_sp)
     return m_thread_sp.get();
+  if (m_cjthread_sp)
+    return m_cjthread_sp.get();
   if (m_process_sp)
     return m_process_sp.get();
   return m_target_sp.get();
@@ -236,6 +253,11 @@ Thread &ExecutionContext::GetThreadRef() const {
   return *m_thread_sp;
 }
 
+CJThread &ExecutionContext::GetCJThreadRef() const {
+  assert(m_cjthread_sp);
+  return *m_cjthread_sp;
+}
+
 StackFrame &ExecutionContext::GetFrameRef() const {
   assert(m_frame_sp);
   return *m_frame_sp;
@@ -251,6 +273,10 @@ void ExecutionContext::SetProcessSP(const lldb::ProcessSP &process_sp) {
 
 void ExecutionContext::SetThreadSP(const lldb::ThreadSP &thread_sp) {
   m_thread_sp = thread_sp;
+}
+
+void ExecutionContext::SetCJThreadSP(const lldb::CJThreadSP &cjthread_sp) {
+  m_cjthread_sp = cjthread_sp;
 }
 
 void ExecutionContext::SetFrameSP(const lldb::StackFrameSP &frame_sp) {
@@ -321,6 +347,21 @@ void ExecutionContext::SetContext(const lldb::ThreadSP &thread_sp) {
   }
 }
 
+void ExecutionContext::SetContext(const lldb::CJThreadSP &cjthread_sp) {
+  m_frame_sp.reset();
+  m_cjthread_sp = cjthread_sp;
+  if (cjthread_sp) {
+    m_process_sp = cjthread_sp->GetProcess();
+    if (m_process_sp)
+      m_target_sp = m_process_sp->GetTarget().shared_from_this();
+    else
+      m_target_sp.reset();
+  } else {
+    m_target_sp.reset();
+    m_process_sp.reset();
+  }
+}
+
 void ExecutionContext::SetContext(const lldb::StackFrameSP &frame_sp) {
   m_frame_sp = frame_sp;
   if (frame_sp) {
@@ -348,6 +389,7 @@ ExecutionContext &ExecutionContext::operator=(const ExecutionContext &rhs) {
     m_process_sp = rhs.m_process_sp;
     m_thread_sp = rhs.m_thread_sp;
     m_frame_sp = rhs.m_frame_sp;
+    m_cjthread_sp = rhs.m_cjthread_sp;
   }
   return *this;
 }
@@ -388,8 +430,12 @@ bool ExecutionContext::HasThreadScope() const {
   return (HasProcessScope() && ((bool)m_thread_sp && m_thread_sp->IsValid()));
 }
 
+bool ExecutionContext::HasCJThreadScope() const {
+  return (HasProcessScope() && ((bool)m_cjthread_sp && m_cjthread_sp->IsValid()));
+}
+
 bool ExecutionContext::HasFrameScope() const {
-  return HasThreadScope() && m_frame_sp;
+  return (HasThreadScope() || HasCJThreadScope()) && m_frame_sp;
 }
 
 ExecutionContextRef::ExecutionContextRef()
@@ -421,7 +467,9 @@ operator=(const ExecutionContextRef &rhs) {
     m_target_wp = rhs.m_target_wp;
     m_process_wp = rhs.m_process_wp;
     m_thread_wp = rhs.m_thread_wp;
+    m_cjthread_wp = rhs.m_cjthread_wp;
     m_tid = rhs.m_tid;
+    m_cjtid = rhs.m_cjtid;
     m_stack_id = rhs.m_stack_id;
   }
   return *this;
@@ -432,11 +480,17 @@ operator=(const ExecutionContext &exe_ctx) {
   m_target_wp = exe_ctx.GetTargetSP();
   m_process_wp = exe_ctx.GetProcessSP();
   lldb::ThreadSP thread_sp(exe_ctx.GetThreadSP());
+  lldb::CJThreadSP cjthread_sp(exe_ctx.GetCJThreadSP());
   m_thread_wp = thread_sp;
+  m_cjthread_wp = cjthread_sp;
   if (thread_sp)
     m_tid = thread_sp->GetID();
   else
     m_tid = LLDB_INVALID_THREAD_ID;
+  if (cjthread_sp)
+    m_cjtid = cjthread_sp->GetID();
+  else
+    m_cjtid = LLDB_INVALID_CJTHREAD_ID;
   lldb::StackFrameSP frame_sp(exe_ctx.GetFrameSP());
   if (frame_sp)
     m_stack_id = frame_sp->GetStackID();
@@ -448,6 +502,7 @@ operator=(const ExecutionContext &exe_ctx) {
 void ExecutionContextRef::Clear() {
   m_target_wp.reset();
   m_process_wp.reset();
+  ClearCJThread();
   ClearThread();
   ClearFrame();
 }
@@ -480,13 +535,33 @@ void ExecutionContextRef::SetThreadSP(const lldb::ThreadSP &thread_sp) {
   }
 }
 
+void ExecutionContextRef::SetCJThreadSP(const lldb::CJThreadSP &cjthread_sp) {
+  if (cjthread_sp) {
+    m_cjthread_wp = cjthread_sp;
+    m_cjtid = cjthread_sp->GetID();
+    SetProcessSP(cjthread_sp->GetProcess());
+  } else {
+    ClearCJThread();
+    m_process_wp.reset();
+    m_target_wp.reset();
+  }
+}
+
 void ExecutionContextRef::SetFrameSP(const lldb::StackFrameSP &frame_sp) {
   if (frame_sp) {
     m_stack_id = frame_sp->GetStackID();
-    SetThreadSP(frame_sp->GetThread());
+    lldb::ThreadSP thread_sp = frame_sp->GetThread();
+    lldb::CJThreadSP cjthread_sp = std::dynamic_pointer_cast<CJThread>(thread_sp);
+    if (cjthread_sp) {
+      SetThreadSP(thread_sp);
+      SetCJThreadSP(cjthread_sp);
+    } else {
+      SetThreadSP(thread_sp);
+    }
   } else {
     ClearFrame();
     ClearThread();
+    ClearCJThread();
     m_process_wp.reset();
     m_target_wp.reset();
   }
@@ -523,6 +598,15 @@ void ExecutionContextRef::SetTargetPtr(Target *target, bool adopt_selected) {
                 if (frame_sp)
                   SetFrameSP(frame_sp);
               }
+
+              lldb::CJThreadSP cjthread_sp(
+                std::dynamic_pointer_cast<CJThread>(process_sp->GetCJThreadList().GetSelectedThread()));
+              if (!cjthread_sp && process_sp->GetCJThreadList().GetSize() > 0)
+                cjthread_sp = std::dynamic_pointer_cast<CJThread>(process_sp->GetCJThreadList().GetThreadAtIndex(0));
+
+              if (cjthread_sp) {
+                SetCJThreadSP(cjthread_sp);
+              }
             }
           }
         }
@@ -543,6 +627,16 @@ void ExecutionContextRef::SetProcessPtr(Process *process) {
 void ExecutionContextRef::SetThreadPtr(Thread *thread) {
   if (thread) {
     SetThreadSP(thread->shared_from_this());
+  } else {
+    ClearThread();
+    m_process_wp.reset();
+    m_target_wp.reset();
+  }
+}
+
+void ExecutionContextRef::SetCJThreadPtr(CJThread *cjthread) {
+  if (cjthread) {
+    SetCJThreadSP(std::dynamic_pointer_cast<CJThread>(cjthread->shared_from_this()));
   } else {
     ClearThread();
     m_process_wp.reset();
@@ -594,6 +688,33 @@ lldb::ThreadSP ExecutionContextRef::GetThreadSP() const {
     thread_sp.reset();
 
   return thread_sp;
+}
+
+lldb::CJThreadSP ExecutionContextRef::GetCJThreadSP() const {
+  lldb::CJThreadSP cjthread_sp(m_cjthread_wp.lock());
+
+  if (m_cjtid != LLDB_INVALID_CJTHREAD_ID) {
+    // We check if the thread has been destroyed in cases where clients might
+    // still have shared pointer to a thread, but the thread is not valid
+    // anymore (not part of the process)
+    if (!cjthread_sp || !cjthread_sp->IsValid()) {
+      lldb::ProcessSP process_sp(GetProcessSP());
+      if (process_sp && process_sp->IsValid()) {
+        lldb::ThreadSP thread = process_sp->GetCJThreadList().FindThreadByID(m_cjtid);
+        lldb::CJThreadSP cjthread_sp = std::dynamic_pointer_cast<CJThread>(thread);
+        if (cjthread_sp) {
+          m_cjthread_wp = cjthread_sp;
+        }
+      }
+    }
+  }
+
+  // Check that we aren't about to return an invalid thread sp.  We might
+  // return a nullptr thread_sp, but don't return an invalid one.
+  if (cjthread_sp && !cjthread_sp->IsValid())
+    cjthread_sp.reset();
+
+  return cjthread_sp;
 }
 
 lldb::StackFrameSP ExecutionContextRef::GetFrameSP() const {

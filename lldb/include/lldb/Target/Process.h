@@ -397,6 +397,9 @@ public:
     m_cjthreadRegCtx.clear();
   }
 
+  lldb::CJThreadSP GetBindCJThread() { return m_bind_cjthread_sp; };
+
+  void SetBindCJThread(lldb::CJThreadSP cjthread_sp) { m_bind_cjthread_sp = cjthread_sp; };
 /// A notification structure that can be used by clients to listen
 /// for changes in a process's lifetime.
 ///
@@ -2087,6 +2090,10 @@ public:
 
   ThreadList &GetThreadList() { return m_thread_list; }
 
+  ThreadList &GetCJThreadList() { return m_cjthread_list; }
+
+  bool RefreshCJThreadList(Status &error, bool forceRefresh = false);
+
   // When ExtendedBacktraces are requested, the HistoryThreads that are created
   // need an owner -- they're saved here in the Process.  The threads in this
   // list are not iterated over - driver programs need to request the extended
@@ -2094,6 +2101,7 @@ public:
   ThreadList &GetExtendedThreadList() { return m_extended_thread_list; }
 
   ThreadList::ThreadIterable Threads() { return m_thread_list.Threads(); }
+  ThreadList::ThreadIterable CJThreads() { return m_cjthread_list.Threads(); }
 
   uint32_t GetNextThreadIndexID(uint64_t thread_id);
 
@@ -2526,6 +2534,8 @@ void PruneThreadPlans();
   /// Or use the high bits to authenticate a pointer value.
   lldb::addr_t FixCodeAddress(lldb::addr_t pc);
 
+  lldb::CJThreadSP FindCJThreadByOSThreadID(lldb::tid_t tid, bool can_update = true);
+
 protected:
   friend class Trace;
   ///  Get the processor tracing type supported for this process.
@@ -2876,6 +2886,8 @@ protected:
                                  ///to the protocol we are debugging with
   ThreadList m_thread_list; ///< The threads for this process as the user will
                             ///see them. This is usually the same as
+  ThreadList m_cjthread_list; ///< The threads for this process as the user will
+                              ///see them. This is usually the same as
   ///< m_thread_list_real, but might be different if there is an OS plug-in
   ///creating memory threads
   ThreadPlanStackMap m_thread_plans; ///< This is the list of thread plans for
@@ -3064,6 +3076,13 @@ private:
   Process(const Process &) = delete;
   const Process &operator=(const Process &) = delete;
   std::map <lldb_private::ConstString, uint64_t> m_cjthreadRegCtx;
+  lldb::CJThreadSP m_bind_cjthread_sp = nullptr;
+
+  enum class CJThreadListState {
+    Uninitialized,
+    WaitRefresh,
+    HasBeenRefreshed,
+  } m_cjthreadlist_state = CJThreadListState::Uninitialized;
 };
 
 /// RAII guard that should be acquired when an utility function is called within

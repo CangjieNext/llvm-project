@@ -58,6 +58,7 @@
 #include "lldb/Target/Target.h"
 #include "lldb/Target/TargetList.h"
 #include "lldb/Target/Thread.h"
+#include "lldb/Target/CJThread.h"
 #include "lldb/Target/ThreadPlan.h"
 #include "lldb/Target/ThreadPlanBase.h"
 #include "lldb/Target/ThreadPlanCallFunction.h"
@@ -423,7 +424,8 @@ Process::Process(lldb::TargetSP target_sp, ListenerSP listener_sp,
       m_mod_id(), m_process_unique_id(0), m_thread_index_id(0),
       m_thread_id_to_index_id_map(), m_exit_status(-1), m_exit_string(),
       m_exit_status_mutex(), m_thread_mutex(), m_thread_list_real(this),
-      m_thread_list(this), m_thread_plans(*this), m_extended_thread_list(this),
+      m_thread_list(this), m_cjthread_list(this),
+      m_thread_plans(*this), m_extended_thread_list(this),
       m_extended_thread_stop_id(0), m_queue_list(this), m_queue_list_stop_id(0),
       m_notifications(), m_image_tokens(), m_listener_sp(listener_sp),
       m_breakpoint_site_list(), m_dynamic_checkers_up(),
@@ -3427,6 +3429,12 @@ bool Process::ShouldBroadcastEvent(Event *event_ptr) {
 
     m_stdio_communication.SynchronizeWithReadThread();
     RefreshStateAfterStop();
+    /* update cjthread list */
+    m_cjthread_list.Clear();
+    m_cjthreadlist_state = CJThreadListState::WaitRefresh;
+    Status error;
+    RefreshCJThreadList(error);
+
     if (ProcessEventData::GetInterruptedFromEvent(event_ptr)) {
       LLDB_LOGF(log,
                 "Process::ShouldBroadcastEvent (%p) stopped due to an "
@@ -4076,6 +4084,20 @@ void Process::ProcessEventData::DoOnRemoval(Event *event_ptr) {
       if (process_sp->GetTarget().RunStopHooks())
         SetRestarted(true);
     }
+  }
+
+  lldb::tid_t selected_thread_id = process_sp->GetThreadList().GetSelectedThread()->GetID();
+  lldb::CJThreadSP old_cjthread = process_sp->GetBindCJThread();
+  if (old_cjthread && old_cjthread->GetHostThreadID() == selected_thread_id) {
+    return;
+  }
+  if (old_cjthread) {
+    old_cjthread->UnBindCJThreadToOSThread(*process_sp);
+  }
+  lldb::CJThreadSP new_cjthread = process_sp->FindCJThreadByOSThreadID(selected_thread_id, false);
+  if (new_cjthread) {
+    new_cjthread->BindCJThreadToOSThread(*process_sp);
+    process_sp->GetCJThreadList().SetSelectedThreadByID(new_cjthread->GetCJThreadID());
   }
 }
 
@@ -6146,4 +6168,22 @@ addr_t Process::FixCodeAddress(addr_t addr) {
   if (ABISP abi_sp = GetABI())
     addr = abi_sp->FixCodeAddress(addr);
   return addr;
+}
+
+lldb::CJThreadSP Process::FindCJThreadByOSThreadID(lldb::tid_t tid, bool can_update) {
+  Status error;
+  if (can_update) {
+    RefreshCJThreadList(error, true);
+    if (error.Fail()) {
+      return nullptr;
+    }
+  }
+  for (lldb::ThreadSP thread_sp : CJThreads()) {
+    lldb::CJThreadSP cjthread_sp = std::static_pointer_cast<CJThread>(thread_sp);
+    if (cjthread_sp != nullptr && cjthread_sp->GetHostThreadID() == tid) {
+      return cjthread_sp;
+    }
+  }
+
+  return nullptr;
 }
