@@ -1604,6 +1604,132 @@ PreservedAnalyses CJFillMetadata::run(Module &M, ModuleAnalysisManager &) const 
 }
 
 namespace {
+bool rewriteReflectionOperand(GlobalVariable &GV, unsigned FlagIdx,
+                              unsigned ReflectionIdx) {
+  if (!GV.hasInitializer())
+    return false;
+
+  auto *Init = dyn_cast<ConstantStruct>(GV.getInitializer());
+  if (Init == nullptr || Init->getNumOperands() <= ReflectionIdx)
+    return false;
+
+  auto *Flag = dyn_cast<ConstantInt>(Init->getOperand(FlagIdx));
+  if (Flag == nullptr)
+    return false;
+
+  uint64_t NewFlag = Flag->getZExtValue() & ~TF_REFLECTION;
+  auto *ReflectionTy =
+      dyn_cast<PointerType>(Init->getOperand(ReflectionIdx)->getType());
+  if (ReflectionTy == nullptr)
+    return false;
+
+  if (NewFlag == Flag->getZExtValue() &&
+      Init->getOperand(ReflectionIdx)->isNullValue()) {
+    return false;
+  }
+
+  SmallVector<Constant *, 0> Ops;
+  Ops.reserve(Init->getNumOperands());
+  for (unsigned I = 0; I < Init->getNumOperands(); ++I) {
+    Ops.push_back(cast<Constant>(Init->getOperand(I)));
+  }
+  Ops[FlagIdx] = ConstantInt::get(Flag->getType(), NewFlag);
+  Ops[ReflectionIdx] = ConstantPointerNull::get(ReflectionTy);
+  GV.setInitializer(ConstantStruct::get(Init->getType(), Ops));
+  return true;
+}
+
+bool rewritePackageInfoPayload(GlobalVariable &GV) {
+  if (!GV.hasInitializer() || !GV.getName().endswith(".packageInfo"))
+    return false;
+
+  auto *Init = dyn_cast<ConstantStruct>(GV.getInitializer());
+  if (Init == nullptr || Init->getNumOperands() < FPT_PTRS)
+    return false;
+
+  bool Changed = false;
+  SmallVector<Constant *, 0> Ops;
+  Ops.reserve(Init->getNumOperands());
+  for (unsigned I = 0; I < Init->getNumOperands(); ++I) {
+    Ops.push_back(cast<Constant>(Init->getOperand(I)));
+  }
+
+  auto rewriteCount = [&](unsigned Idx) {
+    auto *Count = dyn_cast<ConstantInt>(Init->getOperand(Idx));
+    if (Count == nullptr)
+      return;
+    if (!Count->isZero()) {
+      Ops[Idx] = ConstantInt::get(Count->getType(), 0);
+      Changed = true;
+    }
+  };
+
+  rewriteCount(FPT_TYPE_INFO_CNT);
+  rewriteCount(FPT_TYPE_TEMPLATE_CNT);
+  rewriteCount(FPT_GLOBAL_FUNC_CNT);
+  rewriteCount(FPT_GLOBAL_VAR_CNT);
+
+  for (unsigned I = FPT_PTRS; I < Init->getNumOperands(); ++I) {
+    auto *PtrTy = dyn_cast<PointerType>(Init->getOperand(I)->getType());
+    if (PtrTy == nullptr)
+      continue;
+    if (!Init->getOperand(I)->isNullValue()) {
+      Ops[I] = ConstantPointerNull::get(PtrTy);
+      Changed = true;
+    }
+  }
+
+  if (!Changed)
+    return false;
+
+  GV.setInitializer(ConstantStruct::get(Init->getType(), Ops));
+  return true;
+}
+
+bool makeReflectGlobalDiscardable(GlobalVariable &GV) {
+  if (!GV.hasAttribute("CFileReflect"))
+    return false;
+
+  bool Changed = false;
+  auto NewAttrs =
+      GV.getAttributes().removeAttribute(GV.getContext(), "CFileReflect");
+  if (NewAttrs != GV.getAttributes()) {
+    GV.setAttributes(NewAttrs);
+    Changed = true;
+  }
+  if (!GV.hasLocalLinkage()) {
+    GV.setLinkage(GlobalValue::InternalLinkage);
+    Changed = true;
+  }
+  return Changed;
+}
+} // namespace
+
+PreservedAnalyses
+CJDisableImportLibReflection::run(Module &M, ModuleAnalysisManager &) const {
+  bool Changed = false;
+  for (auto &GV : M.globals()) {
+    if (GV.hasAttribute(CFileKlassStr)) {
+      Changed |= rewriteReflectionOperand(GV, CIT_FLAG, CIT_REFLECTION);
+    } else if (GV.hasAttribute("cj_tt")) {
+      Changed |= rewriteReflectionOperand(GV, TT_FLAG, TT_REFLECTION);
+    } else if (GV.hasAttribute("CFileReflect")) {
+      Changed |= rewritePackageInfoPayload(GV);
+    }
+    Changed |= makeReflectGlobalDiscardable(GV);
+  }
+
+  if (M.getModuleFlag("cj.disable_reflect_codegen_metadata") == nullptr) {
+    M.addModuleFlag(Module::Warning, "cj.disable_reflect_codegen_metadata", 1);
+  }
+
+  if (Changed) {
+    return PreservedAnalyses::none();
+  }
+  return PreservedAnalyses::all();
+}
+
+namespace {
 class CJFillMetadataLegacyPass : public ModulePass {
 public:
   static char ID;
