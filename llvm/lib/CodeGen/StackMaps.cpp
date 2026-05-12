@@ -1471,9 +1471,7 @@ static void genStackMapInfo(CompressedInfo &Data,
   if (IsAllIdxsInvalid) {
     IdxInfo.DerivedInfoStartIdx = 0;
   } else {
-    IdxInfo.DerivedInfoStartIdx = Data.DerivedInfo.size();
-    Data.DerivedInfo.insert(Data.DerivedInfo.end(), IdxsInfo.begin(),
-                            IdxsInfo.end());
+    IdxInfo.DerivedInfoStartIdx = Data.getOrInsertDerivedInfoStartIdx(IdxsInfo);
   }
 
   if (EnableStackGrow) {
