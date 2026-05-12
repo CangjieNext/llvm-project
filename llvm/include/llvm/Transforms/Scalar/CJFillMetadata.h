@@ -261,6 +261,11 @@ struct CJFillMetadata : public PassInfoMixin<CJFillMetadata> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &) const;
 };
 
+struct CJDisableImportLibReflection
+    : public PassInfoMixin<CJDisableImportLibReflection> {
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &) const;
+};
+
 constexpr uint32_t ArrayHeadSize = 16;
 constexpr uint32_t ObjectHeadSize = 8;
 constexpr uint32_t SyncSize = 168;
