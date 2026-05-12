@@ -34,6 +34,7 @@
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include <unordered_map>
 
 using namespace llvm;
@@ -51,12 +52,19 @@ cl::opt<std::string> InputFileName("cj-ic-input-file",
                                    cl::init("./ProfileOutput.txt"));
 cl::opt<bool> EnableCJNewArrayFast("enable-cangjie-new-array-fastpath",
                                    cl::init(true), cl::ReallyHidden);
+cl::opt<bool> EnableCJExceptionTailExtract(
+    "enable-cangjie-exception-tail-extract", cl::init(true),
+    cl::ReallyHidden);
 } // namespace llvm
 
 namespace {
 
 const static StringRef ArithmeticExceptionMangleStr =
     "CJ_MCC_ThrowArithmeticException";
+const static StringRef ExceptionCtor0MangleStr =
+    "__cj_exception_tail_helper0";
+const static StringRef ExceptionCtorStringMangleStr =
+    "__cj_exception_tail_helper_string";
 const static StringRef C2NStubStr = "CJ_MCC_C2NStub";
 const static StringRef N2CStubStr = "CJ_MCC_N2CStub";
 const static StringRef FinalizerStr = "CJ_MCC_OnFinalizerCreated";
@@ -662,6 +670,51 @@ public:
 
   void markLoweringDivisionCheck(CallBase *CI) { DivisionChecks.push_back(CI); }
 
+  bool isLTOModule() const {
+    if (M.getModuleIdentifier() == "ld-temp.o")
+      return true;
+    return M.getModuleFlag("ThinLTO") != nullptr;
+  }
+
+  bool hasCommandLineFlag(StringRef Name) const {
+    auto &Opts = cl::getRegisteredOptions();
+    auto It = Opts.find(Name);
+    return It != Opts.end() && It->second->getNumOccurrences() > 0;
+  }
+
+  bool isLTOCompileMode() const {
+    return CJLTOOpt || hasCommandLineFlag("cangjie-lto") || isLTOModule();
+  }
+
+  bool extractExceptionTails(Function &F) {
+    if (!EnableCJExceptionTailExtract ||
+        Triple(F.getParent()->getTargetTriple()).isOSWindows() ||
+        isLTOCompileMode())
+      return false;
+
+    SmallVector<CallInst *, 8> ThrowCalls;
+    for (Instruction &I : instructions(F)) {
+      auto *CI = dyn_cast<CallInst>(&I);
+      if (!CI || CI->getCalledFunction() == nullptr)
+        continue;
+      if (!CI->getCalledFunction()->getName().equals("CJ_MCC_ThrowException"))
+        continue;
+      if (!isa<UnreachableInst>(CI->getNextNode()))
+        continue;
+      ThrowCalls.push_back(CI);
+    }
+
+    bool Changed = false;
+    for (CallInst *ThrowCI : ThrowCalls) {
+      // The worklist is collected before we rewrite the function. Skip any
+      // entry that has already been removed while processing an earlier tail.
+      if (ThrowCI->getParent() == nullptr)
+        continue;
+      Changed |= tryExtractExceptionTail(ThrowCI);
+    }
+    return Changed;
+  }
+
   bool loweringGCDiv(CallBase *CI) {
     IRBuilder<> Builder(CI);
     Type *TypeOfOperand = CI->getOperand(1)->getType();
@@ -758,6 +811,229 @@ private:
   SmallVector<CallBase *, 8> DivisionChecks;
   // map intrinsic to runtime API function type.
   DenseMap<StringRef, Function *> RTFuncMap;
+
+  bool isStdCoreStringPtr(Type *Ty) const {
+    auto *PtrTy = dyn_cast<PointerType>(Ty);
+    if (!PtrTy)
+      return false;
+    auto *StructTy =
+        dyn_cast<StructType>(PtrTy->getNonOpaquePointerElementType());
+    return StructTy != nullptr && StructTy->hasName() &&
+           StructTy->getName().equals("record.std.core:String");
+  }
+
+  enum class ExceptionTailHelperKind {
+    Ctor0,
+    CtorString,
+  };
+
+  StringRef getExceptionTailHelperName(ExceptionTailHelperKind Kind) const {
+    switch (Kind) {
+    case ExceptionTailHelperKind::Ctor0:
+      return ExceptionCtor0MangleStr;
+    case ExceptionTailHelperKind::CtorString:
+      return ExceptionCtorStringMangleStr;
+    }
+    llvm_unreachable("unknown exception tail helper kind");
+  }
+
+  void initializeExceptionTailHelper(Function &Func, Function &Caller) {
+    Func.addFnAttr(Attribute::NoReturn);
+    Func.addFnAttr(Attribute::NoInline);
+    Func.addFnAttr(Attribute::Cold);
+    Func.addFnAttr(Attribute::OptimizeForSize);
+    Func.addFnAttr(Attribute::MinSize);
+    Func.setGC("cangjie");
+    if (Caller.hasPersonalityFn())
+      Func.setPersonalityFn(Caller.getPersonalityFn());
+    else if (Function *Personality = M.getFunction("__cj_personality_v0$"))
+      Func.setPersonalityFn(Personality);
+  }
+
+  Function *getOrInsertNewObjectFunc() {
+    auto *RefTy = Type::getInt8PtrTy(C, 1);
+    auto *NewObjTy = FunctionType::get(
+        RefTy, {Type::getInt8PtrTy(C), Type::getInt32Ty(C)}, false);
+    Function *NewObjFunc = M.getFunction("CJ_MCC_NewObject");
+    if (NewObjFunc == nullptr)
+      NewObjFunc =
+          M.declareCJRuntimeFunc("CJ_MCC_NewObject", NewObjTy, false, true);
+    return NewObjFunc;
+  }
+
+  Function *getOrInsertThrowExceptionFunc() {
+    auto *RefTy = Type::getInt8PtrTy(C, 1);
+    auto *ThrowTy = FunctionType::get(Type::getVoidTy(C), {RefTy}, false);
+    Function *ThrowFunc = M.getFunction("CJ_MCC_ThrowException");
+    if (ThrowFunc == nullptr)
+      ThrowFunc =
+          M.declareCJRuntimeFunc("CJ_MCC_ThrowException", ThrowTy, false,
+                                 false);
+    return ThrowFunc;
+  }
+
+  void buildExceptionTailHelperBody(Function &Func,
+                                    ExceptionTailHelperKind Kind,
+                                    PointerType *TypeInfoTy, Type *MsgTy) {
+    auto *RefTy = Type::getInt8PtrTy(C, 1);
+    auto *TypeInfoStructTy =
+        cast<StructType>(TypeInfoTy->getNonOpaquePointerElementType());
+    Function *NewObjFunc = getOrInsertNewObjectFunc();
+    Function *ThrowFunc = getOrInsertThrowExceptionFunc();
+
+    auto ArgIt = Func.arg_begin();
+    Argument *TypeInfo = &*ArgIt++;
+    TypeInfo->setName("ti");
+    Argument *Ctor = &*ArgIt++;
+    Ctor->setName("ctor");
+    Argument *Msg = nullptr;
+    if (Kind == ExceptionTailHelperKind::CtorString) {
+      Msg = &*ArgIt++;
+      Msg->setName("msg");
+    }
+
+    BasicBlock *Entry = BasicBlock::Create(C, "entry", &Func);
+    IRBuilder<> IRB(Entry);
+    Value *SizePtr = IRB.CreateStructGEP(TypeInfoStructTy, TypeInfo, CIT_SIZE);
+    Value *Size = IRB.CreateLoad(Type::getInt32Ty(C), SizePtr);
+    // Keep the helper's allocation math identical to setHeapMallocSizeAlign():
+    // add the object header, then round up to the runtime's 8-byte alignment.
+    Value *SizeAdd = IRB.CreateAdd(Size, IRB.getInt32(ObjectHeadSize + 7));
+    Value *AlignedSize = IRB.CreateAnd(SizeAdd, IRB.getInt32(~7));
+    Value *Obj = IRB.CreateCall(NewObjFunc,
+                                {IRB.CreateBitCast(TypeInfo,
+                                                   Type::getInt8PtrTy(C)),
+                                 AlignedSize});
+    if (Kind == ExceptionTailHelperKind::Ctor0) {
+      auto *CtorTy =
+          FunctionType::get(Type::getVoidTy(C), {RefTy, TypeInfoTy}, false);
+      IRB.CreateCall(CtorTy, Ctor, {Obj, TypeInfo});
+    } else {
+      auto *CtorTy = FunctionType::get(Type::getVoidTy(C),
+                                       {RefTy, MsgTy, TypeInfoTy}, false);
+      IRB.CreateCall(CtorTy, Ctor, {Obj, Msg, TypeInfo});
+    }
+    IRB.CreateCall(ThrowFunc, {Obj});
+    IRB.CreateUnreachable();
+  }
+
+  Function *getOrInsertExceptionTailFunc(ExceptionTailHelperKind Kind,
+                                         PointerType *TypeInfoTy, Type *MsgTy,
+                                         Function &Caller) {
+    auto *RefTy = Type::getInt8PtrTy(C, 1);
+    SmallVector<Type *, 3> CtorArgTys{RefTy};
+    if (Kind == ExceptionTailHelperKind::CtorString)
+      CtorArgTys.push_back(MsgTy);
+    CtorArgTys.push_back(TypeInfoTy);
+    auto *CtorTy = FunctionType::get(Type::getVoidTy(C), CtorArgTys, false);
+    // Helper ABI:
+    //   helper0(TypeInfo*, void (ref, TypeInfo*)*)
+    //   helper_string(TypeInfo*, void (ref, String*, TypeInfo*)*, String*)
+    SmallVector<Type *, 3> HelperArgTys{TypeInfoTy,
+                                        PointerType::getUnqual(CtorTy)};
+    if (Kind == ExceptionTailHelperKind::CtorString)
+      HelperArgTys.push_back(MsgTy);
+    auto *FT = FunctionType::get(Type::getVoidTy(C), HelperArgTys, false);
+
+    Function *Func = M.getFunction(getExceptionTailHelperName(Kind));
+    if (Func == nullptr) {
+      Func = Function::Create(FT, GlobalValue::InternalLinkage,
+                              getExceptionTailHelperName(Kind), &M);
+      initializeExceptionTailHelper(*Func, Caller);
+      buildExceptionTailHelperBody(*Func, Kind, TypeInfoTy, MsgTy);
+    }
+    return Func;
+  }
+
+  bool tryExtractExceptionTail(CallInst *ThrowCI) {
+    // Match the canonical cold throw tail:
+    //   %obj = call @CJ_MCC_NewObject(...)
+    //   call @exception_ctor(%obj, [msg,] %ti)
+    //   call @CJ_MCC_ThrowException(%obj)
+    //   unreachable
+    //
+    // Replacing the tail with a helper call keeps the hot path small and lets
+    // the backend see one shared cold sequence instead of N duplicated blocks.
+    if (ThrowCI->getFunction()->getName().equals(ExceptionCtor0MangleStr) ||
+        ThrowCI->getFunction()->getName().equals(ExceptionCtorStringMangleStr))
+      return false;
+
+    Value *ThrownObj = ThrowCI->getArgOperand(0)->stripPointerCasts();
+    auto *NewObjCall = dyn_cast<CallInst>(ThrownObj);
+    // The freshly allocated object must only feed the ctor and the throw.
+    // Any extra user means the tail is not self-contained enough to erase.
+    constexpr unsigned ExceptionTailUseCount = 2;
+    if (NewObjCall == nullptr || NewObjCall->getCalledFunction() == nullptr ||
+        !NewObjCall->getCalledFunction()->getName().equals("CJ_MCC_NewObject") ||
+        NewObjCall->getNumUses() != ExceptionTailUseCount)
+      return false;
+
+    CallInst *CtorCall = nullptr;
+    for (Instruction *Prev = ThrowCI->getPrevNode(); Prev != nullptr;
+         Prev = Prev->getPrevNode()) {
+      if (isa<DbgInfoIntrinsic>(Prev))
+        continue;
+      if (auto *CI = dyn_cast<CallInst>(Prev)) {
+        CtorCall = CI;
+        break;
+      }
+    }
+    if (CtorCall == nullptr || CtorCall->arg_empty() ||
+        CtorCall->getArgOperand(0)->stripPointerCasts() != NewObjCall)
+      return false;
+
+    if (NewObjCall->getParent() != CtorCall->getParent() ||
+        CtorCall->getParent() != ThrowCI->getParent())
+      return false;
+
+    Value *TypeInfo = nullptr;
+    Function *Helper = nullptr;
+    SmallVector<Value *, 3> HelperArgs;
+    IRBuilder<> IRB(ThrowCI);
+    Value *CtorPtr = CtorCall->getCalledOperand();
+
+    if (CtorCall->arg_size() == 2) {
+      TypeInfo = CtorCall->getArgOperand(1);
+      Helper = getOrInsertExceptionTailFunc(
+          ExceptionTailHelperKind::Ctor0,
+          cast<PointerType>(TypeInfo->getType()), nullptr,
+          *ThrowCI->getFunction());
+      HelperArgs = {TypeInfo, CtorPtr};
+    } else if (CtorCall->arg_size() == 3 &&
+               isStdCoreStringPtr(CtorCall->getArgOperand(1)->getType())) {
+      TypeInfo = CtorCall->getArgOperand(2);
+      Helper = getOrInsertExceptionTailFunc(
+          ExceptionTailHelperKind::CtorString,
+          cast<PointerType>(TypeInfo->getType()),
+          CtorCall->getArgOperand(1)->getType(), *ThrowCI->getFunction());
+      HelperArgs = {TypeInfo, CtorPtr, CtorCall->getArgOperand(1)};
+    } else {
+      return false;
+    }
+
+    auto *HelperCall = IRB.CreateCall(Helper, HelperArgs);
+    HelperCall->setDebugLoc(ThrowCI->getDebugLoc());
+    HelperCall->setDoesNotReturn();
+
+    Instruction *ThrownArgInst =
+        dyn_cast<Instruction>(ThrowCI->getArgOperand(0));
+    SmallVector<Instruction *, 4> DeadInstRoots;
+    for (Value *Arg : NewObjCall->args()) {
+      if (auto *Inst = dyn_cast<Instruction>(Arg))
+        DeadInstRoots.push_back(Inst);
+    }
+    ThrowCI->eraseFromParent();
+    CtorCall->eraseFromParent();
+    // Delete a now-dead throw-side cast chain before checking whether the
+    // allocation itself can be dropped as well.
+    if (ThrownArgInst != nullptr && ThrownArgInst != NewObjCall)
+      RecursivelyDeleteTriviallyDeadInstructions(ThrownArgInst);
+    if (NewObjCall->use_empty())
+      NewObjCall->eraseFromParent();
+    for (Instruction *Inst : DeadInstRoots)
+      RecursivelyDeleteTriviallyDeadInstructions(Inst);
+    return true;
+  }
 
   StringRef getRuntimeFuncName(CallBase *CI) const {
     Intrinsic::ID IID = CI->getIntrinsicID();
@@ -1092,6 +1368,7 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
     }
   }
   Lowering.finishAll();
+  Changed |= Lowering.extractExceptionTails(F);
   return Changed;
 }
 
