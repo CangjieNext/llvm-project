@@ -203,6 +203,7 @@ extern cl::opt<int> MaxRecursionInl;
 extern cl::opt<int> CountedLoopTripWidth;
 extern cl::opt<bool> CangjieLTOPreOpt;
 extern cl::opt<bool> EnableCJPtrAuthBackwardCFI;
+extern cl::opt<bool> DisableCJLTOReflection;
 
 PipelineTuningOptions::PipelineTuningOptions() {
   LoopInterleaving = true;
@@ -1498,6 +1499,8 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
   else if (LTOPreLink)
     LTOPhase = ThinOrFullLTOPhase::FullLTOPreLink;
 
+  // PreLink: per-package --disable-reflection already sets TF_REFLECTION=0;
+  // imported-library reflection stripping happens in PostLink.
   // Add the core simplification pipeline.
   MPM.addPass(buildModuleSimplificationPipeline(Level, LTOPhase));
 
@@ -1620,6 +1623,11 @@ ModulePassManager PassBuilder::buildThinLTODefaultPipeline(
   // Force any function attributes we want the rest of the pipeline to observe.
   MPM.addPass(ForceFunctionAttrsPass());
 
+  if (CJPipeline && DisableCJLTOReflection) {
+    MPM.addPass(CJDisableImportLibReflection());
+    // Dead globals are cleaned by GlobalDCE in the following pipelines.
+  }
+
   // Add the core simplification pipeline.
   MPM.addPass(buildModuleSimplificationPipeline(
       Level, ThinOrFullLTOPhase::ThinLTOPostLink));
@@ -1699,6 +1707,11 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
                       /* IsCS */ false, PGOOpt->ProfileFile,
                       PGOOpt->ProfileRemappingFile,
                       ThinOrFullLTOPhase::FullLTOPostLink);
+  }
+
+  if (CJPipeline && DisableCJLTOReflection) {
+    MPM.addPass(CJDisableImportLibReflection());
+    // Dead globals are cleaned by GlobalDCE later in this pipeline.
   }
 
   if (PGOOpt && PGOOpt->Action == PGOOptions::SampleUse) {

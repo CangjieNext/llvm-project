@@ -1605,6 +1605,173 @@ PreservedAnalyses CJFillMetadata::run(Module &M, ModuleAnalysisManager &) const 
 }
 
 namespace {
+
+// Extract debug-only fields from a reflect struct into a .dbg global.
+//   enum:  keep [0]-[2] (ctorInfo, modifier, ctorCnt) → { i8*, i32, i32 }
+//   class: keep [0]     (fieldNames)                  → { i8* }
+// IsEnum is determined from the owning TypeInfo/TypeTemplate's type byte,
+// not from field count (enum reflectType has 15+ operands).
+GlobalVariable *downgradeReflectGlobal(GlobalVariable &ReflectGV, bool IsEnum) {
+  if (!ReflectGV.hasInitializer())
+    return nullptr;
+
+  auto *Init = dyn_cast<ConstantStruct>(ReflectGV.getInitializer());
+  if (!Init)
+    return nullptr;
+
+  unsigned NumOps = Init->getNumOperands();
+  unsigned DebugFields;
+  if (IsEnum && NumOps >= 3)
+    DebugFields = 3;
+  else if (NumOps >= 1)
+    DebugFields = 1;
+  else
+    return nullptr;
+
+  SmallVector<Type *, 4> DebugTypes;
+  for (unsigned I = 0; I < DebugFields; ++I)
+    DebugTypes.push_back(Init->getOperand(I)->getType());
+  auto *DebugST = StructType::get(ReflectGV.getContext(), DebugTypes);
+
+  SmallVector<Constant *, 4> DebugOps;
+  for (unsigned I = 0; I < DebugFields; ++I)
+    DebugOps.push_back(Init->getOperand(I));
+
+  auto *DebugGV = new GlobalVariable(
+      *ReflectGV.getParent(), DebugST, false, GlobalValue::InternalLinkage,
+      ConstantStruct::get(DebugST, DebugOps),
+      ReflectGV.getName() + ".dbg");
+  DebugGV->setAlignment(ReflectGV.getAlign());
+  // Inherit CFileReflect + section so pointer fields are relocated to
+  // DataRefOffset64-relative offsets by CJMetadata.
+  DebugGV->addAttribute("CFileReflect");
+  if (ReflectGV.hasSection())
+    DebugGV->setSection(ReflectGV.getSection());
+  return DebugGV;
+}
+
+bool rewriteReflectionOperand(GlobalVariable &GV, unsigned FlagIdx,
+                              unsigned ReflectionIdx) {
+  if (!GV.hasInitializer())
+    return false;
+
+  auto *Init = dyn_cast<ConstantStruct>(GV.getInitializer());
+  if (!Init || Init->getNumOperands() <= ReflectionIdx)
+    return false;
+
+  auto *Flag = cast<ConstantInt>(Init->getOperand(FlagIdx));
+  if (!(Flag->getZExtValue() & TF_REFLECTION))
+    return false; // already off
+
+  // Try to downgrade the reflect struct to a minimal .dbg global.
+  Constant *NewReflectOp = nullptr;
+  auto *ReflectOp = Init->getOperand(ReflectionIdx);
+  if (!ReflectOp->isNullValue()) {
+    auto *CE = dyn_cast<ConstantExpr>(ReflectOp);
+    if (!CE || CE->getOpcode() != Instruction::BitCast)
+      return false;
+
+    auto *ReflectGV = dyn_cast<GlobalVariable>(CE->getOperand(0));
+    if (!ReflectGV)
+      return false;
+
+    // Read type kind from TypeInfo/TypeTemplate operand[1].
+    bool IsEnum = false;
+    if (Init->getNumOperands() > 1)
+      if (auto *TypeCI = dyn_cast<ConstantInt>(Init->getOperand(1)))
+        IsEnum = (TypeCI->getSExtValue() == TK_ENUM ||
+                  TypeCI->getSExtValue() == TK_TEMP_ENUM);
+
+    auto *DebugGV = downgradeReflectGlobal(*ReflectGV, IsEnum);
+    if (!DebugGV)
+      return false;
+
+    NewReflectOp = ConstantExpr::getBitCast(DebugGV, CE->getType());
+  }
+
+  if (!NewReflectOp)
+    return false;
+
+  // Downgrade succeeded: clear flag + replace pointer.
+  SmallVector<Constant *, 0> Ops;
+  Ops.reserve(Init->getNumOperands());
+  for (unsigned I = 0; I < Init->getNumOperands(); ++I)
+    Ops.push_back(cast<Constant>(Init->getOperand(I)));
+  Ops[FlagIdx] =
+      ConstantInt::get(Flag->getType(), Flag->getZExtValue() & ~TF_REFLECTION);
+  Ops[ReflectionIdx] = NewReflectOp;
+  GV.setInitializer(ConstantStruct::get(Init->getType(), Ops));
+  return true;
+}
+
+bool rewritePackageInfoPayload(GlobalVariable &GV) {
+  if (!GV.hasInitializer() || !GV.getName().endswith(".packageInfo"))
+    return false;
+
+  auto *Init = dyn_cast<ConstantStruct>(GV.getInitializer());
+  if (Init == nullptr || Init->getNumOperands() < FPT_PTRS)
+    return false;
+
+  bool Changed = false;
+  SmallVector<Constant *, 0> Ops;
+  Ops.reserve(Init->getNumOperands());
+  for (unsigned I = 0; I < Init->getNumOperands(); ++I) {
+    Ops.push_back(cast<Constant>(Init->getOperand(I)));
+  }
+
+  auto rewriteCount = [&](unsigned Idx) {
+    auto *Count = dyn_cast<ConstantInt>(Init->getOperand(Idx));
+    if (Count == nullptr)
+      return;
+    if (!Count->isZero()) {
+      Ops[Idx] = ConstantInt::get(Count->getType(), 0);
+      Changed = true;
+    }
+  };
+
+  rewriteCount(FPT_TYPE_INFO_CNT);
+  rewriteCount(FPT_TYPE_TEMPLATE_CNT);
+  rewriteCount(FPT_GLOBAL_FUNC_CNT);
+  rewriteCount(FPT_GLOBAL_VAR_CNT);
+
+  for (unsigned I = FPT_PTRS; I < Init->getNumOperands(); ++I) {
+    auto *PtrTy = dyn_cast<PointerType>(Init->getOperand(I)->getType());
+    if (PtrTy == nullptr)
+      continue;
+    if (!Init->getOperand(I)->isNullValue()) {
+      Ops[I] = ConstantPointerNull::get(PtrTy);
+      Changed = true;
+    }
+  }
+
+  if (!Changed)
+    return false;
+
+  GV.setInitializer(ConstantStruct::get(Init->getType(), Ops));
+  return true;
+}
+} // namespace
+
+PreservedAnalyses
+CJDisableImportLibReflection::run(Module &M, ModuleAnalysisManager &) const {
+  bool Changed = false;
+  for (auto &GV : M.globals()) {
+    if (GV.hasAttribute(CFileKlassStr)) {
+      Changed |= rewriteReflectionOperand(GV, CIT_FLAG, CIT_REFLECTION);
+    } else if (GV.hasAttribute("cj_tt")) {
+      Changed |= rewriteReflectionOperand(GV, TT_FLAG, TT_REFLECTION);
+    } else if (GV.hasAttribute("CFileReflect")) {
+      Changed |= rewritePackageInfoPayload(GV);
+    }
+  }
+
+  if (Changed) {
+    return PreservedAnalyses::none();
+  }
+  return PreservedAnalyses::all();
+}
+
+namespace {
 class CJFillMetadataLegacyPass : public ModulePass {
 public:
   static char ID;
