@@ -201,6 +201,7 @@ extern cl::opt<int> MaxRecursionInl;
 extern cl::opt<int> CountedLoopTripWidth;
 extern cl::opt<bool> CangjieLTOPreOpt;
 extern cl::opt<bool> EnableCJPtrAuthBackwardCFI;
+extern cl::opt<bool> DisableCJLTOReflection;
 
 PipelineTuningOptions::PipelineTuningOptions() {
   LoopInterleaving = true;
@@ -1483,6 +1484,11 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
   else if (LTOPreLink)
     LTOPhase = ThinOrFullLTOPhase::FullLTOPreLink;
 
+  if (CJPipeline && DisableCJLTOReflection) {
+    MPM.addPass(CJDisableImportLibReflection());
+    MPM.addPass(GlobalDCEPass());
+  }
+
   // Add the core simplification pipeline.
   MPM.addPass(buildModuleSimplificationPipeline(Level, LTOPhase));
 
@@ -1684,6 +1690,11 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
                       /* IsCS */ false, PGOOpt->ProfileFile,
                       PGOOpt->ProfileRemappingFile,
                       ThinOrFullLTOPhase::FullLTOPostLink);
+  }
+
+  if (CJPipeline && DisableCJLTOReflection) {
+    MPM.addPass(CJDisableImportLibReflection());
+    MPM.addPass(GlobalDCEPass());
   }
 
   if (PGOOpt && PGOOpt->Action == PGOOptions::SampleUse) {

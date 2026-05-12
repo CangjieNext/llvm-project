@@ -63,6 +63,12 @@ CJMetadataInfo::CJMetadataInfo(AsmPrinter &AP, StackMaps &SM)
     : AP(AP), SM(SM), OS(*AP.OutStreamer), Context(AP.OutContext),
       TT(AP.TM.getTargetTriple()) {}
 
+bool CJMetadataInfo::shouldSkipReflectMetadata() const {
+  if (M == nullptr)
+    return false;
+  return M->getModuleFlag("cj.disable_reflect_codegen_metadata") != nullptr;
+}
+
 void processStructTypeOffsets(StructType *ST, SmallVectorImpl<uint64_t> &Refs,
                               const DataLayout &DL, const GCStrategy *GS,
                               uint64_t BaseOff) {
@@ -125,6 +131,8 @@ void CJMetadataInfo::recordGlobalVariable(const GlobalVariable *GV) {
 
   auto HandleGVAttribute = [this](const GlobalVariable *GV) -> void {
     if (GV->hasAttribute("CFileReflect")) {
+      if (shouldSkipReflectMetadata())
+        return;
       if (GV->getName().endswith(".packageInfo")) {
         ReflectPkgInfoGV.push_back(GV);
       } else if (GV->getName().endswith(".reflectStr")) {
