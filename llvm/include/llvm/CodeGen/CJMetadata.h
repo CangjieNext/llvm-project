@@ -108,6 +108,7 @@ private:
   void recordMetadata();
   void recordGlobalVariable(const GlobalVariable *GV);
   void recordKlass(const GlobalVariable *GV);
+  bool shouldSkipReflectMetadata() const;
 
   uint64_t addMangledStr(std::string &Str);
   void splitStr(std::string &Str, std::vector<uint64_t> &CompressedCode);
