@@ -1628,8 +1628,10 @@ createBitcodeSymbol(Symbol *&sym, const std::vector<bool> &keptComdats,
   } else {
     Defined newSym(&f, StringRef(), binding, visibility, type, 0, 0, nullptr);
     if (!f.ExportSymbols || objSym.canBeOmittedFromSymbolTable()) {
-      newSym.visibility = STV_HIDDEN;
       newSym.exportDynamic = false;
+      if (!objSym.isUsed()){
+        newSym.visibility = STV_HIDDEN;
+      }
     }
     sym->resolve(newSym);
   }
