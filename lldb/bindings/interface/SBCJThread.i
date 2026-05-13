@@ -117,6 +117,28 @@ public:
     or thread-stop-format (stop_format = true).") GetDescription;
     bool GetDescription(lldb::SBStream &description, bool stop_format) const;
 
+    %feature("docstring", "
+    Returns the stop reason for this cjthread.
+    See also GetStopReasonDataAtIndex().") GetStopReason;
+    lldb::StopReason
+    GetStopReason ();
+
+    %feature("docstring", "
+    Returns the cjthread ID which maps to the system specific cjthread identifier.") GetCJThreadID;
+    lldb::tid_t
+    GetCJThreadID () const;
+
+    %feature("docstring", "
+    Returns the host OS thread ID (tid) that this cjthread is currently bound to.
+    When the cjthread state is 'running', it is scheduled on this OS thread.") GetHostThreadID;
+    lldb::tid_t
+    GetHostThreadID () const;
+
+    %feature("docstring", "
+    Returns the name of this cjthread.") GetName;
+    const char *
+    GetName () const;
+
     bool
     operator == (const lldb::SBCJThread &rhs) const;
 

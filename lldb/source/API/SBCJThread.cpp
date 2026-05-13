@@ -492,11 +492,79 @@ bool SBCJThread::GetDescription(SBStream &description, bool stop_format) const {
   ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
 
   if (exe_ctx.HasCJThreadScope()) {
-    exe_ctx.GetThreadPtr()->DumpUsingSettingsFormat(strm,
+    exe_ctx.GetCJThreadPtr()->DumpUsingSettingsFormat(strm,
                                                     LLDB_INVALID_THREAD_ID,
                                                     stop_format);
   } else
     strm.PutCString("No value");
 
   return true;
+}
+
+lldb::StopReason SBCJThread::GetStopReason() {
+  LLDB_INSTRUMENT_VA(this);
+
+  StopReason reason = eStopReasonInvalid;
+  std::unique_lock<std::recursive_mutex> lock;
+  ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
+
+  if (exe_ctx.HasCJThreadScope()) {
+    Process::StopLocker stop_locker;
+    if (stop_locker.TryLock(&exe_ctx.GetProcessPtr()->GetRunLock())) {
+      return exe_ctx.GetCJThreadPtr()->GetStopReason();
+    }
+  }
+
+  return reason;
+}
+
+lldb::tid_t SBCJThread::GetCJThreadID() const {
+  LLDB_INSTRUMENT_VA(this);
+
+  lldb::tid_t cjthread_id = LLDB_INVALID_THREAD_ID;
+  std::unique_lock<std::recursive_mutex> lock;
+  ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
+
+  if (exe_ctx.HasCJThreadScope()) {
+    CJThread *cjthread = exe_ctx.GetCJThreadPtr();
+    if (cjthread) {
+      cjthread_id = cjthread->GetCJThreadID();
+    }
+  }
+
+  return cjthread_id;
+}
+
+lldb::tid_t SBCJThread::GetHostThreadID() const {
+  LLDB_INSTRUMENT_VA(this);
+
+  lldb::tid_t host_thread_id = LLDB_INVALID_THREAD_ID;
+  std::unique_lock<std::recursive_mutex> lock;
+  ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
+
+  if (exe_ctx.HasCJThreadScope()) {
+    CJThread *cjthread = exe_ctx.GetCJThreadPtr();
+    if (cjthread) {
+      host_thread_id = cjthread->GetHostThreadID();
+    }
+  }
+
+  return host_thread_id;
+}
+
+const char *SBCJThread::GetName() const {
+  LLDB_INSTRUMENT_VA(this);
+
+  const char *name = nullptr;
+  std::unique_lock<std::recursive_mutex> lock;
+  ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
+
+  if (exe_ctx.HasCJThreadScope()) {
+    Process::StopLocker stop_locker;
+    if (stop_locker.TryLock(&exe_ctx.GetProcessPtr()->GetRunLock())) {
+      name = exe_ctx.GetCJThreadPtr()->GetName();
+    }
+  }
+
+  return name;
 }

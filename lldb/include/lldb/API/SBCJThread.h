@@ -64,6 +64,14 @@ public:
 
   bool GetDescription(SBStream &description, bool stop_format) const;
 
+  lldb::StopReason GetStopReason();
+
+  lldb::tid_t GetCJThreadID() const;
+
+  lldb::tid_t GetHostThreadID() const;
+
+  const char *GetName() const;
+
   const lldb::SBCJThread &operator=(const lldb::SBCJThread &rhs);
 
   bool operator==(const lldb::SBCJThread &rhs) const;

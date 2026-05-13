@@ -1293,7 +1293,7 @@ SBCJThread SBProcess::GetCJThreadAtIndex(size_t index) {
     const bool can_update = stop_locker.TryLock(&process_sp->GetRunLock());
     std::lock_guard<std::recursive_mutex> guard(
         process_sp->GetTarget().GetAPIMutex());
-    thread_sp = process_sp->GetThreadList().GetThreadAtIndex(index, can_update);
+    thread_sp = process_sp->GetCJThreadList().GetThreadAtIndex(index, can_update);
     sb_cjthread.SetCJThread(std::dynamic_pointer_cast<lldb_private::CJThread>(thread_sp));
   }
 
