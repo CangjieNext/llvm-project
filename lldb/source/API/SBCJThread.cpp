@@ -500,3 +500,67 @@ bool SBCJThread::GetDescription(SBStream &description, bool stop_format) const {
 
   return true;
 }
+
+lldb::StopReason SBCJThread::GetStopReason() {
+  LLDB_INSTRUMENT_VA(this);
+
+  StopReason reason = eStopReasonInvalid;
+  std::unique_lock<std::recursive_mutex> lock;
+  ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
+
+  if (exe_ctx.HasCJThreadScope()) {
+    Process *process = exe_ctx.GetProcessPtr();
+    if (process) {
+      Process::StopLocker stop_locker;
+      if (stop_locker.TryLock(&process->GetRunLock())) {
+        return exe_ctx.GetCJThreadPtr()->GetStopReason();
+      }
+    }
+  }
+  return reason;
+}
+
+lldb::tid_t SBCJThread::GetCJThreadID() const {
+  LLDB_INSTRUMENT_VA(this);
+
+  lldb::tid_t tid = LLDB_INVALID_THREAD_ID;
+  std::unique_lock<std::recursive_mutex> lock;
+  ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
+
+  if (exe_ctx.HasCJThreadScope()) {
+    CJThread *cjthread = exe_ctx.GetCJThreadPtr();
+    if (cjthread)
+      tid = cjthread->GetCJThreadID();
+  }
+  return tid;
+}
+
+lldb::tid_t SBCJThread::GetHostThreadID() const {
+  LLDB_INSTRUMENT_VA(this);
+
+  lldb::tid_t tid = LLDB_INVALID_THREAD_ID;
+  std::unique_lock<std::recursive_mutex> lock;
+  ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
+
+  if (exe_ctx.HasCJThreadScope()) {
+    CJThread *cjthread = exe_ctx.GetCJThreadPtr();
+    if (cjthread)
+      tid = cjthread->GetHostThreadID();
+  }
+  return tid;
+}
+
+const char *SBCJThread::GetName() const {
+  LLDB_INSTRUMENT_VA(this);
+
+  const char *name = nullptr;
+  std::unique_lock<std::recursive_mutex> lock;
+  ExecutionContext exe_ctx(m_opaque_sp.get(), lock);
+
+  if (exe_ctx.HasCJThreadScope()) {
+    CJThread *cjthread = exe_ctx.GetCJThreadPtr();
+    if (cjthread)
+      name = cjthread->GetName();
+  }
+  return name;
+}
