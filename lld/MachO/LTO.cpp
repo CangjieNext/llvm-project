@@ -48,6 +48,8 @@ static Optional<StringRef> getBitcodePackageName(const BitcodeFile &file) {
 static bool shouldKeepVisibleForPkg(const BitcodeFile &file) {
   if (config->hideAllVisiblePkgs || config->visiblePkgs.empty())
     return false;
+  if (!config->hasMatchedVisiblePkg)
+    return true;
   Optional<StringRef> pkgName = getBitcodePackageName(file);
   return pkgName && config->visiblePkgs.count(*pkgName);
 }

@@ -174,6 +174,7 @@ struct Configuration {
   std::vector<Symbol *> explicitUndefineds;
   llvm::StringSet<> explicitDynamicLookups;
   llvm::StringSet<> visiblePkgs;
+  bool hasMatchedVisiblePkg = false;
   bool hideAllVisiblePkgs = false;
   // There are typically few custom sectionAlignments or segmentProtections,
   // so use a vector instead of a map.

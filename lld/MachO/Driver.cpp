@@ -298,6 +298,9 @@ static bool validateVisiblePkgModules() {
             "' for --visible-pkgs, expected <split-index>-<package-name>");
       return false;
     }
+    if (config->visiblePkgs.count(*pkgName) != 0) {
+      config->hasMatchedVisiblePkg = true;
+    }
   }
   return true;
 }
