@@ -1658,6 +1658,18 @@ static void genStackMapInfo(CompressedInfo &Data,
   }
 }
 
+static bool isEmptyStackMapItemIgnoringLineNumber(
+    const CompressedInfo::IdxItem &IdxInfo) {
+  if (IdxInfo.RegIdxPlusOne != 0 || IdxInfo.SlotIdxPlusOne != 0 ||
+      IdxInfo.DerivedInfoStartIdx != 0)
+    return false;
+
+  if (!EnableStackGrow)
+    return true;
+
+  return IdxInfo.SPRegIdxPlusOne == 0 && IdxInfo.SPSlotIdxPlusOne == 0;
+}
+
 static void adjustSlotBaseOffsets(CompressedInfo &Data,
                                   MaxWidthOfRefInfo &WidthInfo,
                                   int64_t Adjustment) {
@@ -1690,10 +1702,15 @@ void StackMaps::prepareCompressedData(CompressedInfo &Data,
         std::make_pair(CSI.CSOffsetExpr, CompressedInfo::IdxItem()));
     genStackMapInfo(Data, CSI, WidthInfo);
 
+    CompressedInfo::IdxItem &IdxInfo = Data.StackMapItem.back().second;
+    if (isEmptyStackMapItemIgnoringLineNumber(IdxInfo)) {
+      Data.StackMapItem.pop_back();
+      continue;
+    }
+
     CompressedInfo::LineNumberItem LineNumber{CSI.LineNumber};
     MaxLN = (MaxLN > LineNumber.LN) ? MaxLN : LineNumber.LN;
-    Data.StackMapItem.back().second.LNIdxPlusOne =
-        Data.LNItems.getOrInsertIndex(LineNumber);
+    IdxInfo.LNIdxPlusOne = Data.LNItems.getOrInsertIndex(LineNumber);
   }
 
   adjustSlotBaseOffsets(Data, WidthInfo, FnInfo.SlotBaseOffsetAdjustment);
