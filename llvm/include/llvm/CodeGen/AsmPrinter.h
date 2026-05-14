@@ -256,6 +256,8 @@ protected:
 
   int64_t getAllocBufferOffsetInCJTLS() const;
   int64_t getMutatorOffsetInCJTLS() const;
+  int64_t getEncodedGCPhaseOffsetInCJTLS() const;
+  int64_t getMSAllocBufferOffsetInCJTLS() const;
   int64_t getProtectAddrOffsetInCJTLS() const;
   int64_t getSafepointCheckAddrOffsetInCJTLS() const;
   int64_t getCJThreadOffsetInCJTLS() const;

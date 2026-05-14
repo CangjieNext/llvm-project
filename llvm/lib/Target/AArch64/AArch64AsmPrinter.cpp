@@ -77,6 +77,8 @@ namespace {
 
 constexpr const char MSGCFastSizeClassAttr[] = "cj-msgc-sizeclass";
 constexpr const char MSGCFastSlotSizeAttr[] = "cj-msgc-slotsize";
+// Marks a wrapper that uses a runtime table to determine the size class.
+constexpr const char MSGCFastDynamicAttr[] = "cj-msgc-dynamic";
 constexpr uint8_t MSGCGCPhaseIdle = 1;
 constexpr uint8_t MSGCGCPhaseSweep = 23;
 constexpr uint8_t MSGCGCPhaseMSMarkSetup = 20;
@@ -115,6 +117,10 @@ static bool getMSGCFastAllocConfig(const Function &Wrapper,
   Config.SizeClass = static_cast<uint8_t>(SizeClass);
   Config.SlotSize = static_cast<uint16_t>(SlotSize);
   return true;
+}
+
+static bool isMSGCDynamicFastPath(const Function &Wrapper) {
+  return Wrapper.getFnAttribute(MSGCFastDynamicAttr).isStringAttribute();
 }
 
 class AArch64AsmPrinter : public AsmPrinter {
@@ -291,6 +297,10 @@ private:
   void emitMccNewObjectForCopyGC(const ParamForEmitNewObj &Param);
   void emitMccNewObjectForMSGC(const ParamForEmitNewObj &Param,
                                const MSGCFastAllocConfig &Config);
+  void emitMccNewObjectForMSGCDynamic(const ParamForEmitNewObj &Param);
+  void emitMSGCSizeClassTables();
+  bool MSGCDynamicTablesNeeded = false;
+  bool doFinalization(Module &M) override;
   static bool isCangjieArrayAllocFunction(StringRef FuncName);
   bool shouldEmitMSGCArrayFastPath(const MachineInstr *MI,
                                    const MachineOperand &MOSym) const;
@@ -2559,10 +2569,564 @@ void AArch64AsmPrinter::emitMccNewObjectFastPath(const MachineInstr *MI,
   MSGCFastAllocConfig Config;
   if (getMSGCFastAllocConfig(MI->getMF()->getFunction(), Config)) {
     emitMccNewObjectForMSGC(Param, Config);
+  } else if (isMSGCDynamicFastPath(MI->getMF()->getFunction())) {
+    emitMccNewObjectForMSGCDynamic(Param);
   } else {
-    emitMccNewObjectForCopyGC(Param);
+    // If this is a regular Cangjie function (no MSGC wrapper attributes) but
+    // we are in MSGC mode (detected by the presence of any MSGC dynamic wrapper
+    // function created by doNewFastPath), use the MSGC dynamic fast path.
+    // Without this, the CopyGC inline fast path reads tlRegion_=NullRegion() and
+    // always falls back to the slow path, causing 200M+ slow alloc calls at O0.
+    const Module *M = MI->getMF()->getFunction().getParent();
+    bool InMSGCMode = (M != nullptr) &&
+                      (M->getFunction("CJ_MCC_NewObjectFast_MSGC_dynamic") != nullptr ||
+                       M->getFunction("CJ_MCC_NewFinalizerFast_MSGC_dynamic") != nullptr);
+    if (InMSGCMode) {
+      emitMccNewObjectForMSGCDynamic(Param);
+    } else {
+      emitMccNewObjectForCopyGC(Param);
+    }
   }
   SM.recordCJStackMap(*MI);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MSGC dynamic-size fast path: per-module .rodata tables and emitter
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Size classes (must match CJBarrierLowering.cpp::MSGCSizeClasses).
+static const uint32_t DynMSGCSizeClasses[] = {
+    8,     16,    24,    32,    48,    64,    80,    96,    112,
+    128,   160,   192,   224,   256,   320,   384,   448,   512,
+    640,   768,   896,   1024,  1280,  1536,  1792,  2048,  2560,
+    3072,  3584,  4096,  5120,  6144,  8192,  10240, 12288, 16384,
+};
+static constexpr int DynMSGCNumClasses =
+    sizeof(DynMSGCSizeClasses) / sizeof(DynMSGCSizeClasses[0]);
+static constexpr uint32_t DynMSGCMaxSizeDiv8 = 16384 / 8; // 2048
+
+void AArch64AsmPrinter::emitMSGCSizeClassTables() {
+  MCSection *ROSection = getObjFileLowering().getReadOnlySection();
+  OutStreamer->switchSection(ROSection);
+
+  // Table 1 – SizeClassTable[ceil(size/8)] → SizeClass (0..36) or 0xFF.
+  // The inline asm uses index = (size+7)/8 = ceil(size/8), so table[i] is the
+  // smallest class c where DynMSGCSizeClasses[c] >= i*8.
+  MCSymbol *SCTSym =
+      OutContext.getOrCreateSymbol("lCJMSGCSizeClassTable");
+  OutStreamer->emitLabel(SCTSym);
+  for (uint32_t i = 0; i <= DynMSGCMaxSizeDiv8; ++i) {
+    uint8_t cls = 0xFF;
+    uint32_t threshold = i * 8;
+    if (threshold > 0) {
+      for (int c = 0; c < DynMSGCNumClasses; ++c) {
+        if (threshold <= DynMSGCSizeClasses[c]) {
+          cls = static_cast<uint8_t>(c);
+          break;
+        }
+      }
+    }
+    OutStreamer->emitInt8(cls);
+  }
+  // Padding to 2-byte-align the halfword table that follows (2049 bytes → odd).
+  OutStreamer->emitInt8(0);
+
+  // Table 2 – SlotSizeTable[SizeClass] → slot size (uint16_t).
+  MCSymbol *SSTSym =
+      OutContext.getOrCreateSymbol("lCJMSGCSlotSizeTable");
+  OutStreamer->emitLabel(SSTSym);
+  for (int c = 0; c < DynMSGCNumClasses; ++c) {
+    OutStreamer->emitInt16(DynMSGCSizeClasses[c]);
+  }
+}
+
+bool AArch64AsmPrinter::doFinalization(Module &M) {
+  if (MSGCDynamicTablesNeeded)
+    emitMSGCSizeClassTables();
+  return AsmPrinter::doFinalization(M);
+}
+
+void AArch64AsmPrinter::emitMccNewObjectForMSGCDynamic(
+    const ParamForEmitNewObj &Param) {
+  using namespace AArch64;
+
+  MSGCDynamicTablesNeeded = true;
+
+  MCSymbol *LFastPath =
+      OutContext.createTempSymbol("NewObjMSGCDynFast", true);
+  MCSymbol *LBump = OutContext.createTempSymbol("NewObjMSGCDynBump", true);
+  MCSymbol *LSlow = OutContext.createTempSymbol("NewObjMSGCDynSlow", true);
+  MCSymbol *LPartialRetry =
+      OutContext.createTempSymbol("NewObjMSGCDynPRetry", true);
+  MCSymbol *LPartialRepair =
+      OutContext.createTempSymbol("NewObjMSGCDynPRepair", true);
+  MCSymbol *LPartialSummaryDone =
+      OutContext.createTempSymbol("NewObjMSGCDynPSumDone", true);
+
+  const MCSymbolRefExpr *BumpExpr =
+      MCSymbolRefExpr::create(LBump, OutContext);
+  const MCSymbolRefExpr *SlowExpr =
+      MCSymbolRefExpr::create(LSlow, OutContext);
+  const MCSymbolRefExpr *PartialRepairExpr =
+      MCSymbolRefExpr::create(LPartialRepair, OutContext);
+  const MCSymbolRefExpr *PartialSummaryDoneExpr =
+      MCSymbolRefExpr::create(LPartialSummaryDone, OutContext);
+  const MCSymbolRefExpr *PartialRetryExpr =
+      MCSymbolRefExpr::create(LPartialRetry, OutContext);
+
+  MCSymbol *SizeClassTableSym =
+      OutContext.getOrCreateSymbol("lCJMSGCSizeClassTable");
+  MCSymbol *SlotSizeTableSym =
+      OutContext.getOrCreateSymbol("lCJMSGCSlotSizeTable");
+
+  // Helper: emit adrp + add pair to materialise a module-local .rodata address.
+  auto EmitAdrpAdd = [&](unsigned DstReg, MCSymbol *Sym) {
+    MCInst AdrpInst;
+    AdrpInst.setOpcode(ADRP);
+    AdrpInst.addOperand(MCOperand::createReg(DstReg));
+    AdrpInst.addOperand(MCOperand::createExpr(MCSymbolRefExpr::create(
+        Sym, MCSymbolRefExpr::VK_PAGE, OutContext)));
+    EmitToStreamer(*OutStreamer, AdrpInst);
+
+    MCInst AddInst;
+    AddInst.setOpcode(ADDXri);
+    AddInst.addOperand(MCOperand::createReg(DstReg));
+    AddInst.addOperand(MCOperand::createReg(DstReg));
+    AddInst.addOperand(MCOperand::createExpr(MCSymbolRefExpr::create(
+        Sym, MCSymbolRefExpr::VK_PAGEOFF, OutContext)));
+    AddInst.addOperand(MCOperand::createImm(0)); // shift = 0
+    EmitToStreamer(*OutStreamer, AddInst);
+  };
+
+  // EmitMarkNewObjectIfNeeded – dynamic version.
+  // Identical to the static version except the BUMP (!HasSlotIdx) branch:
+  //   static: movz X14, #SlotSize
+  //   dynamic: orr  X14, XZR, X15   (X15 = SlotSize loaded from table)
+  auto EmitMarkNewObjectIfNeeded = [&](unsigned ObjReg, bool HasSlotIdx) {
+    MCSymbol *LMarkObject =
+        OutContext.createTempSymbol("NewObjMSGCDynMark", true);
+    MCSymbol *LMarkLoop =
+        OutContext.createTempSymbol("NewObjMSGCDynMLoop", true);
+    MCSymbol *LMarkDone =
+        OutContext.createTempSymbol("NewObjMSGCDynMDone", true);
+    const MCSymbolRefExpr *MarkObjectExpr =
+        MCSymbolRefExpr::create(LMarkObject, OutContext);
+    const MCSymbolRefExpr *MarkLoopExpr =
+        MCSymbolRefExpr::create(LMarkLoop, OutContext);
+    const MCSymbolRefExpr *MarkDoneExpr =
+        MCSymbolRefExpr::create(LMarkDone, OutContext);
+
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(LDRBBui)
+                      .addReg(W8)
+                      .addReg(X28)
+                      .addImm(getEncodedGCPhaseOffsetInCJTLS()));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(SUBSWri)
+                      .addReg(WZR)
+                      .addReg(W8)
+                      .addImm(MSGCGCPhaseMSMarkSetup)
+                      .addImm(0));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(Bcc)
+                      .addImm(AArch64CC::EQ)
+                      .addExpr(MarkObjectExpr));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(SUBSWri)
+                      .addReg(WZR)
+                      .addReg(W8)
+                      .addImm(MSGCGCPhaseMSConcurrentMark)
+                      .addImm(0));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(Bcc)
+                      .addImm(AArch64CC::EQ)
+                      .addExpr(MarkObjectExpr));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(SUBSWri)
+                      .addReg(WZR)
+                      .addReg(W8)
+                      .addImm(MSGCGCPhaseMSMarkTermination)
+                      .addImm(0));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(Bcc)
+                      .addImm(AArch64CC::NE)
+                      .addExpr(MarkDoneExpr));
+
+    OutStreamer->emitLabel(LMarkObject);
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(LDRXui)
+                      .addReg(X11)
+                      .addReg(X10)
+                      .addImm(MSRegionInfoMarkBitmapOffset / 8));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(CBZX).addReg(X11).addExpr(MarkDoneExpr));
+    if (HasSlotIdx) {
+      // PARTIAL path: slot index already in X13.
+      EmitToStreamer(*OutStreamer,
+                    MCInstBuilder(ORRXrs)
+                        .addReg(X12)
+                        .addReg(XZR)
+                        .addReg(X13)
+                        .addImm(0));
+    } else {
+      // BUMP path: compute slotIdx = (obj - regionStart) / SlotSize.
+      EmitToStreamer(*OutStreamer,
+                    MCInstBuilder(LDRXui).addReg(X14).addReg(X10).addImm(1));
+      EmitToStreamer(*OutStreamer,
+                    MCInstBuilder(MOVZXi).addReg(X17).addImm(MSRegionSize).addImm(0));
+      EmitToStreamer(*OutStreamer,
+                    MCInstBuilder(SUBXrs)
+                        .addReg(X14)
+                        .addReg(X14)
+                        .addReg(X17)
+                        .addImm(0));
+      EmitToStreamer(*OutStreamer,
+                    MCInstBuilder(SUBXrs)
+                        .addReg(X12)
+                        .addReg(ObjReg)
+                        .addReg(X14)
+                        .addImm(0));
+      // Dynamic: use X15 (SlotSize register) instead of movz immediate.
+      EmitToStreamer(*OutStreamer,
+                    MCInstBuilder(ORRXrs)
+                        .addReg(X14)
+                        .addReg(XZR)
+                        .addReg(X15)
+                        .addImm(0));
+      EmitToStreamer(*OutStreamer,
+                    MCInstBuilder(UDIVXr)
+                        .addReg(X12)
+                        .addReg(X12)
+                        .addReg(X14));
+    }
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(ANDXri)
+                      .addReg(X13)
+                      .addReg(X12)
+                      .addImm(AArch64_AM::encodeLogicalImmediate(63, 64)));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(MOVZXi).addReg(X17).addImm(6).addImm(0));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(LSRVXr).addReg(X12).addReg(X12).addReg(X17));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(ADDXrs)
+                      .addReg(X11)
+                      .addReg(X11)
+                      .addReg(X12)
+                      .addImm(3));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(MOVZXi).addReg(X14).addImm(1).addImm(0));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(LSLVXr).addReg(X14).addReg(X14).addReg(X13));
+
+    OutStreamer->emitLabel(LMarkLoop);
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(LDXRX).addReg(X16).addReg(X11));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(ORRXrs)
+                      .addReg(X16)
+                      .addReg(X16)
+                      .addReg(X14)
+                      .addImm(0));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(STXRX).addReg(W17).addReg(X16).addReg(X11));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(CBNZW).addReg(W17).addExpr(MarkLoopExpr));
+    OutStreamer->emitLabel(LMarkDone);
+  };
+
+  auto EmitFinalizerCreated = [&]() {
+    if (!Param.FastFuncName.equals("CJ_MCC_NewFinalizerFast"))
+      return;
+    MCOperand FinalizerMC = setGAAndLower(
+        Param.MOSym,
+        Param.MI->getMF()->getFunction().getParent()->getFunction(
+            "CJ_MCC_OnFinalizerCreated"));
+    EmitToStreamer(*OutStreamer,
+                  MCInstBuilder(Param.Opcode).addOperand(FinalizerMC));
+  };
+
+  // ─── Fast path entry ────────────────────────────────────────────────────────
+  OutStreamer->emitLabel(LFastPath);
+
+  // 1. Safepoint check.
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRXui)
+                    .addReg(X17)
+                    .addReg(X28)
+                    .addImm(getSafepointCheckAddrOffsetInCJTLS() / 8));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(CBNZX).addReg(X17).addExpr(SlowExpr));
+
+  // 2. Size == 0 → slow.
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(CBZX).addReg(X1).addExpr(SlowExpr));
+
+  // 3. Size > 16384 → slow.  (16384 = #4, lsl #12)
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(SUBSXri)
+                    .addReg(XZR)
+                    .addReg(X1)
+                    .addImm(4)
+                    .addImm(12));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(Bcc).addImm(AArch64CC::HI).addExpr(SlowExpr));
+
+  // 4. Get AllocBufferMS.
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRXui)
+                    .addReg(X9)
+                    .addReg(X28)
+                    .addImm(getMSAllocBufferOffsetInCJTLS() / 8));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(CBZX).addReg(X9).addExpr(SlowExpr));
+
+  // 5. X11 = SizeClassTable[ceil(size/8)].
+  //    ceil(size/8) = (size + 7) >> 3.
+  EmitAdrpAdd(X16, SizeClassTableSym);
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(ADDXri).addReg(X11).addReg(X1).addImm(7).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(UBFMXri).addReg(X11).addReg(X11).addImm(3).addImm(63));
+  // ldrb w11, [x16, x11]  (x11 used as both index and dst – read before write)
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRBBroX)
+                    .addReg(W11)
+                    .addReg(X16)
+                    .addReg(X11)
+                    .addImm(0)
+                    .addImm(0));
+  // 0xFF marks invalid / no-class (size 0 or gap).
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(SUBSWri).addReg(WZR).addReg(W11).addImm(0xFF).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(Bcc).addImm(AArch64CC::EQ).addExpr(SlowExpr));
+
+  // 6. X15 = SlotSizeTable[SizeClass].  ldrh w15, [x16, x11, lsl #1]
+  EmitAdrpAdd(X16, SlotSizeTableSym);
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRHHroX)
+                    .addReg(W15)
+                    .addReg(X16)
+                    .addReg(X11)
+                    .addImm(0)
+                    .addImm(1));
+
+  // 7. X10 = activeRegions_[SizeClass].
+  //    add x16, x9, #8   (= &activeRegions_[0])
+  //    ldr x10, [x16, x11, lsl #3]
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(ADDXri)
+                    .addReg(X16)
+                    .addReg(X9)
+                    .addImm(MSGCActiveRegionsOffsetInAllocBuffer)
+                    .addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRXroX)
+                    .addReg(X10)
+                    .addReg(X16)
+                    .addReg(X11)
+                    .addImm(0)
+                    .addImm(1));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(CBZX).addReg(X10).addExpr(SlowExpr));
+
+  // 8. regionType check.
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRBBui)
+                    .addReg(W11)
+                    .addReg(X10)
+                    .addImm(MSRegionInfoRegionTypeOffset));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(SUBSWri)
+                    .addReg(WZR)
+                    .addReg(W11)
+                    .addImm(MSGCRegionBump)
+                    .addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(Bcc).addImm(AArch64CC::EQ).addExpr(BumpExpr));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(SUBSWri)
+                    .addReg(WZR)
+                    .addReg(W11)
+                    .addImm(MSGCRegionPartial)
+                    .addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(Bcc).addImm(AArch64CC::NE).addExpr(SlowExpr));
+
+  // ─── PARTIAL path ───────────────────────────────────────────────────────────
+  OutStreamer->emitLabel(LPartialRetry);
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRXui)
+                    .addReg(X12)
+                    .addReg(X10)
+                    .addImm(MSRegionInfoReservedOffset / 8));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(CBZX).addReg(X12).addExpr(SlowExpr));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(RBITXr).addReg(X13).addReg(X12));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(CLZXr).addReg(X13).addReg(X13));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRXui)
+                    .addReg(X14)
+                    .addReg(X10)
+                    .addImm(MSRegionInfoAllocBitmapOffset / 8));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(ADDXrs)
+                    .addReg(X14)
+                    .addReg(X14)
+                    .addReg(X13)
+                    .addImm(3));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRXui).addReg(X16).addReg(X14).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(CBZX).addReg(X16).addExpr(PartialRepairExpr));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(RBITXr).addReg(X17).addReg(X16));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(CLZXr).addReg(X17).addReg(X17));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(MOVZXi).addReg(X11).addImm(1).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LSLVXr).addReg(X11).addReg(X11).addReg(X17));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(BICXrs)
+                    .addReg(X16)
+                    .addReg(X16)
+                    .addReg(X11)
+                    .addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(STRXui).addReg(X16).addReg(X14).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRHHui)
+                    .addReg(W11)
+                    .addReg(X10)
+                    .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(SUBWri).addReg(W11).addReg(W11).addImm(1).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(STRHHui)
+                    .addReg(W11)
+                    .addReg(X10)
+                    .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(CBNZX).addReg(X16).addExpr(PartialSummaryDoneExpr));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(MOVZXi).addReg(X11).addImm(1).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LSLVXr).addReg(X11).addReg(X11).addReg(X13));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(BICXrs)
+                    .addReg(X12)
+                    .addReg(X12)
+                    .addReg(X11)
+                    .addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(STRXui)
+                    .addReg(X12)
+                    .addReg(X10)
+                    .addImm(MSRegionInfoReservedOffset / 8));
+  OutStreamer->emitLabel(LPartialSummaryDone);
+  // obj_addr = X13 * 64 + X17 * SlotSize + regionStart
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(MOVZXi).addReg(X11).addImm(64).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(MADDXrrr)
+                    .addReg(X13)
+                    .addReg(X13)
+                    .addReg(X11)
+                    .addReg(X17));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRXui).addReg(X14).addReg(X10).addImm(1));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(MOVZXi).addReg(X11).addImm(MSRegionSize).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(SUBXrs)
+                    .addReg(X14)
+                    .addReg(X14)
+                    .addReg(X11)
+                    .addImm(0));
+  // Dynamic: X15 = SlotSize (register); same MADD as static version.
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(MADDXrrr)
+                    .addReg(X16)
+                    .addReg(X13)
+                    .addReg(X15)
+                    .addReg(X14));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(STRXui).addReg(X0).addReg(X16).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(ORRXrs).addReg(X0).addReg(XZR).addReg(X16).addImm(0));
+  EmitMarkNewObjectIfNeeded(X0, /*HasSlotIdx=*/true);
+  EmitFinalizerCreated();
+  EmitToStreamer(*OutStreamer, MCInstBuilder(B).addExpr(Param.FinExpr));
+
+  OutStreamer->emitLabel(LPartialRepair);
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(MOVZXi).addReg(X11).addImm(1).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LSLVXr).addReg(X11).addReg(X11).addReg(X13));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(BICXrs)
+                    .addReg(X12)
+                    .addReg(X12)
+                    .addReg(X11)
+                    .addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(STRXui)
+                    .addReg(X12)
+                    .addReg(X10)
+                    .addImm(MSRegionInfoReservedOffset / 8));
+  EmitToStreamer(*OutStreamer, MCInstBuilder(B).addExpr(PartialRetryExpr));
+
+  // ─── BUMP path ──────────────────────────────────────────────────────────────
+  OutStreamer->emitLabel(LBump);
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRXui).addReg(X12).addReg(X10).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRXui).addReg(X14).addReg(X10).addImm(1));
+  // Dynamic: newAllocPtr = allocPtr + SlotSize(X15).  X15 already set above.
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(ADDXrs)
+                    .addReg(X13)
+                    .addReg(X12)
+                    .addReg(X15)
+                    .addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(SUBSXrs)
+                    .addReg(XZR)
+                    .addReg(X13)
+                    .addReg(X14)
+                    .addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(Bcc).addImm(AArch64CC::GT).addExpr(SlowExpr));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(STRXui).addReg(X0).addReg(X12).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(STRXui).addReg(X13).addReg(X10).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(LDRHHui)
+                    .addReg(W11)
+                    .addReg(X10)
+                    .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(SUBWri).addReg(W11).addReg(W11).addImm(1).addImm(0));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(STRHHui)
+                    .addReg(W11)
+                    .addReg(X10)
+                    .addImm(MSRegionInfoFreeSlotCountOffset / 2));
+  EmitToStreamer(*OutStreamer,
+                MCInstBuilder(ORRXrs).addReg(X0).addReg(XZR).addReg(X12).addImm(0));
+  EmitMarkNewObjectIfNeeded(X0, /*HasSlotIdx=*/false);
+  EmitFinalizerCreated();
+  EmitToStreamer(*OutStreamer, MCInstBuilder(B).addExpr(Param.FinExpr));
+
+  // ─── Slow path ──────────────────────────────────────────────────────────────
+  OutStreamer->emitLabel(LSlow);
+  EmitToStreamer(*OutStreamer, Param.CallNewObjSlowPath);
+  OutStreamer->emitLabel(Param.LFin);
 }
 
 bool AArch64AsmPrinter::isCangjieArrayAllocFunction(StringRef FuncName) {

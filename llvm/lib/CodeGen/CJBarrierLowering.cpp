@@ -65,6 +65,8 @@ const static StringRef NewObjFastStr = "CJ_MCC_NewObjectFast";
 const static StringRef NewObjFinalizerFastStr = "CJ_MCC_NewFinalizerFast";
 const static StringRef MSGCFastSizeClassAttr = "cj-msgc-sizeclass";
 const static StringRef MSGCFastSlotSizeAttr = "cj-msgc-slotsize";
+// Marks a wrapper function whose size class is determined at runtime via table lookup.
+const static StringRef MSGCFastDynamicAttr = "cj-msgc-dynamic";
 
 static const uint32_t MSGCSizeClasses[] = {
   8,     16,    24,    32,    48,    64,    80,    96,    112,
@@ -1214,6 +1216,17 @@ static void replaceFastFunc(Function &F, GCStatepointInst *CI,
   CI->setArgOperand(GCStatepointInst::CalledFunctionPos, Func);
 }
 
+// Returns true when the allocation size is a non-constant (dynamic) argument.
+// We only create a dynamic wrapper for the common non-constant, non-large case;
+// large constant sizes (> MSGCLargeObjectThreshold) are left on the slow path.
+static bool isMSGCDynamicSizeAlloc(const GCStatepointInst &CI) {
+  if (CI.actual_arg_size() < 2)
+    return false;
+  return dyn_cast<ConstantInt>(
+             CI.getArgOperand(GCStatepointInst::CallArgsBeginPos + 1)) ==
+         nullptr;
+}
+
 static bool doNewFastPath(Function &F, SetVector<GCStatepointInst *> &NewObjs) {
   if (CangjieJIT)
     return false;
@@ -1224,14 +1237,22 @@ static bool doNewFastPath(Function &F, SetVector<GCStatepointInst *> &NewObjs) {
     bool HasMSGCSpecialization = getMSGCFastPathConfig(*CI, SizeClass, SlotSize);
     if (Callee->getName().equals("CJ_MCC_NewObject")) {
       if (HasMSGCSpecialization) {
+        // Static fast path: size class known at compile time.
         std::string WrapperName =
             (Twine(NewObjFastStr) + "_MSGC_cls" + Twine(SizeClass) + "_sz" +
              Twine(SlotSize))
                 .str();
         replaceFastFunc(F, CI, WrapperName, SizeClass, SlotSize);
-      } else {
-        replaceFastFunc(F, CI, NewObjFastStr);
+      } else if (isMSGCDynamicSizeAlloc(*CI)) {
+        // Dynamic fast path: size class determined at runtime via .rodata table.
+        // All dynamic-size calls share one wrapper function.
+        std::string WrapperName = (Twine(NewObjFastStr) + "_MSGC_dynamic").str();
+        replaceFastFunc(F, CI, WrapperName);
+        Function *Wrapper = F.getParent()->getFunction(WrapperName);
+        if (Wrapper && !Wrapper->hasFnAttribute(MSGCFastDynamicAttr))
+          Wrapper->addFnAttr(MSGCFastDynamicAttr, "1");
       }
+      // else: large constant-size object – leave as CJ_MCC_NewObject (slow path).
     } else {
       if (HasMSGCSpecialization) {
         std::string WrapperName =
@@ -1239,9 +1260,8 @@ static bool doNewFastPath(Function &F, SetVector<GCStatepointInst *> &NewObjs) {
              "_sz" + Twine(SlotSize))
                 .str();
         replaceFastFunc(F, CI, WrapperName, SizeClass, SlotSize);
-      } else {
-        replaceFastFunc(F, CI, NewObjFinalizerFastStr);
       }
+      // HasMSGCSpecialization=false for finalizer: leave on slow path.
     }
   }
   return true;
