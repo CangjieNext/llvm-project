@@ -614,11 +614,11 @@ void CangjieCompilerInstance::PerformSuperExpression(bool inClassContext, bool i
       if (ce->baseFunc->astKind == AST::ASTKind::REF_EXPR) {
         auto re = RawStaticCast<RefExpr *>(ce->baseFunc.get());
         if (isStaticMethod && (re->isSuper || re->isThis)) {
-          diag.Diagnose(*re, DiagKind::sema_static_members_cannot_call_members, re->ref.identifier.Val());
+          diag.Diagnose(*re, "sema_static_members_cannot_call_members", re->ref.identifier.Val());
           return AST::VisitAction::SKIP_CHILDREN;
         }
         if (!isConstructor && re->isSuper) {
-          diag.Diagnose(*ce, DiagKind::sema_invalid_this_call_outside_ctor, re->ref.identifier.Val());
+          diag.Diagnose(*ce, "sema_invalid_this_call_outside_ctor", re->ref.identifier.Val());
           return AST::VisitAction::SKIP_CHILDREN;
         }
         if (re->isThis) {
@@ -642,7 +642,7 @@ void CangjieCompilerInstance::PerformSuperExpression(bool inClassContext, bool i
     }
     auto re = RawStaticCast<RefExpr *>(curNode.get());
     if (isStaticMethod && (re->isSuper || re->isThis)) {
-      diag.Diagnose(*re, DiagKind::sema_static_members_cannot_call_members, re->ref.identifier.Val());
+      diag.Diagnose(*re, "sema_static_members_cannot_call_members", re->ref.identifier.Val());
       return AST::VisitAction::SKIP_CHILDREN;
     }
     if (re->isSuper) {
