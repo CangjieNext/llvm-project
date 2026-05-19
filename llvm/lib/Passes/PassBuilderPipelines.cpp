@@ -1484,11 +1484,8 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
   else if (LTOPreLink)
     LTOPhase = ThinOrFullLTOPhase::FullLTOPreLink;
 
-  if (CJPipeline && DisableCJLTOReflection) {
-    MPM.addPass(CJDisableImportLibReflection());
-    MPM.addPass(GlobalDCEPass());
-  }
-
+  // PreLink: 当前包 --disable-reflection 下 TF_REFLECTION=0，pass 空转；
+  // 导入库的反射裁剪在 PostLink 处理。
   // Add the core simplification pipeline.
   MPM.addPass(buildModuleSimplificationPipeline(Level, LTOPhase));
 
@@ -1611,6 +1608,11 @@ ModulePassManager PassBuilder::buildThinLTODefaultPipeline(
   // Force any function attributes we want the rest of the pipeline to observe.
   MPM.addPass(ForceFunctionAttrsPass());
 
+  if (CJPipeline && DisableCJLTOReflection) {
+    MPM.addPass(CJDisableImportLibReflection());
+    // MPM.addPass(GlobalDCEPass());
+  }
+
   // Add the core simplification pipeline.
   MPM.addPass(buildModuleSimplificationPipeline(
       Level, ThinOrFullLTOPhase::ThinLTOPostLink));
@@ -1694,7 +1696,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
 
   if (CJPipeline && DisableCJLTOReflection) {
     MPM.addPass(CJDisableImportLibReflection());
-    MPM.addPass(GlobalDCEPass());
+    // MPM.addPass(GlobalDCEPass());
   }
 
   if (PGOOpt && PGOOpt->Action == PGOOptions::SampleUse) {
