@@ -1605,6 +1605,50 @@ PreservedAnalyses CJFillMetadata::run(Module &M, ModuleAnalysisManager &) const 
 }
 
 namespace {
+
+// 从完整反射结构中提取 debug 字段，创建独立的小 debug global
+// - 8 字段 (FRT_PTRS / 类): 保留 [0] fieldNames → { i8* }
+// - 7 字段 (FET_PTRS / 枚举): 保留 [0]-[2] ctorInfo/modifier/ctorCnt → { i8*, i32, i32 }
+// - 其他字段数: 返回 nullptr，调用方置空指针
+// 原 .reflect global 不再被引用，由 DCE 自动清除
+GlobalVariable *downgradeReflectGlobal(GlobalVariable &ReflectGV) {
+  if (!ReflectGV.hasInitializer())
+    return nullptr;
+
+  auto *Init = dyn_cast<ConstantStruct>(ReflectGV.getInitializer());
+  if (!Init)
+    return nullptr;
+
+  unsigned NumOps = Init->getNumOperands();
+  unsigned DebugFields;
+
+  if (NumOps >= 8)      // 类: FRT_PTRS=8
+    DebugFields = 1;
+  else if (NumOps >= 7) // 枚举: FET_PTRS=7
+    DebugFields = 3;
+  else
+    return nullptr;     // 枚举构造器等, 无调试结构对应
+
+  // 构建 debug-only struct type
+  SmallVector<Type *, 4> DebugTypes;
+  for (unsigned I = 0; I < DebugFields; ++I)
+    DebugTypes.push_back(Init->getOperand(I)->getType());
+  auto *DebugST = StructType::get(ReflectGV.getContext(), DebugTypes);
+
+  // 提取 debug 字段作为初始化器
+  SmallVector<Constant *, 4> DebugOps;
+  for (unsigned I = 0; I < DebugFields; ++I)
+    DebugOps.push_back(Init->getOperand(I));
+
+  // 创建新的小 debug global
+  auto *DebugGV = new GlobalVariable(
+      *ReflectGV.getParent(), DebugST, false, GlobalValue::InternalLinkage,
+      ConstantStruct::get(DebugST, DebugOps),
+      ReflectGV.getName() + ".dbg");
+  DebugGV->setAlignment(ReflectGV.getAlign());
+  return DebugGV;
+}
+
 bool rewriteReflectionOperand(GlobalVariable &GV, unsigned FlagIdx,
                               unsigned ReflectionIdx) {
   if (!GV.hasInitializer())
@@ -1614,28 +1658,45 @@ bool rewriteReflectionOperand(GlobalVariable &GV, unsigned FlagIdx,
   if (Init == nullptr || Init->getNumOperands() <= ReflectionIdx)
     return false;
 
-  auto *Flag = dyn_cast<ConstantInt>(Init->getOperand(FlagIdx));
-  if (Flag == nullptr)
-    return false;
-
+  auto *Flag = cast<ConstantInt>(Init->getOperand(FlagIdx));
   uint64_t NewFlag = Flag->getZExtValue() & ~TF_REFLECTION;
-  auto *ReflectionTy =
-      dyn_cast<PointerType>(Init->getOperand(ReflectionIdx)->getType());
-  if (ReflectionTy == nullptr)
+
+  // TF_REFLECTION 未置位 → 调试信息, 不动
+  if (NewFlag == Flag->getZExtValue())
     return false;
 
-  if (NewFlag == Flag->getZExtValue() &&
-      Init->getOperand(ReflectionIdx)->isNullValue()) {
-    return false;
-  }
-
+  // TF_REFLECTION 已置位 → 需要降级
   SmallVector<Constant *, 0> Ops;
   Ops.reserve(Init->getNumOperands());
-  for (unsigned I = 0; I < Init->getNumOperands(); ++I) {
+  for (unsigned I = 0; I < Init->getNumOperands(); ++I)
     Ops.push_back(cast<Constant>(Init->getOperand(I)));
-  }
+
   Ops[FlagIdx] = ConstantInt::get(Flag->getType(), NewFlag);
-  Ops[ReflectionIdx] = ConstantPointerNull::get(ReflectionTy);
+
+  // 追踪 reflection 指针, 尝试降级为独立小 debug struct
+  bool Downgraded = false;
+  auto *ReflectOp = Init->getOperand(ReflectionIdx);
+  if (!ReflectOp->isNullValue()) {
+    if (auto *CE = dyn_cast<ConstantExpr>(ReflectOp)) {
+      if (CE->getOpcode() == Instruction::BitCast) {
+        if (auto *ReflectGV = dyn_cast<GlobalVariable>(CE->getOperand(0))) {
+          if (auto *DebugGV = downgradeReflectGlobal(*ReflectGV)) {
+            // 重定向 bitcast 指向新的小 debug global
+            Ops[ReflectionIdx] =
+                ConstantExpr::getBitCast(DebugGV, CE->getType());
+            Downgraded = true;
+          }
+        }
+      }
+    }
+  }
+
+  if (!Downgraded) {
+    // 无法降级 (枚举构造器等) → 置空指针, DCE 处理
+    Ops[ReflectionIdx] = ConstantPointerNull::get(
+        cast<PointerType>(ReflectOp->getType()));
+  }
+
   GV.setInitializer(ConstantStruct::get(Init->getType(), Ops));
   return true;
 }
@@ -1686,24 +1747,6 @@ bool rewritePackageInfoPayload(GlobalVariable &GV) {
   GV.setInitializer(ConstantStruct::get(Init->getType(), Ops));
   return true;
 }
-
-bool makeReflectGlobalDiscardable(GlobalVariable &GV) {
-  if (!GV.hasAttribute("CFileReflect"))
-    return false;
-
-  bool Changed = false;
-  auto NewAttrs =
-      GV.getAttributes().removeAttribute(GV.getContext(), "CFileReflect");
-  if (NewAttrs != GV.getAttributes()) {
-    GV.setAttributes(NewAttrs);
-    Changed = true;
-  }
-  if (!GV.hasLocalLinkage()) {
-    GV.setLinkage(GlobalValue::InternalLinkage);
-    Changed = true;
-  }
-  return Changed;
-}
 } // namespace
 
 PreservedAnalyses
@@ -1717,11 +1760,6 @@ CJDisableImportLibReflection::run(Module &M, ModuleAnalysisManager &) const {
     } else if (GV.hasAttribute("CFileReflect")) {
       Changed |= rewritePackageInfoPayload(GV);
     }
-    Changed |= makeReflectGlobalDiscardable(GV);
-  }
-
-  if (M.getModuleFlag("cj.disable_reflect_codegen_metadata") == nullptr) {
-    M.addModuleFlag(Module::Warning, "cj.disable_reflect_codegen_metadata", 1);
   }
 
   if (Changed) {
