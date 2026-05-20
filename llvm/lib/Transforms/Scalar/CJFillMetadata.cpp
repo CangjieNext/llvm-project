@@ -1761,10 +1761,6 @@ CJDisableImportLibReflection::run(Module &M, ModuleAnalysisManager &) const {
     }
   }
 
-  if (M.getModuleFlag("cj.disable_reflect_codegen_metadata") == nullptr) {
-    M.addModuleFlag(Module::Warning, "cj.disable_reflect_codegen_metadata", 1);
-  }
-
   if (Changed) {
     return PreservedAnalyses::none();
   }
