@@ -86,11 +86,12 @@ void BitcodeCompiler::add(BitcodeFile &f) {
   ArrayRef<lto::InputFile::Symbol> objSyms = f.obj->symbols();
   std::vector<lto::SymbolResolution> resols;
   resols.reserve(objSyms.size());
-  bool keepVisibleForPkg = shouldKeepVisibleForPkg(f);
+  bool exportForPkg = shouldKeepVisibleForPkg(f);
 
   // Provide a resolution to the LTO API for each symbol.
-  bool exportDynamic =
+  bool defaultExportDynamic =
       config->outputType != MH_EXECUTE || config->exportDynamic;
+  bool exportDynamic = defaultExportDynamic && exportForPkg;
   auto symIt = f.symbols.begin();
   for (const lto::InputFile::Symbol &objSym : objSyms) {
     resols.emplace_back();
@@ -105,8 +106,8 @@ void BitcodeCompiler::add(BitcodeFile &f) {
     r.Prevailing = !objSym.isUndefined() && sym->getFile() == &f;
 
     if (const auto *defined = dyn_cast<Defined>(sym)) {
-      r.ExportDynamic =
-          defined->isExternal() && !defined->privateExtern && exportDynamic;
+      r.ExportDynamic = defined->isExternal() && !defined->privateExtern &&
+                        exportDynamic;
       r.FinalDefinitionInLinkageUnit =
           !defined->isExternalWeakDef() && !defined->interposable;
     } else if (const auto *common = dyn_cast<CommonSymbol>(sym)) {
@@ -114,9 +115,8 @@ void BitcodeCompiler::add(BitcodeFile &f) {
       r.FinalDefinitionInLinkageUnit = true;
     }
 
-    r.VisibleToRegularObj = sym->isUsedInRegularObj ||
-                            (r.Prevailing && r.ExportDynamic) ||
-                            keepVisibleForPkg;
+    r.VisibleToRegularObj =
+        sym->isUsedInRegularObj || (r.Prevailing && r.ExportDynamic);
 
     // Un-define the symbol so that we don't get duplicate symbol errors when we
     // load the ObjFile emitted by LTO compilation.
