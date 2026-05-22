@@ -24,9 +24,14 @@
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Transforms/InstCombine/InstCombiner.h"
+#include "llvm/Support/CommandLine.h"
 
 using namespace llvm;
 using namespace PatternMatch;
+
+namespace llvm {
+extern cl::opt<bool> CJPipeline;
+}
 
 #define DEBUG_TYPE "instcombine"
 
@@ -1441,6 +1446,19 @@ Instruction *InstCombinerImpl::foldICmpWithConstant(ICmpInst &Cmp) {
 
   if (auto *Phi = dyn_cast<PHINode>(Op0))
     if (all_of(Phi->operands(), [](Value *V) { return isa<Constant>(V); })) {
+      if (llvm::CJPipeline) {
+        BasicBlock *PhiBB = Phi->getParent();
+        auto HasExceptionalPred = [](BasicBlock *BB) {
+          for (BasicBlock *Pred : predecessors(BB)) {
+            Instruction *PredTerm = Pred->getTerminator();
+            if (isa<InvokeInst>(PredTerm) || Pred->isEHPad() || Pred->isLandingPad())
+              return true;
+          }
+          return false;
+        };
+        if (PhiBB->isEHPad() || PhiBB->isLandingPad() || HasExceptionalPred(PhiBB))
+          return nullptr;
+      }
       Type *Ty = Cmp.getType();
       Builder.SetInsertPoint(Phi);
       PHINode *NewPhi =
