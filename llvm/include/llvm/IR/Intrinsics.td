@@ -485,6 +485,10 @@ def int_cj_get_lambda_addr          : Intrinsic<[llvm_ptr_ty],
 //
 def int_cj_get_obj_klass                       : Intrinsic<[llvm_ptr_ty],
                                                            [llvm_gcptr_ty]>;
+def int_cj_start_local_region                  : Intrinsic<[llvm_i1_ty],
+                                                           []>;
+def int_cj_end_local_region                    : Intrinsic<[],
+                                                           []>;
 def int_cj_memset                              : Intrinsic<[],
                                                            [llvm_anyptr_ty, llvm_i8_ty, llvm_i64_ty, llvm_i1_ty],
                                                            [IntrArgMemOnly, IntrWriteMem,
@@ -492,8 +496,32 @@ def int_cj_memset                              : Intrinsic<[],
 def int_cj_malloc_object                       : Intrinsic<[llvm_gcptr_ty],
                                                            [llvm_ptr_ty, llvm_i32_ty],
                                                            [Throws]>;
+def int_cj_malloc_local_object                 : Intrinsic<[llvm_gcptr_ty],
+                                                           [llvm_ptr_ty, llvm_i32_ty],
+                                                           [Throws]>;
+def int_cj_malloc_local_weakref_object         : Intrinsic<[llvm_gcptr_ty],
+                                                           [llvm_ptr_ty, llvm_i32_ty],
+                                                           [Throws]>;
 def int_cj_malloc_array                        : Intrinsic<[llvm_gcptr_ty],
                                                            [llvm_ptr_ty, llvm_i64_ty, llvm_i64_ty],
+                                                           [Throws]>;
+def int_cj_malloc_local_array                  : Intrinsic<[llvm_gcptr_ty],
+                                                           [llvm_ptr_ty, llvm_i64_ty],
+                                                           [Throws]>;
+def int_cj_malloc_local_obj_array              : Intrinsic<[llvm_gcptr_ty],
+                                                           [llvm_ptr_ty, llvm_i64_ty],
+                                                           [Throws]>;
+def int_cj_malloc_local_array8                 : Intrinsic<[llvm_gcptr_ty],
+                                                           [llvm_ptr_ty, llvm_i64_ty],
+                                                           [Throws]>;
+def int_cj_malloc_local_array16                : Intrinsic<[llvm_gcptr_ty],
+                                                           [llvm_ptr_ty, llvm_i64_ty],
+                                                           [Throws]>;
+def int_cj_malloc_local_array32                : Intrinsic<[llvm_gcptr_ty],
+                                                           [llvm_ptr_ty, llvm_i64_ty],
+                                                           [Throws]>;
+def int_cj_malloc_local_array64                : Intrinsic<[llvm_gcptr_ty],
+                                                           [llvm_ptr_ty, llvm_i64_ty],
                                                            [Throws]>;
 def int_cj_division_check_sdiv                 : Intrinsic<[llvm_anyint_ty],
                                                            [llvm_anyint_ty, llvm_anyint_ty],
@@ -595,6 +623,9 @@ def int_cj_is_reference             : Intrinsic<[llvm_i1_ty],
 def int_cj_alloca_generic           : Intrinsic<[llvm_gcptr_ty],
                                                 [llvm_ptr_ty, llvm_i32_ty],
                                                 [Throws]>;
+def int_cj_alloca_local_generic     : Intrinsic<[llvm_gcptr_ty],
+                                                [llvm_ptr_ty, llvm_i32_ty],
+                                                [Throws]>;
 def int_cj_gcwrite_generic          : Intrinsic<[],
                                                 [llvm_gcptr_ty, llvm_gcptr_ty, llvm_gcptr_ty, llvm_i32_ty],
                                                 [IntrArgMemOnly, IntrWillReturn,
@@ -632,6 +663,9 @@ def int_cj_assign_generic           : Intrinsic<[],
 def int_cj_malloc_array_generic     : Intrinsic<[llvm_gcptr_ty],
                                                 [llvm_ptr_ty, llvm_i64_ty],
                                                 [Throws]>;
+def int_cj_malloc_local_array_generic : Intrinsic<[llvm_gcptr_ty],
+                                                  [llvm_ptr_ty, llvm_i64_ty],
+                                                  [Throws]>;
 def int_cj_array_copy_generic       : Intrinsic<[],
                                                 [llvm_gcptr_ty, llvm_gcptr_ty, llvm_gcptr_ty, llvm_gcptr_ty, llvm_anyint_ty]>;
 def int_cj_gcwrite_generic_payload  : Intrinsic<[],

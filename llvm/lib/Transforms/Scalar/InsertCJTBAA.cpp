@@ -74,10 +74,18 @@ public:
 static bool getMallocType(TBAAProcessUnit &TBAAUnit, CallBase *CB) {
   auto ID = CB->getIntrinsicID();
   Value *Klass;
-  if (ID == Intrinsic::cj_malloc_object) {
+  if (ID == Intrinsic::cj_malloc_object ||
+      ID == Intrinsic::cj_malloc_local_object ||
+      ID == Intrinsic::cj_malloc_local_weakref_object) {
     Klass = CB->getArgOperand(0)->stripPointerCasts();
-  } else if (ID == Intrinsic::cj_malloc_array) {
-    Klass = CB->getArgOperand(1)->stripPointerCasts();
+  } else if (ID == Intrinsic::cj_malloc_array ||
+             ID == Intrinsic::cj_malloc_local_array ||
+             ID == Intrinsic::cj_malloc_local_obj_array ||
+             ID == Intrinsic::cj_malloc_local_array8 ||
+             ID == Intrinsic::cj_malloc_local_array16 ||
+             ID == Intrinsic::cj_malloc_local_array32 ||
+             ID == Intrinsic::cj_malloc_local_array64) {
+    Klass = CB->getArgOperand(0)->stripPointerCasts();
   } else {
     return false;
   }

@@ -198,7 +198,8 @@ public:
 
     unsigned IID = Call.getIntrinsicID();
     switch (IID) {
-    case Intrinsic::cj_alloca_generic: {
+    case Intrinsic::cj_alloca_generic:
+    case Intrinsic::cj_alloca_local_generic: {
       Value *TIArg = Call.getArgOperand(0)->stripPointerCasts();
       if (auto *GV = dyn_cast<GlobalVariable>(TIArg)) {
         Assert(getTypeLayoutType(GV),
@@ -285,14 +286,24 @@ public:
         break;
       case Intrinsic::cj_gc_statepoint:
       case Intrinsic::cj_malloc_object:
+      case Intrinsic::cj_malloc_local_object:
+      case Intrinsic::cj_malloc_local_weakref_object:
       case Intrinsic::cj_malloc_array:
+      case Intrinsic::cj_malloc_local_array:
+      case Intrinsic::cj_malloc_local_obj_array:
+      case Intrinsic::cj_malloc_local_array8:
+      case Intrinsic::cj_malloc_local_array16:
+      case Intrinsic::cj_malloc_local_array32:
+      case Intrinsic::cj_malloc_local_array64:
       case Intrinsic::cj_malloc_array_generic:
+      case Intrinsic::cj_malloc_local_array_generic:
       case Intrinsic::cj_division_check_sdiv:
       case Intrinsic::cj_division_check_udiv:
       case Intrinsic::cj_division_check_srem:
       case Intrinsic::cj_division_check_urem:
       case Intrinsic::cj_throw_exception:
       case Intrinsic::cj_alloca_generic:
+      case Intrinsic::cj_alloca_local_generic:
         break;
       }
     }

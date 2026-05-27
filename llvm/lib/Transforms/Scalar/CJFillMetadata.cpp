@@ -539,7 +539,9 @@ void RefValue::getTypeInfoGVParam(Function *F, int ArgNo) {
 bool RefValue::isNewObjectCallSite(CallBase *CI) {
   assert(CI && "NewObject callsite is nullptr");
   unsigned ID = CI->getIntrinsicID();
-  if (ID == Intrinsic::cj_malloc_object)
+  if (ID == Intrinsic::cj_malloc_object ||
+      ID == Intrinsic::cj_malloc_local_object ||
+      ID == Intrinsic::cj_malloc_local_weakref_object)
     return true;
 
   Function *Callee = CI->getCalledFunction();
@@ -1513,7 +1515,9 @@ static Value *analysisGVType(Value *V) {
     return nullptr;
 
   unsigned ID = CI->getIntrinsicID();
-  if (ID == Intrinsic::cj_malloc_object) {
+  if (ID == Intrinsic::cj_malloc_object ||
+      ID == Intrinsic::cj_malloc_local_object ||
+      ID == Intrinsic::cj_malloc_local_weakref_object) {
     if (auto CE = dyn_cast<ConstantExpr>(CI->getOperand(0)))
       return CE->getOperand(0);
   }

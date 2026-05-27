@@ -66,9 +66,20 @@ using StdMap = std::unordered_map<KeyT, ValT>;
 const static StdMap<unsigned, StringRef> RuntimeMap {
     {Intrinsic::cj_invoke_gc, "CJ_MCC_InvokeGC"},
     {Intrinsic::cj_get_obj_klass, "CJ_MCC_GetObjClass"},
+    {Intrinsic::cj_start_local_region, "CJ_MCC_StartLocalRegion"},
+    {Intrinsic::cj_end_local_region, "CJ_MCC_EndLocalRegion"},
     {Intrinsic::cj_malloc_object, "CJ_MCC_NewObject"},
+    {Intrinsic::cj_malloc_local_object, "CJ_MCC_NewLocalObject"},
+    {Intrinsic::cj_malloc_local_weakref_object, "CJ_MCC_NewLocalWeakRefObject"},
     {Intrinsic::cj_alloca_generic, "CJ_MCC_NewObject"},
+    {Intrinsic::cj_alloca_local_generic, "CJ_MCC_NewLocalGenericObject"},
+    {Intrinsic::cj_malloc_local_obj_array, "CJ_MCC_NewLocalObjArray"},
+    {Intrinsic::cj_malloc_local_array8, "CJ_MCC_NewLocalArray8"},
+    {Intrinsic::cj_malloc_local_array16, "CJ_MCC_NewLocalArray16"},
+    {Intrinsic::cj_malloc_local_array32, "CJ_MCC_NewLocalArray32"},
+    {Intrinsic::cj_malloc_local_array64, "CJ_MCC_NewLocalArray64"},
     {Intrinsic::cj_malloc_array_generic, "CJ_MCC_NewArrayGeneric"},
+    {Intrinsic::cj_malloc_local_array_generic, "CJ_MCC_NewLocalGenericArray"},
     {Intrinsic::cj_get_vtable_func, "CJ_MCC_UpdateVMT"},
     {Intrinsic::cj_get_mtable_func, "CJ_MCC_GetMTable"},
     {Intrinsic::cj_get_method_outertype, "CJ_MCC_GetMethodOuterTI"},
@@ -1019,6 +1030,11 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
       Lowering.replaceWithRuntimeFunc(CI, true, false);
       Changed = true;
       break;
+    case Intrinsic::cj_start_local_region:
+    case Intrinsic::cj_end_local_region:
+      Lowering.replaceWithRuntimeFunc(CI, false, false);
+      Changed = true;
+      break;
     case Intrinsic::cj_cross_access_barrier:
     case Intrinsic::cj_get_exported_ref:
     case Intrinsic::cj_remove_exported_ref:
@@ -1054,6 +1070,26 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
       Changed = true;
       break;
     }
+    case Intrinsic::cj_malloc_local_object:
+    case Intrinsic::cj_malloc_local_weakref_object:
+    case Intrinsic::cj_alloca_local_generic:
+    case Intrinsic::cj_malloc_local_obj_array:
+    case Intrinsic::cj_malloc_local_array8:
+    case Intrinsic::cj_malloc_local_array16:
+    case Intrinsic::cj_malloc_local_array32:
+    case Intrinsic::cj_malloc_local_array64:
+    case Intrinsic::cj_malloc_array_generic:
+    case Intrinsic::cj_malloc_local_array_generic:
+      Lowering.setHeapMallocSizeAlign(CI);
+      Lowering.replaceWithRuntimeFunc(CI, false, true);
+      CI->addRetAttr(Attribute::NoAlias);
+      Changed = true;
+      break;
+    case Intrinsic::cj_malloc_local_array:
+      Lowering.replaceWithRuntimeFunc(CI, false, true);
+      CI->addRetAttr(Attribute::NoAlias);
+      Changed = true;
+      break;
     case Intrinsic::cj_alloca_generic:
       Lowering.setHeapMallocSizeAlign(CI);
       Lowering.replaceAllocaGeneric(CI, ES);
@@ -1061,11 +1097,6 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
       break;
     case Intrinsic::cj_malloc_array:
       Lowering.replaceNewArray(CI);
-      CI->addRetAttr(Attribute::NoAlias);
-      Changed = true;
-      break;
-    case Intrinsic::cj_malloc_array_generic:
-      Lowering.replaceWithRuntimeFunc(CI, false, true);
       CI->addRetAttr(Attribute::NoAlias);
       Changed = true;
       break;
