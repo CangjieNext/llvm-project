@@ -923,6 +923,37 @@ static bool simplifyLandingPad(Function &F) {
     if (!CB || !CB->getCalledFunction()->hasName() ||
         CB->getCalledFunction()->getName() != "CJ_MCC_IsSubType")
       continue;
+    if (CB->arg_size() < 2)
+      continue;
+    Value *TypeInfoArg = CB->getArgOperand(1);
+    Value *TypeInfoUnderlying = nullptr;
+    if (auto *TypeInfoBC = dyn_cast<BitCastInst>(TypeInfoArg)) {
+      TypeInfoUnderlying = TypeInfoBC->getOperand(0);
+    } else if (auto *TypeInfoCE = dyn_cast<ConstantExpr>(TypeInfoArg)) {
+      if (TypeInfoCE->getOpcode() != Instruction::BitCast)
+        continue;
+      TypeInfoUnderlying = TypeInfoCE->getOperand(0);
+    } else {
+      continue;
+    }
+    auto *TypeInfoGV = dyn_cast<GlobalVariable>(TypeInfoUnderlying);
+    if (!TypeInfoGV || !TypeInfoGV->hasName())
+      continue;
+    Value *CatchType = LPI->getOperand(0);
+    Value *CatchTypeUnderlying = nullptr;
+    if (auto *CatchBC = dyn_cast<BitCastInst>(CatchType)) {
+      CatchTypeUnderlying = CatchBC->getOperand(0);
+    } else if (auto *CatchCE = dyn_cast<ConstantExpr>(CatchType)) {
+      if (CatchCE->getOpcode() != Instruction::BitCast)
+        continue;
+      CatchTypeUnderlying = CatchCE->getOperand(0);
+    } else {
+      continue;
+    }
+    auto *CatchGV = dyn_cast<GlobalVariable>(CatchTypeUnderlying);
+    if (!CatchGV || CatchGV != TypeInfoGV)
+      continue;
+
     CB->replaceAllUsesWith(
         ConstantInt::getTrue(Type::getInt1Ty(LPI->getContext())));
     Changed = true;
