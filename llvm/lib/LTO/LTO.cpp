@@ -1092,6 +1092,36 @@ static void collectGlobalObjectRefs(const GlobalValue &GV,
   }
 }
 
+static void dumpCangjieLTOGuidTrace(ModuleSummaryIndex &Index, StringRef Tag,
+                                    const DenseSet<GlobalValue::GUID> &Roots) {
+  errs() << "==== CJ_LTO_GUID_TRACE " << Tag << " ====\n";
+  for (const auto &Entry : Index) {
+    ValueInfo VI = Index.getValueInfo(Entry);
+    StringRef Name = VI.name();
+    if (!Name.contains("reportMonitor") &&
+        !Name.contains("ConcurrentModificationException.ti"))
+      continue;
+
+    errs() << "CJ_LTO_INDEX_VALUE name=" << Name << " guid=" << VI.getGUID()
+           << " preserved=" << Roots.count(VI.getGUID()) << "\n";
+    for (const auto &S : VI.getSummaryList()) {
+      errs() << "  SUMMARY module=" << S->modulePath()
+             << " linkage=" << S->linkage() << " live=" << S->isLive()
+             << " indexLive=" << Index.isGlobalValueLive(S.get())
+             << " refs=" << S->refs().size() << "\n";
+      for (ValueInfo Ref : S->refs()) {
+        StringRef RefName = Ref.name();
+        if (!RefName.contains("reportMonitor") &&
+            !RefName.contains("ConcurrentModificationException.ti"))
+          continue;
+        errs() << "    REF name=" << RefName << " guid=" << Ref.getGUID()
+               << " preserved=" << Roots.count(Ref.getGUID()) << "\n";
+      }
+    }
+  }
+  errs() << "==== CJ_LTO_GUID_TRACE_END " << Tag << " ====\n";
+}
+
 Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
   // Compute "dead" symbols, we don't want to import/export these!
   DenseSet<GlobalValue::GUID> GUIDPreservedSymbols;
@@ -1152,6 +1182,13 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
         GlobalValue::dropLLVMManglingEscape(Res.second.IRName));
 
     if (Res.second.VisibleOutsideSummary && Res.second.Prevailing) {
+      errs() << "CJ_LTO_PRESERVE_RESOLUTION raw=" << Res.second.IRName
+             << " dropped="
+             << GlobalValue::dropLLVMManglingEscape(Res.second.IRName)
+             << " guid=" << GUID
+             << " visibleOutside=" << Res.second.VisibleOutsideSummary
+             << " prevailing=" << Res.second.Prevailing
+             << " exportDynamic=" << Res.second.ExportDynamic << "\n";
       GUIDPreservedSymbols.insert(GUID);
       DumpPreservedRootRefs(Res.second.IRName, GUID);
     }
@@ -1169,8 +1206,12 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
       return PrevailingType::Unknown;
     return It->second;
   };
+  dumpCangjieLTOGuidTrace(ThinLTO.CombinedIndex, "before-compute",
+                          GUIDPreservedSymbols);
   computeDeadSymbolsWithConstProp(ThinLTO.CombinedIndex, GUIDPreservedSymbols,
                                   isPrevailing, Conf.OptLevel > 0);
+  dumpCangjieLTOGuidTrace(ThinLTO.CombinedIndex, "after-compute",
+                          GUIDPreservedSymbols);
 
   // Setup output file to emit statistics.
   auto StatsFileOrErr = setupStatsFile(Conf.StatsFile);
