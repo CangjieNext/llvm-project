@@ -844,7 +844,7 @@ void llvm::updateIndirectCalls(ModuleSummaryIndex &Index) {
   }
 }
 
-void llvm::computeDeadSymbolsAndUpdateIndirectCalls(
+void llvm::(
     ModuleSummaryIndex &Index,
     const DenseSet<GlobalValue::GUID> &GUIDPreservedSymbols,
     function_ref<PrevailingType(GlobalValue::GUID)> isPrevailing) {

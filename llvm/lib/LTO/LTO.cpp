@@ -15,6 +15,7 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/Analysis/StackSafetyAnalysis.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
@@ -30,6 +31,7 @@
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Mangler.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/MC/SubtargetFeature.h"
 #include "llvm/LTO/LTOBackend.h"
 #include "llvm/LTO/SummaryBasedOptimizations.h"
 #include "llvm/Linker/IRMover.h"
@@ -717,6 +719,48 @@ handleNonPrevailingComdat(GlobalValue &GV,
     GO->setComdat(nullptr);
 }
 
+static Error updateDarwinDataLayoutFromTarget(Module &M, const Config &Conf) {
+  Triple TT(M.getTargetTriple());
+  if (!TT.isOSDarwin())
+    return Error::success();
+
+  std::string Msg;
+  const Target *T = TargetRegistry::lookupTarget(M.getTargetTriple(), Msg);
+  if (!T)
+    return make_error<StringError>(Msg, inconvertibleErrorCode());
+
+  SubtargetFeatures Features;
+  Features.getDefaultSubtargetFeatures(TT);
+  for (const std::string &A : Conf.MAttrs)
+    Features.AddFeature(A);
+
+  Optional<Reloc::Model> RelocModel = None;
+  if (Conf.RelocModel)
+    RelocModel = *Conf.RelocModel;
+  else if (M.getModuleFlag("PIC Level"))
+    RelocModel =
+        M.getPICLevel() == PICLevel::NotPIC ? Reloc::Static : Reloc::PIC_;
+
+  Optional<CodeModel::Model> CodeModel;
+  if (Conf.CodeModel)
+    CodeModel = *Conf.CodeModel;
+  else
+    CodeModel = M.getCodeModel();
+
+  std::unique_ptr<TargetMachine> TM(T->createTargetMachine(
+      M.getTargetTriple(), Conf.CPU, Features.getString(), Conf.Options,
+      RelocModel, CodeModel, Conf.CGOptLevel));
+  if (!TM)
+    return make_error<StringError>("failed to create target machine for " +
+                                       M.getTargetTriple(),
+                                   inconvertibleErrorCode());
+
+  DataLayout TargetDL = TM->createDataLayout();
+  if (M.getDataLayout() != TargetDL)
+    M.setDataLayout(TargetDL);
+  return Error::success();
+}
+
 // Add a regular LTO object to the link.
 // The resulting module needs to be linked into the combined LTO module with
 // linkRegularLTO.
@@ -732,6 +776,9 @@ LTO::addRegularLTO(BitcodeModule BM, ArrayRef<InputFile::Symbol> Syms,
     return MOrErr.takeError();
   Module &M = **MOrErr;
   Mod.M = std::move(*MOrErr);
+
+  if (Error Err = updateDarwinDataLayoutFromTarget(M, Conf))
+    return std::move(Err);
 
   if (Error Err = M.materializeMetadata())
     return std::move(Err);
