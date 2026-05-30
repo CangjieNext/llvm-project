@@ -327,6 +327,16 @@ static void computeFunctionSummary(
         }
       }
       findRefEdges(Index, &I, RefEdges, Visited);
+      //
+      if (F.getName().contains("reportMonitor")) {
+        for (const auto &VI : RefEdges) {
+          errs() << "SUMMARY_REF_regs func=" << F.getName() << " ref=" << VI
+                   << "\n";
+          if (VI.name().contains("ConcurrentModificationException.ti"))
+            errs() << "SUMMARY_REF_FOUND func=" << F.getName() << " ref=" << VI
+                   << "\n";
+        }
+      }
       const auto *CB = dyn_cast<CallBase>(&I);
       if (!CB) {
         if (I.mayThrow())
