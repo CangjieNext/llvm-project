@@ -12,6 +12,8 @@
 
 #include "llvm/LTO/LTO.h"
 #include "llvm/ADT/ScopeExit.h"
+#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
@@ -1047,10 +1049,96 @@ void LTO::checkCJBC() {
   }
 }
 
+static void collectGlobalValueRefs(const Value *V,
+                                   SmallPtrSetImpl<const Value *> &Visited,
+                                   SetVector<const GlobalValue *> &Refs) {
+  if (!V || !Visited.insert(V).second)
+    return;
+
+  if (const auto *GV = dyn_cast<GlobalValue>(V)) {
+    Refs.insert(GV);
+    return;
+  }
+
+  if (const auto *U = dyn_cast<User>(V))
+    for (const Use &Op : U->operands())
+      collectGlobalValueRefs(Op.get(), Visited, Refs);
+}
+
+static void collectGlobalObjectRefs(const GlobalValue &GV,
+                                    SetVector<const GlobalValue *> &Refs) {
+  if (const auto *F = dyn_cast<Function>(&GV)) {
+    if (F->isDeclaration())
+      return;
+    for (const BasicBlock &BB : *F)
+      for (const Instruction &I : BB) {
+        SmallPtrSet<const Value *, 32> Visited;
+        collectGlobalValueRefs(&I, Visited, Refs);
+      }
+    return;
+  }
+
+  if (const auto *GVar = dyn_cast<GlobalVariable>(&GV)) {
+    if (GVar->hasInitializer()) {
+      SmallPtrSet<const Value *, 32> Visited;
+      collectGlobalValueRefs(GVar->getInitializer(), Visited, Refs);
+    }
+    return;
+  }
+
+  if (const auto *GA = dyn_cast<GlobalAlias>(&GV)) {
+    SmallPtrSet<const Value *, 32> Visited;
+    collectGlobalValueRefs(GA->getAliasee(), Visited, Refs);
+  }
+}
+
 Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
   // Compute "dead" symbols, we don't want to import/export these!
   DenseSet<GlobalValue::GUID> GUIDPreservedSymbols;
   DenseMap<GlobalValue::GUID, PrevailingType> GUIDPrevailingResolutions;
+  auto DumpPreservedRootRefs = [&](StringRef RootName,
+                                   GlobalValue::GUID RootGUID) {
+    StringRef IRName = GlobalValue::dropLLVMManglingEscape(RootName);
+    bool FoundRoot = false;
+
+    auto DumpModuleRootRefs = [&](Module &M) {
+      GlobalValue *GV = M.getNamedValue(IRName);
+      if (!GV)
+        return;
+
+      FoundRoot = true;
+      errs() << "CJ_LTO_PRESERVE_ROOT name=" << IRName
+             << " guid=" << RootGUID << " module=" << M.getModuleIdentifier()
+             << " decl=" << GV->isDeclaration()
+             << " linkage=" << GV->getLinkage()
+             << " visibility=" << GV->getVisibility()
+             << " dsoLocal=" << GV->isDSOLocal() << "\n";
+
+      SetVector<const GlobalValue *> Refs;
+      collectGlobalObjectRefs(*GV, Refs);
+      for (const GlobalValue *Ref : Refs) {
+        if (Ref == GV)
+          continue;
+        errs() << "CJ_LTO_PRESERVE_ROOT_REF root=" << IRName
+               << " ref=" << Ref->getName()
+               << " refGuid=" << GlobalValue::getGUID(
+                      GlobalValue::dropLLVMManglingEscape(Ref->getName()))
+               << " decl=" << Ref->isDeclaration()
+               << " linkage=" << Ref->getLinkage()
+               << " visibility=" << Ref->getVisibility()
+               << " dsoLocal=" << Ref->isDSOLocal() << "\n";
+      }
+    };
+
+    DumpModuleRootRefs(*RegularLTO.CombinedModule);
+    for (auto &Mod : RegularLTO.ModsWithSummaries)
+      DumpModuleRootRefs(*Mod.M);
+
+    if (!FoundRoot)
+      errs() << "CJ_LTO_PRESERVE_ROOT_NOT_FOUND name=" << IRName
+             << " guid=" << RootGUID << "\n";
+  };
+
   for (auto &Res : GlobalResolutions) {
     // Normally resolution have IR name of symbol. We can do nothing here
     // otherwise. See comments in GlobalResolution struct for more details.
@@ -1060,8 +1148,10 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
     GlobalValue::GUID GUID = GlobalValue::getGUID(
         GlobalValue::dropLLVMManglingEscape(Res.second.IRName));
 
-    if (Res.second.VisibleOutsideSummary && Res.second.Prevailing)
+    if (Res.second.VisibleOutsideSummary && Res.second.Prevailing) {
       GUIDPreservedSymbols.insert(GUID);
+      DumpPreservedRootRefs(Res.second.IRName, GUID);
+    }
 
     if (Res.second.ExportDynamic)
       DynamicExportSymbols.insert(GUID);
