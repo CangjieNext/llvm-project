@@ -1286,6 +1286,16 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
     if (Res.second.ExportDynamic)
       DynamicExportSymbols.insert(GUID);
 
+    if (StringRef(Res.second.IRName).contains(
+            "ConcurrentModificationException.ti"))
+      errs() << "CJ_LTO_RESOLUTION_FOR_TARGET raw=" << Res.second.IRName
+             << " dropped="
+             << GlobalValue::dropLLVMManglingEscape(Res.second.IRName)
+             << " guid=" << GUID
+             << " prevailing=" << Res.second.Prevailing
+             << " visibleOutside=" << Res.second.VisibleOutsideSummary
+             << " exportDynamic=" << Res.second.ExportDynamic << "\n";
+
     GUIDPrevailingResolutions[GUID] =
         Res.second.Prevailing ? PrevailingType::Yes : PrevailingType::No;
   }
@@ -1296,6 +1306,17 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
       return PrevailingType::Unknown;
     return It->second;
   };
+  auto DumpPrevailing = [&](StringRef Name) {
+    GlobalValue::GUID GUID = GlobalValue::getGUID(Name);
+    auto It = GUIDPrevailingResolutions.find(GUID);
+    errs() << "CJ_LTO_PREVAILING name=" << Name << " guid=" << GUID
+           << " found=" << (It != GUIDPrevailingResolutions.end());
+    if (It != GUIDPrevailingResolutions.end())
+      errs() << " prevailing=" << static_cast<int>(It->second);
+    errs() << "\n";
+  };
+  DumpPrevailing("std.collection:ConcurrentModificationException.ti");
+  DumpPrevailing("_std.collection:ConcurrentModificationException.ti");
   dumpCangjieLTOGuidTrace(ThinLTO.CombinedIndex, "before-compute",
                           GUIDPreservedSymbols);
   computeDeadSymbolsWithConstProp(ThinLTO.CombinedIndex, GUIDPreservedSymbols,
