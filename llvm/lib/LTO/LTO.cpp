@@ -1209,10 +1209,13 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
       for (const GlobalValue *Ref : Refs) {
         if (Ref == GV)
           continue;
+        GlobalValue::GUID RefGUID = GlobalValue::getGUID(
+            GlobalValue::dropLLVMManglingEscape(Ref->getName()));
+        bool NewlyPreserved = GUIDPreservedSymbols.insert(RefGUID).second;
         errs() << "CJ_LTO_PRESERVE_ROOT_REF root=" << IRName
                << " ref=" << Ref->getName()
-               << " refGuid=" << GlobalValue::getGUID(
-                      GlobalValue::dropLLVMManglingEscape(Ref->getName()))
+               << " refGuid=" << RefGUID
+               << " preserve=" << NewlyPreserved
                << " decl=" << Ref->isDeclaration()
                << " linkage=" << Ref->getLinkage()
                << " visibility=" << Ref->getVisibility()
