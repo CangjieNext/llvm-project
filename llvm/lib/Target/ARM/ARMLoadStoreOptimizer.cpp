@@ -85,6 +85,10 @@ STATISTIC(NumSTRD2STM,  "Number of strd instructions turned back into stm");
 STATISTIC(NumLDRD2LDR,  "Number of ldrd instructions turned back into ldr's");
 STATISTIC(NumSTRD2STR,  "Number of strd instructions turned back into str's");
 
+namespace llvm {
+extern cl::opt<bool> CJPipeline;
+}
+
 /// This switch disables formation of double/multi instructions that could
 /// potentially lead to (new) alignment traps even with CCR.UNALIGN_TRP
 /// disabled. This can be used to create libraries that are robust even when
@@ -420,6 +424,12 @@ static bool isLoadSingle(unsigned Opc) {
   return isi32Load(Opc) || Opc == ARM::VLDRS || Opc == ARM::VLDRD;
 }
 
+static bool isCJArgReg(unsigned Reg) {
+  if (!CJPipeline)
+    return false;
+  return Base == ARM::R0 || Base == ARM::R1 || Base == ARM::R2 || Base == ARM::R3;
+}
+
 static unsigned getImmScale(unsigned Opc) {
   switch (Opc) {
   default: llvm_unreachable("Unhandled opcode!");
@@ -694,6 +704,8 @@ MachineInstr *ARMLoadStoreOpt::CreateLoadStoreMulti(
       if (!isLoadSingle(Opcode))
         for (const std::pair<unsigned, bool> &R : Regs)
           LiveRegs.addReg(R.first);
+      if (isCJArgReg(Base))
+        LiveRegs.addReg(Base);
 
       NewBase = findFreeReg(isThumb1 ? ARM::tGPRRegClass : ARM::GPRRegClass);
       if (NewBase == 0)
