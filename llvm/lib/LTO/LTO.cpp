@@ -600,6 +600,13 @@ void LTO::addModuleToGlobalRes(ArrayRef<InputFile::Symbol> Syms,
     // global resolutions (one with and one for a copy of the symbol without).
     if (TT.isOSBinFormatCOFF() && Name.startswith("__imp_"))
       Name = Name.substr(strlen("__imp_"));
+    // Mach-O adds '_' prefix to symbol names. When bitcode modules disagree
+    // on whether the prefix is present (e.g. one module's irsymtab includes it
+    // and another's does not), we end up with two GlobalResolutions entries for
+    // the same IR symbol. Normalize by stripping the prefix, consistent with
+    // the COFF __imp_ handling above.
+    if (TT.isOSBinFormatMachO() && Name.startswith("_"))
+      Name = Name.drop_front(1);
     auto &GlobalRes = GlobalResolutions[Name];
     GlobalRes.UnnamedAddr &= Sym.isUnnamedAddr();
     if (Res.Prevailing) {
@@ -1294,7 +1301,8 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
              << " guid=" << GUID
              << " prevailing=" << Res.second.Prevailing
              << " visibleOutside=" << Res.second.VisibleOutsideSummary
-             << " exportDynamic=" << Res.second.ExportDynamic << "\n";
+             << " exportDynamic=" << Res.second.ExportDynamic
+             << " mapKey=" << Res.first() << "\n";
 
     // Only set Yes if prevailing, and never overwrite an existing Yes with No.
     // Multiple GlobalResolutions entries can share the same GUID (e.g. Mach-O _

@@ -858,39 +858,35 @@ void llvm::computeDeadSymbolsAndUpdateIndirectCalls(
   }
   unsigned LiveSymbols = 0;
 
-  // ---- CJ_LTO_PATH pre-scan: find all symbols that reference the target ----
-  // This reverse lookup answers: "who in the summary graph should keep the
-  // target alive?"  Cross-reference the printed GUIDs with the worklist walk
-  // traces (CJ_LTO_MARK_ROOT / CJ_LTO_POP_WORKLIST) to see if any referencer
-  // is itself reached from a preserved root.
-  errs() << "==== CJ_LTO_PATH_PRE_SCAN ====\n";
+  // ---- CJ_LTO_PATH: collect all GUIDs on interesting symbol chains so the
+  // visit lambda and worklist walk can trace them precisely.
+  // Add symbol name substrings below to track additional targets.
+  DenseSet<GlobalValue::GUID> CJPathGUIDs;
+  auto IsCJPathSymbol = [](StringRef Name) -> bool {
+    return Name.contains("ConcurrentModificationException.ti") ||
+           Name.contains("OutputStream5flushHv");
+  };
   {
-    GlobalValue::GUID TargetGUID = 0;
-    // First, find the target symbol itself in the index.
+    errs() << "==== CJ_LTO_PATH_PRE_SCAN ====\n";
+    // Pass 1: collect every GUID whose name matches an interesting symbol,
+    // or who references such a symbol, plus all referencers up the chain.
     for (const auto &Entry : Index) {
       ValueInfo VI = Index.getValueInfo(Entry);
-      if (!VI || !VI.name().contains("ConcurrentModificationException.ti"))
+      if (!VI)
         continue;
-      TargetGUID = VI.getGUID();
-      errs() << "CJ_LTO_PATH|TARGET name=" << VI.name()
-             << " targetGuid=" << TargetGUID << "\n";
-      for (auto &S : VI.getSummaryList()) {
-        errs() << "CJ_LTO_PATH|TARGET_SUMMARY module=" << S->modulePath()
-               << " linkage=" << S->linkage()
-               << " initLive=" << S->isLive() << "\n";
-      }
-      break;
+      if (IsCJPathSymbol(VI.name()))
+        CJPathGUIDs.insert(VI.getGUID());
     }
-    // Second, scan all summaries to find which symbols have a ref edge to the
-    // target.  These are the symbols that COULD propagate liveness to it.
     for (const auto &Entry : Index) {
       ValueInfo VI = Index.getValueInfo(Entry);
       if (!VI)
         continue;
       for (auto &S : VI.getSummaryList()) {
         for (auto Ref : S->refs()) {
-          if (!Ref.name().contains("ConcurrentModificationException.ti"))
+          if (!IsCJPathSymbol(Ref.name()))
             continue;
+          CJPathGUIDs.insert(VI.getGUID());
+          CJPathGUIDs.insert(Ref.getGUID());
           bool IsPreserved = GUIDPreservedSymbols.count(VI.getGUID());
           errs() << "CJ_LTO_PATH|REFERENCER name=" << VI.name()
                  << " referencerGuid=" << VI.getGUID()
@@ -902,8 +898,21 @@ void llvm::computeDeadSymbolsAndUpdateIndirectCalls(
         }
       }
     }
-    errs() << "==== CJ_LTO_PATH_PRE_SCAN_END targetGuid=" << TargetGUID
-           << " ====\n";
+    // Pass 2: print the initial state of every target GUID.
+    for (auto G : CJPathGUIDs) {
+      ValueInfo VI = Index.getValueInfo(G);
+      if (!VI)
+        continue;
+      errs() << "CJ_LTO_PATH|TARGET_INIT name=" << VI.name()
+             << " guid=" << G << "\n";
+      for (auto &S : VI.getSummaryList()) {
+        errs() << "CJ_LTO_PATH|TARGET_INIT_SUMMARY module=" << S->modulePath()
+               << " linkage=" << S->linkage()
+               << " initLive=" << S->isLive() << "\n";
+      }
+    }
+    errs() << "==== CJ_LTO_PATH_PRE_SCAN_END collected=" << CJPathGUIDs.size()
+           << " guids ====\n";
   }
 
   SmallVector<ValueInfo, 128> Worklist;
@@ -939,13 +948,15 @@ void llvm::computeDeadSymbolsAndUpdateIndirectCalls(
   // Make value live and add it to the worklist if it was not live before.
   auto visit = [&](ValueInfo VI, bool IsAliasee) {
     bool Trace = VI.name().contains("reportMonitor") ||
-                 VI.name().contains("ConcurrentModificationException.ti");
+                 IsCJPathSymbol(VI.name());
+    bool PathTrace = CJPathGUIDs.count(VI.getGUID());
     PrevailingType Prevailing = isPrevailing(VI.getGUID());
-    if (Trace)
+    if (Trace || PathTrace)
       errs() << "CJ_LTO_VISIT name=" << VI.name() << " guid=" << VI.getGUID()
              << " isAliasee=" << IsAliasee
              << " prevailing=" << static_cast<int>(Prevailing)
-             << " summaries=" << VI.getSummaryList().size() << "\n";
+             << " summaries=" << VI.getSummaryList().size()
+             << " pathTrace=" << PathTrace << "\n";
     // FIXME: If we knew which edges were created for indirect call profiles,
     // we could skip them here. Any that are live should be reached via
     // other edges, e.g. reference edges. Otherwise, using a profile collected
@@ -959,9 +970,9 @@ void llvm::computeDeadSymbolsAndUpdateIndirectCalls(
                      [](const std::unique_ptr<llvm::GlobalValueSummary> &S) {
                        return S->isLive();
                      })) {
-      if (Trace)
+      if (Trace || PathTrace)
         errs() << "CJ_LTO_VISIT_SKIP_ALREADY_LIVE name=" << VI.name()
-               << "\n";
+               << " pathTrace=" << PathTrace << "\n";
       return;
     }
 
@@ -984,9 +995,9 @@ void llvm::computeDeadSymbolsAndUpdateIndirectCalls(
 
       if (!IsAliasee) {
         if (!KeepAliveLinkage) {
-          if (Trace)
+          if (Trace || PathTrace)
             errs() << "CJ_LTO_VISIT_REJECT_NON_PREVAILING name=" << VI.name()
-                   << " keepAliveLinkage=0\n";
+                   << " keepAliveLinkage=0 pathTrace=" << PathTrace << "\n";
           return;
         }
 
@@ -999,9 +1010,9 @@ void llvm::computeDeadSymbolsAndUpdateIndirectCalls(
 
     for (auto &S : VI.getSummaryList())
       S->setLive(true);
-    if (Trace)
+    if (Trace || PathTrace)
       errs() << "CJ_LTO_SET_LIVE name=" << VI.name()
-             << " guid=" << VI.getGUID() << "\n";
+             << " guid=" << VI.getGUID() << " pathTrace=" << PathTrace << "\n";
     ++LiveSymbols;
     Worklist.push_back(VI);
   };
@@ -1009,10 +1020,12 @@ void llvm::computeDeadSymbolsAndUpdateIndirectCalls(
   while (!Worklist.empty()) {
     auto VI = Worklist.pop_back_val();
     bool TraceFrom = VI.name().contains("reportMonitor") ||
-                     VI.name().contains("ConcurrentModificationException.ti");
-    if (TraceFrom)
+                     IsCJPathSymbol(VI.name());
+    bool PathTraceFrom = CJPathGUIDs.count(VI.getGUID());
+    if (TraceFrom || PathTraceFrom)
       errs() << "CJ_LTO_POP_WORKLIST name=" << VI.name()
-             << " guid=" << VI.getGUID() << "\n";
+             << " guid=" << VI.getGUID()
+             << " pathTrace=" << PathTraceFrom << "\n";
     for (auto &Summary : VI.getSummaryList()) {
       if (auto *AS = dyn_cast<AliasSummary>(Summary.get())) {
         // If this is an alias, visit the aliasee VI to ensure that all copies
@@ -1022,63 +1035,41 @@ void llvm::computeDeadSymbolsAndUpdateIndirectCalls(
         continue;
       }
       for (auto Ref : Summary->refs()) {
-        if (TraceFrom || Ref.name().contains("ConcurrentModificationException.ti"))
+        if (TraceFrom || PathTraceFrom || IsCJPathSymbol(Ref.name()))
           errs() << "CJ_LTO_WALK_REF from=" << VI.name()
                  << " fromGuid=" << VI.getGUID() << " to=" << Ref.name()
-                 << " toGuid=" << Ref.getGUID() << "\n";
+                 << " toGuid=" << Ref.getGUID()
+                 << " pathTrace=" << (PathTraceFrom || TraceFrom) << "\n";
         visit(Ref, false);
       }
       if (auto *FS = dyn_cast<FunctionSummary>(Summary.get()))
         for (auto Call : FS->calls()) {
-          if (TraceFrom ||
-              Call.first.name().contains("ConcurrentModificationException.ti"))
+          if (TraceFrom || PathTraceFrom ||
+              IsCJPathSymbol(Call.first.name()))
             errs() << "CJ_LTO_WALK_CALL from=" << VI.name()
                    << " fromGuid=" << VI.getGUID()
                    << " to=" << Call.first.name()
-                   << " toGuid=" << Call.first.getGUID() << "\n";
+                   << " toGuid=" << Call.first.getGUID()
+                   << " pathTrace=" << (PathTraceFrom || TraceFrom) << "\n";
           visit(Call.first, false);
         }
     }
   }
-  // ---- CJ_LTO_PATH post-scan: final live status of target and referencers ----
+  // ---- CJ_LTO_PATH post-scan: final live status of all tracked GUIDs ----
   errs() << "==== CJ_LTO_PATH_POST_SCAN ====\n";
-  {
-    GlobalValue::GUID TargetGUID = 0;
-    for (const auto &Entry : Index) {
-      ValueInfo VI = Index.getValueInfo(Entry);
-      if (!VI || !VI.name().contains("ConcurrentModificationException.ti"))
-        continue;
-      TargetGUID = VI.getGUID();
-      errs() << "CJ_LTO_PATH|TARGET_FINAL name=" << VI.name()
-             << " targetGuid=" << TargetGUID << "\n";
-      for (auto &S : VI.getSummaryList()) {
-        errs() << "CJ_LTO_PATH|TARGET_FINAL_SUMMARY module=" << S->modulePath()
-               << " linkage=" << S->linkage()
-               << " finalLive=" << S->isLive()
-               << " indexLive=" << Index.isGlobalValueLive(S.get()) << "\n";
-      }
-      break;
+  for (auto G : CJPathGUIDs) {
+    ValueInfo VI = Index.getValueInfo(G);
+    if (!VI)
+      continue;
+    errs() << "CJ_LTO_PATH|FINAL name=" << VI.name() << " guid=" << G << "\n";
+    for (auto &S : VI.getSummaryList()) {
+      errs() << "CJ_LTO_PATH|FINAL_SUMMARY module=" << S->modulePath()
+             << " linkage=" << S->linkage()
+             << " finalLive=" << S->isLive()
+             << " indexLive=" << Index.isGlobalValueLive(S.get()) << "\n";
     }
-    // Also re-scan referencers to see their final live status.
-    for (const auto &Entry : Index) {
-      ValueInfo VI = Index.getValueInfo(Entry);
-      if (!VI)
-        continue;
-      for (auto &S : VI.getSummaryList()) {
-        for (auto Ref : S->refs()) {
-          if (!Ref.name().contains("ConcurrentModificationException.ti"))
-            continue;
-          errs() << "CJ_LTO_PATH|REFERENCER_FINAL name=" << VI.name()
-                 << " referencerGuid=" << VI.getGUID()
-                 << " module=" << S->modulePath()
-                 << " finalLive=" << S->isLive()
-                 << " -> refTargetGuid=" << Ref.getGUID() << "\n";
-        }
-      }
-    }
-    errs() << "==== CJ_LTO_PATH_POST_SCAN_END targetGuid=" << TargetGUID
-           << " ====\n";
   }
+  errs() << "==== CJ_LTO_PATH_POST_SCAN_END ====\n";
 
   Index.setWithGlobalValueDeadStripping();
 
