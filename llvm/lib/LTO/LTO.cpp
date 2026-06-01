@@ -1206,8 +1206,26 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
              << " visibleOutside=" << Res.second.VisibleOutsideSummary
              << " exportDynamic=" << Res.second.ExportDynamic << "\n";
 
-    GUIDPrevailingResolutions[GUID] =
-        Res.second.Prevailing ? PrevailingType::Yes : PrevailingType::No;
+    // Only set Yes if prevailing, and never overwrite an existing Yes with No.
+    // Multiple GlobalResolutions entries can share the same GUID (e.g. Mach-O _
+    // prefix differences in getName() but same getIRName()), and iteration order
+    // over StringMap is non-deterministic.  We must ensure the prevailing entry wins.
+    auto &Prev = GUIDPrevailingResolutions[GUID];
+    if (Res.second.Prevailing) {
+      if (Prev == PrevailingType::No)
+        errs() << "CJ_LTO_FIXUP_OVERWRITE_NO guid=" << GUID
+               << " irName=" << Res.second.IRName
+               << " from=No to=Yes\n";
+      Prev = PrevailingType::Yes;
+    } else {
+      if (Prev != PrevailingType::Yes) {
+        Prev = PrevailingType::No;
+      } else {
+        errs() << "CJ_LTO_FIXUP_KEEP_YES guid=" << GUID
+               << " irName=" << Res.second.IRName
+               << " ignoring=No keeping=Yes\n";
+      }
+    }
   }
 
   auto isPrevailing = [&](GlobalValue::GUID G) {
