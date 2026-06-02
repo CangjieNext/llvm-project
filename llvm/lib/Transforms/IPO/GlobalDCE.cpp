@@ -149,6 +149,9 @@ void GlobalDCEPass::UpdateGVDependencies(GlobalValue &GV) {
     // though this vtable, then skip it, because the call site information will
     // be more precise.
     if (VFESafeVTables.count(GVU) && isa<Function>(&GV)) {
+      if (GV.getName() == "_CNah12OutputStream5flushHv")
+        errs() << "CJ_GLOBALDCE_SKIP_DEP_VFE_VFUNC vtable=" << GVU->getName()
+               << " func=" << GV.getName() << "\n";
       LLVM_DEBUG(dbgs() << "Ignoring dep " << GVU->getName() << " -> "
                         << GV.getName() << "\n");
       continue;
@@ -156,11 +159,19 @@ void GlobalDCEPass::UpdateGVDependencies(GlobalValue &GV) {
     if (CJPipeline && ClEnableCJTIE) {
       auto *Usee = dyn_cast<GlobalVariable>(&GV);
       auto *User = dyn_cast<GlobalVariable>(GVU);
-      if (VFESafeVTables.count(User) && Usee && Usee->isCJTypeInfo())
+      if (VFESafeVTables.count(User) && Usee && Usee->isCJTypeInfo()) {
+        if (Usee->getName().contains("OutputStream") ||
+            Usee->getName() == "_CNah12OutputStream5flushHv")
+          errs() << "CJ_GLOBALDCE_SKIP_DEP_VFE_TYPEINFO vtable="
+                 << (GVU ? GVU->getName() : "null")
+                 << " typeinfo=" << Usee->getName() << "\n";
         continue;
+      }
       if (CangjieDCE::maybeFakeLiveOfTypeMeta(User, Usee)) {
-        if (Usee && Usee->getName().startswith("NonExternalExtensionDefs"))
-          errs() << "CJ_GLOBALDCE_SKIP_DEP name=" << GV.getName()
+        if (Usee && (Usee->getName().startswith("NonExternalExtensionDefs") ||
+                     Usee->getName().contains("OutputStream") ||
+                     Usee->getName() == "_CNah12OutputStream5flushHv"))
+          errs() << "CJ_GLOBALDCE_SKIP_DEP_MAYBELIVE name=" << GV.getName()
                  << " user=" << (GVU ? GVU->getName() : "null") << "\n";
         continue;
       }
