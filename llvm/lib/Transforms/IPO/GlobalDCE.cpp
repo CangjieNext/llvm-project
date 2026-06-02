@@ -158,8 +158,12 @@ void GlobalDCEPass::UpdateGVDependencies(GlobalValue &GV) {
       auto *User = dyn_cast<GlobalVariable>(GVU);
       if (VFESafeVTables.count(User) && Usee && Usee->isCJTypeInfo())
         continue;
-      if (CangjieDCE::maybeFakeLiveOfTypeMeta(User, Usee))
+      if (CangjieDCE::maybeFakeLiveOfTypeMeta(User, Usee)) {
+        if (Usee && Usee->getName().startswith("NonExternalExtensionDefs"))
+          errs() << "CJ_GLOBALDCE_SKIP_DEP name=" << GV.getName()
+                 << " user=" << (GVU ? GVU->getName() : "null") << "\n";
         continue;
+      }
     }
     GVDependencies[GVU].insert(&GV);
   }
@@ -357,6 +361,15 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
       if (!GO.isDiscardableIfUnused())
         MarkLive(GO);
 
+    if (GO.getName().contains("StreamingSocket_ed_std.io:OutputStream") ||
+        GO.getName() == "_CNah12OutputStream5flushHv" ||
+        GO.getName() == "std.net:IPv4Prefix.ti" ||
+        GO.getName().startswith("NonExternalExtensionDefs"))
+      errs() << "CJ_GLOBALDCE_INIT name=" << GO.getName()
+             << " linkage=" << GO.getLinkage()
+             << " discarded=" << GO.isDiscardableIfUnused()
+             << " live=" << AliveGlobals.count(&GO) << "\n";
+
     UpdateGVDependencies(GO);
   }
 
@@ -386,8 +399,14 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
                                            AliveGlobals.end()};
   while (!NewLiveGVs.empty()) {
     GlobalValue *LGV = NewLiveGVs.pop_back_val();
-    for (auto *GVD : GVDependencies[LGV])
+    for (auto *GVD : GVDependencies[LGV]) {
+      if (GVD->getName().contains("StreamingSocket_ed_std.io:OutputStream") ||
+          GVD->getName() == "_CNah12OutputStream5flushHv" ||
+          GVD->getName().startswith("NonExternalExtensionDefs"))
+        errs() << "CJ_GLOBALDCE_PROPAGATE from=" << LGV->getName()
+               << " to=" << GVD->getName() << "\n";
       MarkLive(*GVD, &NewLiveGVs);
+    }
   }
 
   if (CJPipeline && ClEnableCJTIE) {
@@ -408,6 +427,10 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
     }
 
     if (!AliveGlobals.count(&GV)) {
+      if (GV.getName().contains("StreamingSocket_ed_std.io:OutputStream") ||
+          GV.getName().startswith("NonExternalExtensionDefs"))
+        errs() << "CJ_GLOBALDCE_KILL_GV name=" << GV.getName()
+               << " linkage=" << GV.getLinkage() << "\n";
       DeadGlobalVars.push_back(&GV); // Keep track of dead globals
       if (GV.hasInitializer()) {
         Constant *Init = GV.getInitializer();
@@ -425,6 +448,9 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
       continue;
 
     if (!AliveGlobals.count(&F)) {
+      if (F.getName() == "_CNah12OutputStream5flushHv")
+        errs() << "CJ_GLOBALDCE_KILL_FUNC name=" << F.getName()
+               << " linkage=" << F.getLinkage() << "\n";
       DeadFunctions.push_back(&F); // Keep track of dead globals
       if (!F.isDeclaration())
         F.deleteBody();
