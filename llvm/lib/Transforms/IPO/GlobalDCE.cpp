@@ -638,9 +638,13 @@ void CangjieDCE::updateDependencies(
       }
       // 2. Recursively mark all parent nodes.
       while (CurGFI != Root) {
-        auto &FTs = CurGFI->FuncTables;
-        CurGFI = CurGFI->Prev;
-        Mark(FTs, CurGFI->HasCompilerInfo, I);
+        auto PrevGFI = CurGFI->Prev;
+        auto GenericChildItor = PrevGFI->Next.find(nullptr);
+        auto &FTs = GenericChildItor == PrevGFI->Next.end()
+                          ? CurGFI->FuncTables
+                          : GenericChildItor->second->FuncTables;
+        Mark(FTs, PrevGFI->HasCompilerInfo, I);
+        CurGFI = PrevGFI;
       }
     }
   }
