@@ -8,23 +8,23 @@
 declare void @cj_stack_grow()
 
 define internal void @test_vec_use_fp(%record* nocapture sret(%record) %0, i8 addrspace(1)* nocapture %1, %TypeInfo* nocapture %2, %string* %3, i64 %4, <2 x i64> %5, void (%Unit.Type*, i8 addrspace(1)*, %record*)* %6) #14 gc "cangjie" {
-; CHECK-LABEL:   .Lstack.check.end0:
-; CHECK-NEXT:    movq	%rdi, -40(%rbp)
-; CHECK-NEXT:    movdqu	%xmm0, -24(%rbp)
-; CHECK-NEXT:    # %bb.1:
-; CHECK-NEXT:    leaq	-32(%rbp), %rax
-; CHECK-NEXT:    movq	%rax, -48(%rbp)
-; CHECK-NEXT:    callq	cj_stack_grow@PLT
+; CHECK-LABEL:   test_vec_use_fp:
+; CHECK:         movq	%rdi, -40(%rbp)
+; CHECK:         callq	CJ_MCC_StackCheck@PLT
 ; CHECK-LABEL:   .Ltmp1:
+; CHECK:         movdqu	%xmm0, -24(%rbp)
+; CHECK:         leaq	-32(%rbp), %rax
+; CHECK:         movq	%rax, -48(%rbp)
+; CHECK:         callq	cj_stack_grow@PLT
 ; CHECK-LABEL:   .Ltmp2:
-; CHECK:	     .long	.Ltmp1-test_vec_use_fp
+; CHECK:         .long	.Ltmp1-test_vec_use_fp
 ; CHECK-NEXT:    #[RegIdx: -1, SlotIdx: -1, LNIdx: -1, DerivedStartIdx: -1, SPRegIdx: -1, SPSlotIdx: 0]
 ; CHECK:         .long	.Ltmp2-test_vec_use_fp
-; CHECK-NEXT:    #[RegIdx: -1, SlotIdx: -1, LNIdx: -1, DerivedStartIdx: -1, SPRegIdx: 0, SPSlotIdx: -1]
-; CHECK:         #RegNums: 1
-; CHECK:	     #Idx[0]: (0x236=566), rdx, rcx, rsi, rdi, r9
-; CHECK:         #SlotsNums: 1
-; CHECK:	     #Idx[0]: BaseOffset: -40, SlotBits: 0x3[ -40 -48 ]
+; CHECK-NEXT:    #[RegIdx: -1, SlotIdx: -1, LNIdx: -1, DerivedStartIdx: -1, SPRegIdx: -1, SPSlotIdx: 1]
+; CHECK:         #RegNums: 0
+; CHECK:         #SlotsNums: 2
+; CHECK:         #Idx[0]: BaseOffset: -40, SlotBits: 0x1[ -40 ]
+; CHECK:         #Idx[1]: BaseOffset: -40, SlotBits: 0x3[ -40 -48 ]
 ; CHECK:         #LineNumbersNums: 0
 ; CHECK:         #DerivedInfoNums: 0
 entry:

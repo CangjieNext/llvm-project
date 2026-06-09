@@ -892,7 +892,7 @@ LiveIntervals::addSegmentToEndOfBlock(Register Reg, MachineInstr &startInst) {
 /// the value is alive on exit from Machine instruction. The example of such
 /// use is a deopt value in statepoint instruction.
 static bool hasLiveThroughUse(const MachineInstr *MI, Register Reg) {
-  if (MI->getOpcode() != TargetOpcode::STATEPOINT)
+  if (!isStatepointOpcode(MI->getOpcode()))
     return false;
   StatepointOpers SO(MI);
   if (SO.getFlags() & (uint64_t)StatepointFlags::DeoptLiveIn)

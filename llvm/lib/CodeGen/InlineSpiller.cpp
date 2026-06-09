@@ -547,7 +547,7 @@ bool InlineSpiller::canGuaranteeAssignmentAfterRemat(Register VReg,
   // At the moment, we only handle this for STATEPOINTs since they're the only
   // pseudo op where we've seen this.  If we start seeing other instructions
   // with the same problem, we need to revisit this.
-  if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+  if (!isStatepointOpcode(MI.getOpcode()))
     return true;
   // For STATEPOINTs we allow re-materialization for fixed arguments only hoping
   // that number of physical registers is enough to cover all fixed arguments.
@@ -818,12 +818,12 @@ foldMemoryOperand(ArrayRef<std::pair<MachineInstr *, unsigned>> Ops,
   // For that to work we need to untie def and use to pass it through
   // foldMemoryOperand and signal foldPatchpoint that it is allowed to
   // fold them.
-  bool UntieRegs = MI->getOpcode() == TargetOpcode::STATEPOINT;
+  bool UntieRegs = isStatepointOpcode(MI->getOpcode());
 
   // Spill subregs if the target allows it.
   // We always want to spill subregs for stackmap/patchpoint pseudos.
   bool SpillSubRegs = TII.isSubregFoldable() ||
-                      MI->getOpcode() == TargetOpcode::STATEPOINT ||
+                      isStatepointOpcode(MI->getOpcode()) ||
                       MI->getOpcode() == TargetOpcode::PATCHPOINT ||
                       MI->getOpcode() == TargetOpcode::STACKMAP;
 

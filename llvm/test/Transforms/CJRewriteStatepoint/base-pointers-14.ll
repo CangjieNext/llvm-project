@@ -17,7 +17,7 @@ define i8 addrspace(1)* @test1(i1 %c, i8 addrspace(1)* %b1, i8 addrspace(1)* %b2
 ; CHECK-NEXT:    br i1 [[C]], label [[LOOP]], label [[MERGE2]]
 ; CHECK:       merge2:
 ; CHECK-NEXT:    [[B6:%.*]] = phi i8 addrspace(1)* [ [[B1:%.*]], [[LEFT]] ], [ [[B5]], [[LOOP]] ]
-; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* [[B6]]) ]
+; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %b6) ]
 ; CHECK-NEXT:    [[B6_RELOCATED:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
 ; CHECK-NEXT:    ret i8 addrspace(1)* [[B6_RELOCATED]]
 ;
@@ -49,7 +49,7 @@ define i8 addrspace(1)* @test2(i1 %c, i32 %n, i8 addrspace(1)* %b1, i8 addrspace
 ; CHECK-NEXT:    ]
 ; CHECK:       merge2:
 ; CHECK-NEXT:    [[B6:%.*]] = phi i8 addrspace(1)* [ [[B1:%.*]], [[LEFT]] ], [ [[B5]], [[LOOP]] ]
-; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* [[B6]]) ]
+; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %b6) ]
 ; CHECK-NEXT:    [[B6_RELOCATED:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
 ; CHECK-NEXT:    ret i8 addrspace(1)* [[B6_RELOCATED]]
 ;
@@ -84,7 +84,7 @@ define i8 addrspace(1)* @test3(i1 %c, i8 addrspace(1)* %b1, i8 addrspace(1)* %b2
 ; CHECK:       merge2:
 ; CHECK-NEXT:    [[B6_BASE:%.*]] = phi i8 addrspace(1)* [ [[B1:%.*]], [[LEFT]] ], [ [[B5_BASE]], [[LOOP]] ], !is_base_value !1
 ; CHECK-NEXT:    [[B6:%.*]] = phi i8 addrspace(1)* [ [[B1]], [[LEFT]] ], [ [[B5]], [[LOOP]] ]
-; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* [[B6_BASE]], i8 addrspace(1)* [[B6]]) ]
+; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %b6.base, i8 addrspace(1)* %b6) ]
 ; CHECK-NEXT:    [[B6_BASE_RELOCATED]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
 ; CHECK-NEXT:    [[B6_RELOCATED]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 1)
 ; CHECK-NEXT:    br i1 [[C]], label [[LOOP]], label [[EXIT:%.*]]
@@ -118,7 +118,7 @@ define i8 addrspace(1)* @test4(i1 %c, i8 addrspace(1)* %b1, i8 addrspace(1)* %b2
 ; CHECK-NEXT:    br i1 [[C]], label [[LOOP]], label [[MERGE2]]
 ; CHECK:       merge2:
 ; CHECK-NEXT:    [[B6:%.*]] = phi i8 addrspace(1)* [ [[B1:%.*]], [[LEFT]] ], [ [[B5]], [[LOOP]] ]
-; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* [[B6]]) ]
+; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %b6) ]
 ; CHECK-NEXT:    [[B6_RELOCATED:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
 ; CHECK-NEXT:    ret i8 addrspace(1)* [[B6_RELOCATED]]
 ;
@@ -150,7 +150,7 @@ define i8 addrspace(1)* @test5(i1 %c1, i1 %c2, i8 addrspace(1)* %b1, i8 addrspac
 ; CHECK-NEXT:    br i1 [[C2:%.*]], label [[LOOP]], label [[MERGE2]]
 ; CHECK:       merge2:
 ; CHECK-NEXT:    [[B6:%.*]] = phi i8 addrspace(1)* [ [[B1:%.*]], [[ENTRY]] ], [ [[B3]], [[LOOP]] ], [ [[B5]], [[LEFT]] ]
-; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* [[B6]]) ]
+; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %b6) ]
 ; CHECK-NEXT:    [[B6_RELOCATED:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
 ; CHECK-NEXT:    ret i8 addrspace(1)* [[B6_RELOCATED]]
 ;
@@ -183,7 +183,7 @@ define i8 addrspace(1)* @test6(i1 %c1, i1 %c2, i8 addrspace(1)* %b1, i8 addrspac
 ; CHECK-NEXT:    br i1 [[C2:%.*]], label [[LOOP]], label [[MERGE2]]
 ; CHECK:       merge2:
 ; CHECK-NEXT:    [[B6:%.*]] = phi i8 addrspace(1)* [ [[B1:%.*]], [[ENTRY]] ], [ [[B3]], [[LOOP]] ], [ [[B3]], [[LEFT]] ]
-; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* [[B6]]) ]
+; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %b6) ]
 ; CHECK-NEXT:    [[B6_RELOCATED:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
 ; CHECK-NEXT:    ret i8 addrspace(1)* [[B6_RELOCATED]]
 ;
@@ -214,14 +214,13 @@ define i8 addrspace(1)* @test7(i1 %c1, i1 %c2, i8 addrspace(1)* %b1, i8 addrspac
 ; CHECK-NEXT:    [[B3:%.*]] = phi i8 addrspace(1)* [ [[B2:%.*]], [[ENTRY:%.*]] ], [ [[B41:%.*]], [[LEFT:%.*]] ]
 ; CHECK-NEXT:    br i1 [[C1]], label [[LEFT]], label [[MERGE2]]
 ; CHECK:       left:
-; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*)* @returned_arg, i32 1, i32 0, i8 addrspace(1)* [[B3]]) [ "gc-live"(i8 addrspace(1)* [[B3]]) ]
+; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*)* @returned_arg, i32 1, i32 0, i8 addrspace(1)* %b3)
 ; CHECK-NEXT:    [[B41]] = call i8 addrspace(1)* @llvm.cj.gc.result.p1i8(token [[TOKEN]])
-; CHECK-NEXT:    [[B3_RELOCATED:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
 ; CHECK-NEXT:    br i1 [[C2:%.*]], label [[LOOP]], label [[MERGE2]]
 ; CHECK:       merge2:
 ; CHECK-NEXT:    [[B6_BASE:%.*]] = phi i8 addrspace(1)* [ [[B1:%.*]], [[ENTRY]] ], [ [[B3]], [[LOOP]] ], [ [[B41]], [[LEFT]] ], !is_base_value !1
 ; CHECK-NEXT:    [[B6:%.*]] = phi i8 addrspace(1)* [ [[B1]], [[ENTRY]] ], [ [[B3]], [[LOOP]] ], [ [[B41]], [[LEFT]] ]
-; CHECK-NEXT:    [[TOKEN2:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* [[B6]], i8 addrspace(1)* [[B6_BASE]]) ]
+; CHECK-NEXT:    [[TOKEN2:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %b6, i8 addrspace(1)* %b6.base) ]
 ; CHECK-NEXT:    [[B6_RELOCATED:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN2]], i32 1, i32 0)
 ; CHECK-NEXT:    [[B6_BASE_RELOCATED:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN2]], i32 1, i32 1)
 ; CHECK-NEXT:    ret i8 addrspace(1)* [[B6_RELOCATED]]
@@ -260,7 +259,7 @@ define i8 addrspace(1)* @test8(i1 %c, i32 %n, i8 addrspace(1)* %b1, i8 addrspace
 ; CHECK-NEXT:    ]
 ; CHECK:       merge2:
 ; CHECK-NEXT:    [[B6:%.*]] = phi i8 addrspace(1)* [ [[B1:%.*]], [[LEFT]] ], [ [[B5]], [[LOOP]] ]
-; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* [[B6]]) ]
+; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %b6) ]
 ; CHECK-NEXT:    [[B6_RELOCATED:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
 ; CHECK-NEXT:    ret i8 addrspace(1)* [[B6_RELOCATED]]
 ;

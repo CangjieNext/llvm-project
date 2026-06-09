@@ -68,7 +68,7 @@ declare void @"_ZN11std$FS$core18NoneValueException6<init>Ev"(i8 addrspace(1)*)
 declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)
 declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)
 
-; CHECK: [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 4, i32 0, void ()* @CJ_MCC_StackCheck, i32 0, i32 0)
+; CHECK: [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 5, i32 0, void ()* @CJ_MCC_StackCheck, i32 0, i32 0)
 
 define void @foo(%"record._ZN7default11std$FS$core5RangeItE"* noalias nocapture writeonly sret(%"record._ZN7default11std$FS$core5RangeItE") %0, i8 addrspace(1)* nocapture readnone %this) gc "cangjie" personality i32* null {
 entry:

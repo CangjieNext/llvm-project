@@ -124,11 +124,10 @@ define void @test_void_vararg() gc "statepoint-example" {
 ; CHECK-NEXT:    .cfi_def_cfa_offset 16
 ; CHECK-NEXT:    movl $42, %edi
 ; CHECK-NEXT:    movl $43, %esi
-; CHECK-NEXT:    callq varargf@PLT
-; CHECK-NEXT:  .Ltmp6:
-; CHECK-NEXT:    popq %rax
+; CHECK-NEXT:    addq $8, %rsp
 ; CHECK-NEXT:    .cfi_def_cfa_offset 8
-; CHECK-NEXT:    retq
+; CHECK-NEXT:    jmp varargf@PLT # TAILCALL
+; CHECK-NEXT:  .Ltmp6:
 ; Check a statepoint wrapping a *ptr returning vararg function works
 entry:
   %safepoint_token = tail call token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0(i64 0, i32 0, ptr elementtype(void (i32, ...)) @varargf, i32 2, i32 0, i32 42, i32 43, i32 0, i32 0)

@@ -44,7 +44,7 @@ entry:
 ; CHECK-NEXT:  %.sroa.0.0.insert.insert14 = or i64 %.sroa.0.0.insert.mask13, %.sroa.0.0.insert.ext12
 ; CHECK-NEXT:  %.fca.0.insert = insertvalue %record poison, i64 %.sroa.0.0.insert.insert14, 0
 ; CHECK-NEXT:  %.fca.1.insert = insertvalue %record %.fca.0.insert, i8 addrspace(1)* %arg0.fca.1.extract, 1
-; CHECK-NEXT:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0)
+; CHECK-NEXT:  %token = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0)
 ;
 tmp1:
   %3 = load %record, %record* %0
@@ -54,7 +54,7 @@ tmp1:
 ; CHECK:  tmp2:
 ; CHECK-NEXT:  %.sroa.0.sroa.0.0.sroa_cast33 = bitcast i8* %.sroa.0.sroa.0 to i1*
 ; CHECK-NEXT:  %.sroa.0.sroa.0.0..sroa.0.sroa.0.0..sroa.0.0. = load i1, i1* %.sroa.0.sroa.0.0.sroa_cast33, align 8
-; CHECK-NEXT:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%record addrspace(1)*, i8 addrspace(1)*)* @g1, i32 2, i32 0, %record addrspace(1)* %arg2, i8 addrspace(1)* null) [ "gc-live"(%record %arg0, i8 addrspace(1)* %arg1, %record addrspace(1)* %arg2) ]
+; CHECK-NEXT:  %token2 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%record addrspace(1)*, i8 addrspace(1)*)* @g1, i32 2, i32 0, %record addrspace(1)* %arg2, i8 addrspace(1)* null) [ "gc-live"(%record %arg0) ]
 ;
 tmp2:
   %4 = bitcast %record* %0 to i1*
