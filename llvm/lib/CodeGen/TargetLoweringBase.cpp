@@ -1207,7 +1207,7 @@ TargetLoweringBase::emitPatchPoint(MachineInstr &InitialMI,
       // Used for spills inserted by StatepointLowering.  This codepath is not
       // used for patchpoints/stackmaps at all, for these spilling is done via
       // foldMemoryOperand callback only.
-      assert(MI->getOpcode() == TargetOpcode::STATEPOINT && "sanity");
+      assert(isStatepointOpcode(MI->getOpcode()) && "sanity");
       MIB.addImm(StackMaps::IndirectMemRefOp);
       MIB.addImm(MFI.getObjectSize(FI));
       MIB.add(MO);
@@ -1228,7 +1228,7 @@ TargetLoweringBase::emitPatchPoint(MachineInstr &InitialMI,
 
     // Note: STATEPOINT MMOs are added during SelectionDAG.  STACKMAP, and
     // PATCHPOINT should be updated to do the same. (TODO)
-    if (MI->getOpcode() != TargetOpcode::STATEPOINT) {
+    if (!isStatepointOpcode(MI->getOpcode())) {
       auto Flags = MachineMemOperand::MOLoad;
       MachineMemOperand *MMO = MF.getMachineMemOperand(
           MachinePointerInfo::getFixedStack(MF, FI), Flags,

@@ -17,6 +17,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Function.h"
@@ -183,7 +184,7 @@ MachineBasicBlock::iterator TargetFrameLowering::preCJStackCheck(
 
   for (auto BBI = MF.front().begin(); BBI != MF.front().end(); BBI++) {
     MachineInstr *MI = &*BBI;
-    if (MI->getOpcode() != TargetOpcode::STATEPOINT)
+    if (!isStatepointOpcode(MI->getOpcode()))
       continue;
 
     StatepointOpers SO(MI);

@@ -3518,7 +3518,7 @@ static bool isNonStackOverflowFunc(MachineFunction &MF, unsigned FrameSize) {
 
   for (MachineBasicBlock &BB : MF) {
     for (MachineInstr &MI : BB) {
-      if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+      if (!isStatepointOpcode(MI.getOpcode()))
         continue;
 
       StatepointOpers SO(&MI);
@@ -4193,7 +4193,7 @@ bool AsmPrinter::tryEmitCangjieSpecificCall(const MachineInstr *MI) {
 
   unsigned Opcode = MI->getOpcode();
   // statepoint call will be processed by LowerSTATEPOINT
-  if (Opcode == TargetOpcode::STATEPOINT) {
+  if (isStatepointOpcode(Opcode)) {
     return false;
   }
 
