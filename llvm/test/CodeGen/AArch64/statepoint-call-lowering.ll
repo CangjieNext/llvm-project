@@ -125,10 +125,9 @@ define void @test_void_vararg() gc "statepoint-example" {
 ; CHECK-NEXT:    .cfi_offset w30, -16
 ; CHECK-NEXT:    mov w0, #42
 ; CHECK-NEXT:    mov w1, #43
-; CHECK-NEXT:    bl varargf
-; CHECK-NEXT:  .Ltmp6:
 ; CHECK-NEXT:    ldr x30, [sp], #16 // 8-byte Folded Reload
-; CHECK-NEXT:    ret
+; CHECK-NEXT:    b varargf
+; CHECK-NEXT:  .Ltmp6:
 ; Check a statepoint wrapping a *void* returning vararg function works
 entry:
   %safepoint_token = tail call token (i64, i32, void (i32, ...)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidi32varargf(i64 0, i32 0, void (i32, ...)* elementtype(void (i32, ...)) @varargf, i32 2, i32 0, i32 42, i32 43, i32 0, i32 0)

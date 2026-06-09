@@ -157,6 +157,10 @@ HANDLE_TARGET_OPCODE(PREALLOCATED_ARG)
 /// collectors and deoptimizations in either the callee or caller.
 HANDLE_TARGET_OPCODE(STATEPOINT)
 
+/// Tail call form of STATEPOINT. It carries the same operands as STATEPOINT,
+/// but is lowered as a tail call by the target AsmPrinter.
+HANDLE_TARGET_OPCODE(STATEPOINT_TAIL_CALL)
+
 /// Instruction that records the offset of a local stack allocation passed to
 /// llvm.localescape. It has two arguments: the symbol for the label and the
 /// frame index of the local stack allocation.

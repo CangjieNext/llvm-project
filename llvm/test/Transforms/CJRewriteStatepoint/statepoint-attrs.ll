@@ -8,8 +8,7 @@ declare void @f(i8 addrspace(1)* %obj)
 ; copy over norecurse noimplicitfloat to statepoint call
 define void @test1(i8 addrspace(1)* %arg) gc "cangjie" {
 ; CHECK-LABEL: @test1(
-; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @f, i32 1, i32 0, i8 addrspace(1)* [[ARG:%.*]]) #[[ATTR1:[0-9]+]] [ "gc-live"(i8 addrspace(1)* [[ARG]]) ]
-; CHECK-NEXT:    [[ARG_RELOCATED:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
+; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @f, i32 1, i32 0, i8 addrspace(1)* [[ARG:%.*]]) #[[ATTR0:[0-9]+]]
 ; CHECK-NEXT:    ret void
 ;
 
@@ -20,6 +19,7 @@ define void @test1(i8 addrspace(1)* %arg) gc "cangjie" {
 
 attributes #1 = { norecurse noimplicitfloat }
 ;.
-; CHECK: attributes #[[ATTR0:[0-9]+]] = { nounwind readnone }
-; CHECK: attributes #[[ATTR1]] = { noimplicitfloat norecurse }
+; CHECK: attributes #[[ATTR0]] = { noimplicitfloat norecurse }
+;.
+; CHECK: [[META0:![0-9]+]] = !{i32 2, !"HasRewrittenStatepoint", i32 1}
 ;.
