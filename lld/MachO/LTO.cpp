@@ -39,7 +39,8 @@ static Optional<StringRef> getBitcodePackageName(const BitcodeFile &file) {
   //   <subCHIRPackageIdx>-<pkgName>
   StringRef pkgName = file.obj->getSourceFileName();
   unsigned subCHIRPackageIdx = 0;
-  if (pkgName.consumeInteger(10, subCHIRPackageIdx) ||
+  constexpr unsigned decimalBase = 10;
+  if (pkgName.consumeInteger(decimalBase, subCHIRPackageIdx) ||
       !pkgName.consume_front("-") || pkgName.empty())
     return None;
   return pkgName;
@@ -106,8 +107,8 @@ void BitcodeCompiler::add(BitcodeFile &f) {
     r.Prevailing = !objSym.isUndefined() && sym->getFile() == &f;
 
     if (const auto *defined = dyn_cast<Defined>(sym)) {
-      r.ExportDynamic = defined->isExternal() && !defined->privateExtern &&
-                        exportDynamic;
+      r.ExportDynamic =
+          defined->isExternal() && !defined->privateExtern && exportDynamic;
       r.FinalDefinitionInLinkageUnit =
           !defined->isExternalWeakDef() && !defined->interposable;
     } else if (const auto *common = dyn_cast<CommonSymbol>(sym)) {

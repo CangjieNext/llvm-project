@@ -744,7 +744,7 @@ void CJMetadataInfo::emitGlobalInitFuncTable() {
       FuncName.push_back('\0');
       OS.emitBytes(FuncName);
       // Pad to 8-byte alignment so runtime can iterate entries with aligned reads,
-      // This does not affect backward compatibility with older runtimes that use unaligned reads. 
+      // This does not affect backward compatibility with older runtimes that use unaligned reads.
       unsigned EntrySize = FuncPtrSize + FuncName.size();
       unsigned Padding = (8 - (EntrySize % 8)) % 8;
       if (Padding > 0)
