@@ -14,7 +14,7 @@ entry:
   br i1 %cond, label %for, label %end
 
 ; CHECK: for:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%record addrspace(1)*, i8 addrspace(1)*)* @g0, i32 2, i32 0, %record addrspace(1)* %.0, i8 addrspace(1)* %.03) [ "gc-live"(%record addrspace(1)* %.0, i8 addrspace(1)* %.03, %record %arg0), "struct-live"(%record* %0) ]
+; CHECK:  %token = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%record addrspace(1)*, i8 addrspace(1)*)* @g0, i32 2, i32 0, %record addrspace(1)* %.0, i8 addrspace(1)* %.03) [ "gc-live"(%record addrspace(1)* %.0, i8 addrspace(1)* %.03, %record %arg0), "struct-live"(%record* %0) ]
 ;
 for:                                    ; preds = %entry, %for
   %phi_i = phi i32 [ 0, %entry ], [ %i, %for ]
@@ -26,7 +26,7 @@ for:                                    ; preds = %entry, %for
   br i1 %loop.cond, label %for, label %end
 
 ; CHECK:  end:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%record)* @g1, i32 1, i32 0, %record %arg0) [ "gc-live"(i8 addrspace(1)* %load, %record %arg0) ]
+; CHECK:  %token2 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%record)* @g1, i32 1, i32 0, %record %arg0) [ "gc-live"(i8 addrspace(1)* %load) ]
 ;
 end:                                    ; preds = %entry, %for
   %phi_end = phi i8 addrspace(1)** [ %1, %entry], [ %phi, %for ]

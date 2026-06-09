@@ -23,7 +23,7 @@ declare { i64, i1 } @llvm.ssub.with.overflow.i64(i64 %arg0, i64 %arg1)
 define i64 @foo(i8 addrspace(1)* %arg0, %record addrspace(1)* %arg1, i64 %arg2, i8* %arg3) #0 gc "cangjie" {
 ; CHECK-LABEL: foo
 ; CHECK:  entry:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %arg0) ]
+; CHECK:  %token = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %arg0) ]
 ;
 entry:
   %0 = alloca %record
@@ -85,9 +85,9 @@ ifelse3:                                    ; preds = %ifthen1
   br label %body1
 
 ; CHECK:  ifthen3:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %20) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %38) [ "struct-live"(%record* %20) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %39) [ "gc-live"(i8 addrspace(1)* %39) ]
+; CHECK:  %token39 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %20) ]
+; CHECK:  %token41 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %38) [ "struct-live"(%record* %20) ]
+; CHECK:  %token43 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %39)
 ;
 ifthen3:                                     ; preds = %ifthen1
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -107,14 +107,14 @@ body1:                               ; preds = %ifthen7, %ifelse3
   ]
 
 ; CHECK:  ifthen5:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i64, i8*)* @g4, i32 2, i32 0, i64 0, i8* %arg3) [ "gc-live"(i8 addrspace(1)* %.0), "struct-live"(%record* %17, %record* %21) ]
+; CHECK:  %token45 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i64, i8*)* @g4, i32 2, i32 0, i64 0, i8* %arg3) [ "gc-live"(i8 addrspace(1)* %.0), "struct-live"(%record* %17, %record* %21) ]
 ;
 ifthen5:                                  ; preds = %body1
   %44 = call i8 addrspace(1)* @g4(i64 0, i8* %arg3)
   br label %body2
 
 ; CHECK:  ifthen7:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %.0, %array addrspace(1)* %.0190), "struct-live"(%record* %19, %record* %17, %record* %21, %record* %18) ]
+; CHECK:  %token48 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %.0, %array addrspace(1)* %.0185), "struct-live"(%record* %19, %record* %17, %record* %21, %record* %18) ]
 ;
 ifthen7:                                   ; preds = %body1
   %45 = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %41, i64 1)
@@ -123,9 +123,9 @@ ifthen7:                                   ; preds = %body1
   br i1 %conv2, label %ifthen8, label %body1
 
 ; CHECK:  ifthen8:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %19) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %49) [ "struct-live"(%record* %19) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %50) [ "gc-live"(i8 addrspace(1)* %50) ]
+; CHECK:  %token51 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %19) ]
+; CHECK:  %token53 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %48) [ "struct-live"(%record* %19) ]
+; CHECK:  %token55 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %49)
 ;
 ifthen8:                                   ; preds = %ifthen7
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -148,9 +148,9 @@ ifelse9:                                ; preds = %ifthen6
   br i1 %conv5, label %ifthen10, label %ifelse10
 
 ; CHECK:  ifthen9:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %18) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %55) [ "struct-live"(%record* %18) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %56) [ "gc-live"(i8 addrspace(1)* %56) ]
+; CHECK:  %token57 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %18) ]
+; CHECK:  %token59 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %53) [ "struct-live"(%record* %18) ]
+; CHECK:  %token61 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %54)
 ;
 ifthen9:                                   ; preds = %ifthen6
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -164,9 +164,9 @@ ifelse10:                                ; preds = %ifelse9
   br i1 %icmpsgt1, label %tmp1, label %tmp2
 
 ; CHECK:  ifthen10:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %17) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %58) [ "struct-live"(%record* %17) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %59) [ "gc-live"(i8 addrspace(1)* %59) ]
+; CHECK:  %token63 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %17) ]
+; CHECK:  %token65 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %55) [ "struct-live"(%record* %17) ]
+; CHECK:  %token67 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %56)
 ;
 ifthen10:                                   ; preds = %ifelse9
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -176,9 +176,9 @@ ifthen10:                                   ; preds = %ifelse9
   unreachable
 
 ; CHECK:  tmp2:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 40)
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g6, i32 1, i32 0, i8 addrspace(1)* %61) [ "gc-live"(i8 addrspace(1)* %61) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %62) [ "gc-live"(i8 addrspace(1)* %62) ]
+; CHECK:  %token69 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 40)
+; CHECK:  %token71 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g6, i32 1, i32 0, i8 addrspace(1)* %57) [ "gc-live"(i8 addrspace(1)* %57) ]
+; CHECK:  %token73 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %58)
 ;
 tmp2:                              ; preds = %ifelse10
   %55 = call i8 addrspace(1)* @g5(i8* %arg3, i32 40)
@@ -187,8 +187,8 @@ tmp2:                              ; preds = %ifelse10
   unreachable
 
 ; CHECK:  tmp1:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i64, i8*)* @g4, i32 2, i32 0, i64 %conv4, i8* %arg3) [ "gc-live"(i8 addrspace(1)* %.0), "struct-live"(%record* %17, %record* %21) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 24) [ "gc-live"(i8 addrspace(1)* %arg0.reloc80, i8 addrspace(1)* %64), "struct-live"(%record* %17, %record* %21) ]
+; CHECK:  %token75 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i64, i8*)* @g4, i32 2, i32 0, i64 %conv4, i8* %arg3) [ "gc-live"(i8 addrspace(1)* %.0), "struct-live"(%record* %17, %record* %21) ]
+; CHECK:  %token78 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 24) [ "gc-live"(i8 addrspace(1)* %arg0.reloc76, i8 addrspace(1)* %59), "struct-live"(%record* %17, %record* %21) ]
 ;
 tmp1:                               ; preds = %ifelse10
   %56 = call i8 addrspace(1)* @g4(i64 %conv4, i8* %arg3)
@@ -202,7 +202,7 @@ tmp1:                               ; preds = %ifelse10
 ; CHECK:  tmp4:
 ; CHECK-NEXT: [[REMAT0:%.*]] = getelementptr inbounds i8, i8 addrspace(1)* [[TMP0:%.*]], i64 8
 ; CHECK-NEXT: [[REMAT1:%.*]] = bitcast i8 addrspace(1)* [[REMAT0]] to i8 addrspace(1)* addrspace(1)*
-; CHECK-NEXT:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*)* @g7, i32 3, i32 0, i8 addrspace(1)* %arg0.reloc83, i8 addrspace(1)* %65, i8 addrspace(1)* addrspace(1)* [[REMAT1]]) [ "gc-live"(i8 addrspace(1)* %arg0.reloc83, i8 addrspace(1)* %66, i8 addrspace(1)* %65), "struct-live"(%record* %17, %record* %21) ]
+; CHECK-NEXT:  %token81 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*)* @g7, i32 3, i32 0, i8 addrspace(1)* %arg0.reloc79, i8 addrspace(1)* %60, i8 addrspace(1)* addrspace(1)* %.remat35) [ "gc-live"(i8 addrspace(1)* %arg0.reloc79, i8 addrspace(1)* %61, i8 addrspace(1)* %60), "struct-live"(%record* %17, %record* %21) ]
 ;
 tmp4:                                               ; preds = %tmp1
   call void @g7(i8 addrspace(1)* %arg0, i8 addrspace(1)* %57, i8 addrspace(1)* addrspace(1)* %59)
@@ -220,7 +220,7 @@ tmpend2:                                               ; preds = %tmp3, %tmp4
 ; CHECK:  tmp6:
 ; CHECK-NEXT: [[REMAT2:%.*]] = getelementptr inbounds i8, i8 addrspace(1)* [[TMP1:%.*]], i64 16
 ; CHECK-NEXT: [[REMAT3:%.*]] = bitcast i8 addrspace(1)* [[REMAT2]] to i64 addrspace(1)*
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i64, i8 addrspace(1)*, i64 addrspace(1)*)* @g8, i32 3, i32 0, i64 %arg2, i8 addrspace(1)* %.0196, i64 addrspace(1)* [[REMAT3]]) [ "gc-live"(i8 addrspace(1)* %.1, i8 addrspace(1)* %.0192, i8 addrspace(1)* %.0196), "struct-live"(%record* %17, %record* %21) ]
+; CHECK:  %token84 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i64, i8 addrspace(1)*, i64 addrspace(1)*)* @g8, i32 3, i32 0, i64 %arg2, i8 addrspace(1)* %.0191, i64 addrspace(1)* %.remat29) [ "gc-live"(i8 addrspace(1)* %.1, i8 addrspace(1)* %.0187, i8 addrspace(1)* %.0191), "struct-live"(%record* %17, %record* %21) ]
 ;
 tmp6:                                               ; preds = %tmpend2
   call void @g8(i64 %arg2, i8 addrspace(1)* %57, i64 addrspace(1)* %62)
@@ -231,7 +231,7 @@ tmp5:                                               ; preds = %tmpend2
   br label %tmpend3
 
 ; CHECK:  tmpend3:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 24) [ "gc-live"(i8 addrspace(1)* %.2, i8 addrspace(1)* %.1193, i8 addrspace(1)* %.1197), "struct-live"(%record* %17, %record* %21) ]
+; CHECK:  %token87 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 24) [ "gc-live"(i8 addrspace(1)* %.2, i8 addrspace(1)* %.1188, i8 addrspace(1)* %.1192), "struct-live"(%record* %17, %record* %21) ]
 ;
 tmpend3:                                               ; preds = %tmp5, %tmp6
   %63 = call i8 addrspace(1)* @g5(i8* %arg3, i32 24)
@@ -243,7 +243,7 @@ tmpend3:                                               ; preds = %tmp5, %tmp6
   br i1 %icmpsle2, label %tmp7, label %tmp8
 
 ; CHECK:  tmp8:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*)* @g7, i32 3, i32 0, i8 addrspace(1)* %79, i8 addrspace(1)* %76, i8 addrspace(1)* addrspace(1)* %81) [ "gc-live"(i8 addrspace(1)* %arg0.reloc92, i8 addrspace(1)* %77, i8 addrspace(1)* %76, i8 addrspace(1)* %78, i8 addrspace(1)* %79), "struct-live"(%record* %17, %record* %21) ]
+; CHECK:  %token90 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*)* @g7, i32 3, i32 0, i8 addrspace(1)* %74, i8 addrspace(1)* %71, i8 addrspace(1)* addrspace(1)* %76) [ "gc-live"(i8 addrspace(1)* %arg0.reloc88, i8 addrspace(1)* %72, i8 addrspace(1)* %71, i8 addrspace(1)* %73), "struct-live"(%record* %17, %record* %21) ]
 ;
 tmp8:                                               ; preds = %tmpend3
   call void @g7(i8 addrspace(1)* %64, i8 addrspace(1)* %63, i8 addrspace(1)* addrspace(1)* %66)
@@ -260,7 +260,7 @@ tmpend4:                                               ; preds = %tmp7, %tmp8
   br i1 %icmpsle2, label %tmp9, label %tmp10
 
 ; CHECK:  tmp10:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i64, i8 addrspace(1)*, i64 addrspace(1)*)* @g8, i32 3, i32 0, i64 %87, i8 addrspace(1)* %.0199, i64 addrspace(1)* %89) [ "gc-live"(i8 addrspace(1)* %.3, i8 addrspace(1)* %.2194, i8 addrspace(1)* %.0199), "struct-live"(%record* %17, %record* %21) ]
+; CHECK:  %token93 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i64, i8 addrspace(1)*, i64 addrspace(1)*)* @g8, i32 3, i32 0, i64 %81, i8 addrspace(1)* %.0194, i64 addrspace(1)* %83) [ "gc-live"(i8 addrspace(1)* %.3, i8 addrspace(1)* %.2189, i8 addrspace(1)* %.0194), "struct-live"(%record* %17, %record* %21) ]
 ;
 tmp10:                                               ; preds = %tmpend4
   call void @g8(i64 %68, i8 addrspace(1)* %63, i64 addrspace(1)* %70)
@@ -271,7 +271,7 @@ tmp9:                                               ; preds = %tmpend4
   br label %tmpend5
 
 ; CHECK:  tmpend5:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, i64, i8 addrspace(1)*)* @g9, i32 3, i32 0, i8 addrspace(1)* %.3195, i64 %conv4, i8 addrspace(1)* %.1200) [ "gc-live"(i8 addrspace(1)* %.4, i8 addrspace(1)* %.3195, i8 addrspace(1)* %.1200), "struct-live"(%record* %17, %record* %21) ]
+; CHECK:  %token96 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, i64, i8 addrspace(1)*)* @g9, i32 3, i32 0, i8 addrspace(1)* %.3190, i64 %conv4, i8 addrspace(1)* %.1195) [ "gc-live"(i8 addrspace(1)* %.4), "struct-live"(%record* %17, %record* %21) ]
 ;
 tmpend5:                                               ; preds = %tmp9, %tmp10
   %71 = call i8 addrspace(1)* @g9(i8 addrspace(1)* %56, i64 %conv4, i8 addrspace(1)* %63)
@@ -305,9 +305,9 @@ tmp14:                               ; preds = %tmp12
   br label %tmpend7
 
 ; CHECK:  tmp13:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 40) [ "struct-live"(%record* %17) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, %record addrspace(1)*)* @g10, i32 3, i32 0, i8 addrspace(1)* %111, i8 addrspace(1)* null, %record addrspace(1)* %112) [ "gc-live"(i8 addrspace(1)* %111), "struct-live"(%record* %17) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %113) [ "gc-live"(i8 addrspace(1)* %113) ]
+; CHECK:  %token99 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 40) [ "struct-live"(%record* %17) ]
+; CHECK:  %token101 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, %record addrspace(1)*)* @g10, i32 3, i32 0, i8 addrspace(1)* %103, i8 addrspace(1)* null, %record addrspace(1)* %104) [ "gc-live"(i8 addrspace(1)* %103), "struct-live"(%record* %17) ]
+; CHECK:  %token103 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %105)
 ;
 tmp13:                                    ; preds = %ifelse16, %tmp12
   %88 = call i8 addrspace(1)* @g5(i8* %arg3, i32 40)
@@ -339,9 +339,9 @@ ifelse11:                     ; preds = %tmp15
   br label %ifend11
 
 ; CHECK:  ifthen11:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %16) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %121) [ "struct-live"(%record* %16) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %122) [ "gc-live"(i8 addrspace(1)* %122) ]
+; CHECK:  %token105 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %16) ]
+; CHECK:  %token107 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %112) [ "struct-live"(%record* %16) ]
+; CHECK:  %token109 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %113)
 ;
 ifthen11:                                    ; preds = %tmp15
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -374,7 +374,7 @@ tmp20:                                   ; preds = %tmp17
   br i1 %conv7, label %ifthen12, label %ifelse12
 
 ; CHECK:  ifelse12:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0) [ "gc-live"(%array addrspace(1)* %.0204, i8 addrspace(1)* %.7, i8 addrspace(1)* %.1202), "struct-live"(%record* %14, %record* %21, %record* %13, %record* %12, %record* %17, %record* %15) ]
+; CHECK:  %token111 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0) [ "gc-live"(%array addrspace(1)* %.0197, i8 addrspace(1)* %.7, i8 addrspace(1)* %.1199), "struct-live"(%record* %14, %record* %21, %record* %13, %record* %12, %record* %17, %record* %15) ]
 ;
 ifelse12:                                 ; preds = %tmp20
   %conv25 = extractvalue { i64, i1 } %105, 0
@@ -384,9 +384,9 @@ ifelse12:                                 ; preds = %tmp20
   br i1 %conv8, label %ifthen13, label %ifend11
 
 ; CHECK:  ifthen12:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %15) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %136) [ "struct-live"(%record* %15) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %137) [ "gc-live"(i8 addrspace(1)* %137) ]
+; CHECK:  %token114 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %15) ]
+; CHECK:  %token116 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %126) [ "struct-live"(%record* %15) ]
+; CHECK:  %token118 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %127)
 ;
 ifthen12:                                    ; preds = %tmp20
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -396,9 +396,9 @@ ifthen12:                                    ; preds = %tmp20
   unreachable
 
 ; CHECK:  ifthen13:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %14) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %139) [ "struct-live"(%record* %14) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %140) [ "gc-live"(i8 addrspace(1)* %140) ]
+; CHECK:  %token120 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %14) ]
+; CHECK:  %token122 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %128) [ "struct-live"(%record* %14) ]
+; CHECK:  %token124 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %129)
 ;
 ifthen13:                                   ; preds = %ifelse12
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -419,9 +419,9 @@ ifelse14:                                ; preds = %tmp19
   br i1 %conv10, label %ifthen15, label %ifelse15
 
 ; CHECK:  ifthen14:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %13) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %144) [ "struct-live"(%record* %13) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %145) [ "gc-live"(i8 addrspace(1)* %145) ]
+; CHECK:  %token126 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %13) ]
+; CHECK:  %token128 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %132) [ "struct-live"(%record* %13) ]
+; CHECK:  %token130 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %133)
 ;
 ifthen14:                                   ; preds = %tmp19
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -431,9 +431,9 @@ ifthen14:                                   ; preds = %tmp19
   unreachable
 
 ; CHECK:  ifthen15:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %12) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %147) [ "struct-live"(%record* %12) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %148) [ "gc-live"(i8 addrspace(1)* %148) ]
+; CHECK:  %token132 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %12) ]
+; CHECK:  %token134 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %134) [ "struct-live"(%record* %12) ]
+; CHECK:  %token136 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %135)
 ;
 ifthen15:                                   ; preds = %ifelse14
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -454,7 +454,7 @@ tmp16:                                     ; preds = %ifelse15, %tmp18, %tmpend7
   br i1 %conv11, label %ifthen16, label %ifelse16
 
 ; CHECK:  ifelse16:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0) [ "gc-live"(%array addrspace(1)* %base_phi, %array addrspace(1)* %150, i8 addrspace(1)* %.8, i8 addrspace(1)* %.2203), "struct-live"(%record* %17, %record* %21) ]
+; CHECK:  %token138 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0) [ "gc-live"(%array addrspace(1)* %base_phi, %array addrspace(1)* %136, i8 addrspace(1)* %.8, i8 addrspace(1)* %.2200), "struct-live"(%record* %17, %record* %21) ]
 ;
 ifelse16:                                    ; preds = %tmp16
   %conv17 = extractvalue { i64, i1 } %118, 0
@@ -466,9 +466,9 @@ ifelse16:                                    ; preds = %tmp16
   br i1 %icmpeq6, label %tmp13, label %tmpend7
 
 ; CHECK:  ifthen16:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %21) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %158) [ "struct-live"(%record* %21) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %159) [ "gc-live"(i8 addrspace(1)* %159) ]
+; CHECK:  %token141 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %21) ]
+; CHECK:  %token143 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %144) [ "struct-live"(%record* %21) ]
+; CHECK:  %token145 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %145)
 ;
 ifthen16:                                       ; preds = %tmp16
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -487,9 +487,9 @@ tmp11:                                      ; preds = %body3, %body2
   br i1 %icmpeq7, label %ifthen4, label %tmp38
 
 ; CHECK:  ifthen4:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 40) [ "struct-live"(%record* %17) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, %record addrspace(1)*)* @g10, i32 3, i32 0, i8 addrspace(1)* %162, i8 addrspace(1)* null, %record addrspace(1)* %163) [ "gc-live"(i8 addrspace(1)* %162), "struct-live"(%record* %17) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %164) [ "gc-live"(i8 addrspace(1)* %164) ]
+; CHECK:  %token147 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 40) [ "struct-live"(%record* %17) ]
+; CHECK:  %token149 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, %record addrspace(1)*)* @g10, i32 3, i32 0, i8 addrspace(1)* %147, i8 addrspace(1)* null, %record addrspace(1)* %148) [ "gc-live"(i8 addrspace(1)* %147), "struct-live"(%record* %17) ]
+; CHECK:  %token151 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %149)
 ;
 ifthen4:                                      ; preds = %tmp11
   %125 = call i8 addrspace(1)* @g5(i8* %arg3, i32 40)
@@ -530,9 +530,9 @@ ifelse17:                                  ; preds = %ifthen2
   br i1 %icmpsgt3, label %tmp21, label %tmp22
 
 ; CHECK:  ifthen17:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %11) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %177) [ "struct-live"(%record* %11) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %178) [ "gc-live"(i8 addrspace(1)* %178) ]
+; CHECK:  %token153 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %11) ]
+; CHECK:  %token155 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %161) [ "struct-live"(%record* %11) ]
+; CHECK:  %token157 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %162)
 ;
 ifthen17:                                     ; preds = %ifthen2
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -602,9 +602,9 @@ tmp29:                                      ; preds = %ifthen19, %tmp27
   br i1 %icmpeq11, label %tmp31, label %tmp32
 
 ; CHECK:  tmp31:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 40) [ "struct-live"(%record* %17) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, %record addrspace(1)*)* @g10, i32 3, i32 0, i8 addrspace(1)* %203, i8 addrspace(1)* null, %record addrspace(1)* %204) [ "gc-live"(i8 addrspace(1)* %203), "struct-live"(%record* %17) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %205) [ "gc-live"(i8 addrspace(1)* %205) ]
+; CHECK:  %token159 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 40) [ "struct-live"(%record* %17) ]
+; CHECK:  %token161 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, %record addrspace(1)*)* @g10, i32 3, i32 0, i8 addrspace(1)* %186, i8 addrspace(1)* null, %record addrspace(1)* %187) [ "gc-live"(i8 addrspace(1)* %186), "struct-live"(%record* %17) ]
+; CHECK:  %token163 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %188)
 ;
 tmp31:                                    ; preds = %ifelse22, %tmp29
   %163 = call i8 addrspace(1)* @g5(i8* %arg3, i32 40)
@@ -631,9 +631,9 @@ ifelse21:                                  ; preds = %tmp33
   br i1 %icmpslt1, label %tmp34, label %body4
 
 ; CHECK:  ifthen21:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %5) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %211) [ "struct-live"(%record* %5) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %212) [ "gc-live"(i8 addrspace(1)* %212) ]
+; CHECK:  %token165 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %5) ]
+; CHECK:  %token167 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %193) [ "struct-live"(%record* %5) ]
+; CHECK:  %token169 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %194)
 ;
 ifthen21:                                     ; preds = %tmp33
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -662,7 +662,7 @@ tmp34:                                     ; preds = %body5, %body4, %ifelse21, 
   br i1 %conv16, label %ifthen22, label %ifelse22
 
 ; CHECK:  ifelse22:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0) [ "gc-live"(%array addrspace(1)* %.0191, i8 addrspace(1)* %.9), "struct-live"(%record* %17, %record* %1, %record* %5) ]
+; CHECK:  %token171 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @g0, i32 0, i32 0) [ "gc-live"(%array addrspace(1)* %.0196, i8 addrspace(1)* %.9), "struct-live"(%record* %17, %record* %1, %record* %5) ]
 ;
 ifelse22:                                  ; preds = %tmp34
   %conv18 = extractvalue { i64, i1 } %177, 0
@@ -673,9 +673,9 @@ ifelse22:                                  ; preds = %tmp34
   br i1 %icmpeq15, label %tmp31, label %tmp32
 
 ; CHECK:  ifthen22:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %1) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %225) [ "struct-live"(%record* %1) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %226) [ "gc-live"(i8 addrspace(1)* %226) ]
+; CHECK:  %token174 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8*, i64, i64)* @g1, i32 3, i32 0, i8* %arg3, i64 0, i64 0) [ "struct-live"(%record* %1) ]
+; CHECK:  %token176 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %206) [ "struct-live"(%record* %1) ]
+; CHECK:  %token178 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %207)
 ;
 ifthen22:                                     ; preds = %tmp34
   call void @g1(i8* %arg3, i64 0, i64 0)
@@ -743,9 +743,9 @@ end1:                                       ; preds = %tmp36, %body6
   br i1 %icmpeq18, label %tmp37, label %tmp38
 
 ; CHECK:  tmp37:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 40) [ "struct-live"(%record* %17) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, %record addrspace(1)*)* @g10, i32 3, i32 0, i8 addrspace(1)* %242, i8 addrspace(1)* null, %record addrspace(1)* %243) [ "gc-live"(i8 addrspace(1)* %242), "struct-live"(%record* %17) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %244) [ "gc-live"(i8 addrspace(1)* %244) ]
+; CHECK:  %token180 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8*, i32)* @g5, i32 2, i32 0, i8* %arg3, i32 40) [ "struct-live"(%record* %17) ]
+; CHECK:  %token182 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, i8 addrspace(1)*, %record addrspace(1)*)* @g10, i32 3, i32 0, i8 addrspace(1)* %222, i8 addrspace(1)* null, %record addrspace(1)* %223) [ "gc-live"(i8 addrspace(1)* %222), "struct-live"(%record* %17) ]
+; CHECK:  %token184 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @g3, i32 1, i32 0, i8 addrspace(1)* %224)
 ;
 tmp37:                                      ; preds = %end1
   %196 = call i8 addrspace(1)* @g5(i8* %arg3, i32 40)

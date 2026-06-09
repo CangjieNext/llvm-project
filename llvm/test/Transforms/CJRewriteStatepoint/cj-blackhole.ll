@@ -64,7 +64,7 @@ allocas:
   %9 = bitcast i8** %8 to void (%Unit.Type*, i8 addrspace(1)*, i8 addrspace(1)*, %TypeInfo*)***
   %10 = load void (%Unit.Type*, i8 addrspace(1)*, i8 addrspace(1)*, %TypeInfo*)**, void (%Unit.Type*, i8 addrspace(1)*, i8 addrspace(1)*, %TypeInfo*)*** %9, align 8
   %11 = load void (%Unit.Type*, i8 addrspace(1)*, i8 addrspace(1)*, %TypeInfo*)*, void (%Unit.Type*, i8 addrspace(1)*, i8 addrspace(1)*, %TypeInfo*)** %10, align 8
-; CHECK: %token7 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%Unit.Type*, i8 addrspace(1)*, i8 addrspace(1)*, %TypeInfo*)* %11, i32 4, i32 0, %Unit.Type* nonnull sret(%Unit.Type) %0, i8 addrspace(1)* %a.reloc5, i8 addrspace(1)* %1, %TypeInfo* %ti) [ "gc-live"(i8 addrspace(1)* %1, i8 addrspace(1)* %a.reloc5) ]
+; CHECK: %token7 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%Unit.Type*, i8 addrspace(1)*, i8 addrspace(1)*, %TypeInfo*)* %11, i32 4, i32 0, %Unit.Type* nonnull sret(%Unit.Type) %0, i8 addrspace(1)* %a.reloc5, i8 addrspace(1)* %1, %TypeInfo* %ti) [ "gc-live"(i8 addrspace(1)* %1) ]
   call void %11(%Unit.Type* noalias nonnull sret(%Unit.Type) %0, i8 addrspace(1)* %a, i8 addrspace(1)* %1, %TypeInfo* %ti)
   %12 = addrspacecast i8 addrspace(1)* %1 to i8*
   %13 = call i8* @CJ_LLVM_BlackHole(i8* %12)

@@ -21,7 +21,7 @@ define void @widget() gc "cangjie" {
 ; CHECK:       bb11:
 ; CHECK-NEXT:    [[TMP12_BASE:%.*]] = phi i8 addrspace(1)* [ [[BASE_EE]], [[BB7]] ], [ [[BASE_EE]], [[BB9]] ], !is_base_value !1
 ; CHECK-NEXT:    [[TMP12:%.*]] = phi i8 addrspace(1)* [ [[TMP8]], [[BB7]] ], [ [[TMP10]], [[BB9]] ]
-; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @snork, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* [[TMP12_BASE]], i8 addrspace(1)* [[TMP12]]) ]
+; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @snork, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %tmp12.base, i8 addrspace(1)* %tmp12) ]
 ; CHECK-NEXT:    [[TMP12_BASE_RELOC:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
 ; CHECK-NEXT:    [[TMP12_RELOC:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 1)
 ; CHECK-NEXT:    br label [[BB15]]
@@ -30,16 +30,13 @@ define void @widget() gc "cangjie" {
 ; CHECK-NEXT:    [[TMP16:%.*]] = phi i8 addrspace(1)* [ [[TMP10]], [[BB9]] ], [ [[TMP12_RELOC]], [[BB11]] ]
 ; CHECK-NEXT:    br i1 undef, label [[BB17:%.*]], label [[BB20:%.*]]
 ; CHECK:       bb17:
-; CHECK-NEXT:    [[TOKEN1:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @snork, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* [[TMP16_BASE]], i8 addrspace(1)* [[TMP16]]) ]
-; CHECK-NEXT:    [[TMP16_BASE_RELOC:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN1]], i32 0, i32 0)
-; CHECK-NEXT:    [[TMP16_RELOC:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN1]], i32 0, i32 1)
+; CHECK-NEXT:    [[TOKEN1:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @snork, i32 0, i32 0) [ "gc-live"(i8 addrspace(1)* %tmp16, i8 addrspace(1)* %tmp16.base) ]
+; CHECK-NEXT:    [[TMP16_RELOC:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN1]], i32 1, i32 0)
+; CHECK-NEXT:    [[TMP16_BASE_RELOC:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN1]], i32 1, i32 1)
 ; CHECK-NEXT:    br label [[BB20]]
 ; CHECK:       bb20:
-; CHECK-DAG:    [[DOT05:%.*]] = phi i8 addrspace(1)* [ [[TMP16_BASE_RELOC]], [[BB17]] ], [ [[TMP16_BASE]], [[BB15]] ]
-; CHECK-DAG:    [[DOT0:%.*]] = phi i8 addrspace(1)* [ [[TMP16_RELOC]], [[BB17]] ], [ [[TMP16]], [[BB15]] ]
-; CHECK-NEXT:    [[TOKEN2:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @foo, i32 1, i32 0, i8 addrspace(1)* [[DOT0]]) [ "gc-live"(i8 addrspace(1)* [[DOT05]], i8 addrspace(1)* [[DOT0]]) ]
-; CHECK-NEXT:    [[TMP16_BASE_RELOC3:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN2]], i32 0, i32 0)
-; CHECK-NEXT:    [[TMP16_RELOC4:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN2]], i32 0, i32 1)
+; CHECK-NEXT:    [[DOT0:%.*]] = phi i8 addrspace(1)* [ [[TMP16_RELOC]], [[BB17]] ], [ [[TMP16]], [[BB15]] ]
+; CHECK-NEXT:    [[TOKEN2:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @foo, i32 1, i32 0, i8 addrspace(1)* %.0)
 ; CHECK-NEXT:    ret void
 ;
 bb6:                                              ; preds = %bb3

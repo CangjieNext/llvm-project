@@ -1813,7 +1813,7 @@ bool TwoAddressInstructionPass::runOnMachineFunction(MachineFunction &Func) {
         }
       }
 
-      if (mi->getOpcode() == TargetOpcode::STATEPOINT &&
+      if (isStatepointOpcode(mi->getOpcode()) &&
           processStatepoint(&*mi, TiedOperands)) {
         TiedOperands.clear();
         LLVM_DEBUG(dbgs() << "\t\trewrite to:\t" << *mi);
