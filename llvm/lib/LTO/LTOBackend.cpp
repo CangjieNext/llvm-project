@@ -283,32 +283,6 @@ static bool shouldTrackDefinition(StringRef Name) {
  	       defs.globals.insert(GIF.getName());
  	   return defs;
  	 }
- 	 
- 	 static void printRemovedGlobals(const Module &M, const DefinedSymbolsBeforeOpt &Before) {
- 	   if (!CJLTOPrintRemoved)
- 	     return;
- 	 
- 	   DefinedSymbolsBeforeOpt After = collectDefinedGlobals(M);
- 	   size_t RemovedFunctions = 0;
- 	   size_t RemovedGlobals = 0;
- 	 
- 	   for (const auto &Item : Before.functions) {
- 	     if (After.functions.contains(Item.getKey()))
- 	       continue;
- 	     errs() << "[cj-lto] removed function: " << Item.getKey() << "\n";
- 	     ++RemovedFunctions;
- 	   }
- 	 
- 	   for (const auto &Item : Before.globals) {
- 	     if (After.globals.contains(Item.getKey()))
- 	       continue;
- 	     errs() << "[cj-lto] removed global: " << Item.getKey() << "\n";
- 	     ++RemovedGlobals;
- 	   }
- 	 
- 	   errs() << "[cj-lto] removed function count: " << RemovedFunctions << "\n";
- 	   errs() << "[cj-lto] removed global count: " << RemovedGlobals << "\n";
- 	 }
 
 static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
                            unsigned OptLevel, bool IsThinLTO,
@@ -386,10 +360,6 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   if (!Conf.DisableVerify)
     MPM.addPass(VerifierPass());
 
-  DefinedSymbolsBeforeOpt DefinedBeforeOpt;
- 	   if (CJLTOPrintRemoved)
- 	     DefinedBeforeOpt = collectDefinedGlobals(Mod);
-
   if (CJPipeline) {
     // Customize parameters for cangjie-pipeline.
     if (OptLevel > 1 && !MaxRecursionInl.getPosition()) {
@@ -462,7 +432,6 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
     MPM.addPass(VerifierPass());
 
   MPM.run(Mod, MAM);
-  printRemovedGlobals(Mod, DefinedBeforeOpt);
 }
 
 bool lto::opt(const Config &Conf, TargetMachine *TM, unsigned Task, Module &Mod,
