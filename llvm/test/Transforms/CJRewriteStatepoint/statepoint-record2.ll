@@ -17,7 +17,7 @@ entry:
   br label %body
 
 ; CHECK:  body:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, %record addrspace(1)*)* @g0, i32 2, i32 0, i8 addrspace(1)* %a, %record addrspace(1)* %arg) [ "gc-live"(%record addrspace(1)* %arg, i8 addrspace(1)* %a) ]
+; CHECK:  %token = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, %record addrspace(1)*)* @g0, i32 2, i32 0, i8 addrspace(1)* %a, %record addrspace(1)* %arg) [ "gc-live"(%record addrspace(1)* %arg) ]
 ;
 body:                                     ; preds = %entry
   call void @g0(i8 addrspace(1)* %a, %record addrspace(1)* %arg)
@@ -42,9 +42,9 @@ tmpend:                                         ; preds = %tmp1, %tmp2
   br i1 %conv, label %ifthen, label %ifelse
 
 ; CHECK:  ifthen:
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, %record addrspace(1)*)* @g1, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %9) [ "struct-live"(%record* %0) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i1 (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %9) [ "struct-live"(%record* %0) ]
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, %record addrspace(1)*, i1)* @g3, i32 3, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %11, i1 %10) [ "struct-live"(%record* %0) ]
+; CHECK:  %token2 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, %record addrspace(1)*)* @g1, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %9) [ "struct-live"(%record* %0) ]
+; CHECK:  %token4 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i1 (i8 addrspace(1)*, %record addrspace(1)*)* @g2, i32 2, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %9) [ "struct-live"(%record* %0) ]
+; CHECK:  %token6 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*, %record addrspace(1)*, i1)* @g3, i32 3, i32 0, i8 addrspace(1)* null, %record addrspace(1)* %11, i1 %10) [ "struct-live"(%record* %0) ]
 ;
 ifthen:                                        ; preds = %tmpend
   %7 = add i32 %5, 1

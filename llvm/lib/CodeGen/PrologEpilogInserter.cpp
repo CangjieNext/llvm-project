@@ -1447,7 +1447,7 @@ void PEI::replaceFrameIndices(MachineBasicBlock *BB, MachineFunction &MF,
       // implementation other than historical accident.  The only
       // remaining difference is the unconditional use of the stack
       // pointer as the base register.
-      if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+      if (isStatepointOpcode(MI.getOpcode())) {
         assert((!MI.isDebugValue() || i == 0) &&
                "Frame indicies can only appear as the first operand of a "
                "DBG_VALUE machine instruction");
