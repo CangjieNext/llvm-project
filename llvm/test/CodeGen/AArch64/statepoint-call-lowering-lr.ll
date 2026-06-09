@@ -7,7 +7,7 @@ target triple = "aarch64-unknown-linux-gnu"
 define void @test() "frame-pointer"="all" gc "statepoint-example" {
 entry:
   %safepoint_token = tail call token (i64, i32, void ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_i1f(i64 0, i32 0, void ()* elementtype(void ()) @return_i1, i32 0, i32 0, i32 0, i32 0) ["gc-live" ()]
-; CHECK: STATEPOINT 0, 0, 0, @return_i1, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, csr_aarch64_aapcs, implicit-def $sp, implicit-def dead early-clobber $lr
+; CHECK: STATEPOINT_TAIL_CALL 0, 0, 0, @return_i1, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, csr_aarch64_aapcs, implicit-def dead early-clobber $lr
   ret void
 }
 

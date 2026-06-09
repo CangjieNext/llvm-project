@@ -25,6 +25,12 @@ enum {
 };
 } // end namespace TargetOpcode
 
+/// Check whether the given opcode is a statepoint pseudo instruction.
+inline bool isStatepointOpcode(unsigned Opcode) {
+  return Opcode == TargetOpcode::STATEPOINT ||
+         Opcode == TargetOpcode::STATEPOINT_TAIL_CALL;
+}
+
 /// Check whether the given Opcode is a generic opcode that is not supposed
 /// to appear after ISel.
 inline bool isPreISelGenericOpcode(unsigned Opcode) {

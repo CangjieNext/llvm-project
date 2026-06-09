@@ -36484,6 +36484,7 @@ X86TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     return EmitSjLjDispatchBlock(MI, BB);
 
   case TargetOpcode::STATEPOINT:
+  case TargetOpcode::STATEPOINT_TAIL_CALL:
     // As an implementation detail, STATEPOINT shares the STACKMAP format at
     // this point in the process.  We diverge later.
     return emitPatchPoint(MI, BB);
