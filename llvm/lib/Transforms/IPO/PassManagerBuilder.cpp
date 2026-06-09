@@ -625,6 +625,7 @@ void PassManagerBuilder::populateModulePassManager(
     if (CJPipeline) {
       MPM.add(createCangjieSpecificOptLegacyPass(OptLevel));
       MPM.add(createPlaceSafepointsLegacyPass());
+      MPM.add(createCJTailCallOptLegacyPass());
       MPM.add(createCJRewriteStatepointLegacyPass(OptLevel));
     }
   };

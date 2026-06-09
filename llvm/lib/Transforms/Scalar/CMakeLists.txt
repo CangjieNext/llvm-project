@@ -7,6 +7,7 @@ add_llvm_component_library(LLVMScalarOpts
   CJBarrierSplit.cpp
   CJDevirtualOpt.cpp
   CJRuntimeLowering.cpp
+  CJTailCallOpt.cpp
   CallSiteSplitting.cpp
   ConstantHoisting.cpp
   ConstraintElimination.cpp

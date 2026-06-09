@@ -166,6 +166,7 @@
 #include "llvm/Transforms/Scalar/CJRuntimeLowering.h"
 #include "llvm/Transforms/Scalar/CJRewriteStatepoint.h"
 #include "llvm/Transforms/Scalar/CJSimpleRangeAnalysis.h"
+#include "llvm/Transforms/Scalar/CJTailCallOpt.h"
 #include "llvm/Transforms/Scalar/CallSiteSplitting.h"
 #include "llvm/Transforms/Scalar/CJIRVerifier.h"
 #include "llvm/Transforms/Scalar/CJSpecificOpt.h"
@@ -1258,6 +1259,7 @@ Error PassBuilder::parseModulePass(ModulePassManager &MPM,
         MPM.addPass(CJSpecificOpt(L.getSpeedupLevel()));
         MPM.addPass(PlaceSafepoints());
         MPM.addPass(CJBarrierOpt());
+        MPM.addPass(CJTailCallOpt());
         MPM.addPass(CJRewriteStatepoint(L.getSpeedupLevel()));
         if (EnableConfigFlatten || EnableConfigBcf)
           MPM.addPass(ControlFlowObfuscator());
