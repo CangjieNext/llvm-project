@@ -29,7 +29,7 @@ define %record @foo(%record addrspace(1)* %ptr2, i8 addrspace(1)* %ptr1, %record
 ; CHECK-NEXT:  %f.select = select i1 %b1, %record addrspace(1)* %f.cast, %record addrspace(1)* %g.cast
 ; CHECK-NEXT:  %f.select.sroa.gep9 = getelementptr inbounds %record, %record addrspace(1)* %f.select, i32 0, i32 1
 ; CHECK-NEXT:  %f.select.sroa.gep = getelementptr inbounds %record, %record addrspace(1)* %f.select, i32 0, i32 0
-; CHECK-NEXT:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%record addrspace(1)*, i8 addrspace(1)*)* @g0, i32 2, i32 0, %record addrspace(1)* %ptr2, i8 addrspace(1)* %ptr1) [ "gc-live"(%record addrspace(1)* %ptr2, i8 addrspace(1)* %ptr1), "struct-live"(%record* %f, %record* %g) ]
+; CHECK-NEXT:  %token = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%record addrspace(1)*, i8 addrspace(1)*)* @g0, i32 2, i32 0, %record addrspace(1)* %ptr2, i8 addrspace(1)* %ptr1) [ "gc-live"(%record addrspace(1)* %ptr2, i8 addrspace(1)* %ptr1), "struct-live"(%record* %f, %record* %g) ]
 ;
 entry:
   %f = alloca %record
@@ -64,7 +64,7 @@ else:
 ; CHECK-NEXT:  %g.loaded.fca.1.gep = getelementptr inbounds %record, %record addrspace(1)* %g.select, i32 0, i32 1
 ; CHECK-NEXT:  %g.loaded.fca.1.load = load i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)* %g.loaded.fca.1.gep, align 8
 ; CHECK-NEXT:  %g.loaded.fca.1.insert = insertvalue %record %g.loaded.fca.0.insert, i8 addrspace(1)* %g.loaded.fca.1.load, 1
-; CHECK-NEXT:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, %record (%record, %record)* @g1, i32 2, i32 0, %record %f.loaded.fca.1.insert, %record %g.loaded.fca.1.insert) [ "gc-live"(%record %f.loaded.fca.1.insert, %record %g.loaded.fca.1.insert) ]
+; CHECK-NEXT:  %token2 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, %record (%record, %record)* @g1, i32 2, i32 0, %record %f.loaded.fca.1.insert, %record %g.loaded.fca.1.insert) [ "gc-live"(%record %f.loaded.fca.1.insert) ]
 ;
 exit:
   %f.phi = phi %record addrspace(1)* [ %f.cast, %then ], [ %f.select, %else ]

@@ -9,7 +9,7 @@ entry:
   %r = alloca %struct
   br label %bb0
 
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @testcase, i32 0, i32 0)
+; CHECK:  %token = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @testcase, i32 0, i32 0)
 ;
 bb0:
   call void @testcase()
@@ -21,7 +21,7 @@ bb1:
   %2 = getelementptr inbounds %struct, %struct addrspace(1)* %1, i64 0, i32 0  ; CastInst and GEP are not a meaningful use point.
   br label %bb2
 
-; CHECK:  [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @testcase2, i32 1, i32 0, i8 addrspace(1)* %3) [ "gc-live"(i8 addrspace(1)* %3) ]
+; CHECK:  %token2 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i8 addrspace(1)*)* @testcase2, i32 1, i32 0, i8 addrspace(1)* %3)
 ;
 bb2:
   call void @llvm.lifetime.start.p0i8(i64 8, i8* %0)

@@ -28,12 +28,10 @@ define void @test(i32 %condition) gc "cangjie" {
 ; CHECK-NEXT:    br label [[MERGE]]
 ; CHECK:       merge:
 ; CHECK-NEXT:    [[OBJ_TO_CONSUME:%.*]] = phi i64 addrspace(1)* [ [[TMP0]], [[DEST_A]] ], [ null, [[DEST_B]] ], [ null, [[DEST_C]] ]
-; CHECK-NEXT:    [[TOKEN1:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i64 addrspace(1)*)* @consume_obj, i32 1, i32 0, i64 addrspace(1)* [[OBJ_TO_CONSUME]]) [ "gc-live"(i64 addrspace(1)* [[OBJ_TO_CONSUME]]) ]
-; CHECK-NEXT:    [[OBJ_TO_CONSUME_RELOCATED:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN1]], i32 0, i32 0)
-; CHECK-NEXT:    [[OBJ_TO_CONSUME_RELOCATED_CASTED:%.*]] = bitcast i8 addrspace(1)* [[OBJ_TO_CONSUME_RELOCATED]] to i64 addrspace(1)*
+; CHECK-NEXT:    [[TOKEN2:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (i64 addrspace(1)*)* @consume_obj, i32 1, i32 0, i64 addrspace(1)* [[OBJ_TO_CONSUME]])
 ; CHECK-NEXT:    br label [[MERGE_SPLIT:%.*]]
 ; CHECK:       merge.split:
-; CHECK-NEXT:    [[TOKEN2:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0)
+; CHECK-NEXT:    [[TOKEN4:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void ()* @foo, i32 0, i32 0)
 ; CHECK-NEXT:    br label [[LOOP]]
 ;
 entry:

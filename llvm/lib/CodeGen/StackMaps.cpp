@@ -925,7 +925,7 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
   }
 
   // Parse operands.
-  if (MI.getOpcode() == TargetOpcode::STATEPOINT)
+  if (isStatepointOpcode(MI.getOpcode()))
     parseStatepointOpers(MI, OpersInfo.MOI, OpersInfo.MOE, CSInfo);
   else
     while (OpersInfo.MOI != OpersInfo.MOE)
@@ -960,7 +960,7 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
 
   // get Line number from debug info
   uint32_t Line = 0;
-  if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+  if (isStatepointOpcode(MI.getOpcode())) {
     if (OpersInfo.ID == Cangjie::CJStatepointID::StackCheck &&
         MI.getMF()->getFunction().getSubprogram() != nullptr) {
       Line = MI.getMF()->getFunction().getSubprogram()->getLine();
@@ -1015,7 +1015,7 @@ void StackMaps::recordPatchPoint(const MCSymbol &L, const MachineInstr &MI) {
 void StackMaps::recordStatepoint(const MCSymbol &L, const MachineInstr &MI,
                                  bool RecordAllRefInReg) {
   StackMapOpersInfo OpersInfo;
-  if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+  if (isStatepointOpcode(MI.getOpcode())) {
     // Record all the deopt and gc operands (they're contiguous and run from the
     // initial index to the end of the operand list)
     StatepointOpers opers(&MI);
@@ -1471,9 +1471,7 @@ static void genStackMapInfo(CompressedInfo &Data,
   if (IsAllIdxsInvalid) {
     IdxInfo.DerivedInfoStartIdx = 0;
   } else {
-    IdxInfo.DerivedInfoStartIdx = Data.DerivedInfo.size();
-    Data.DerivedInfo.insert(Data.DerivedInfo.end(), IdxsInfo.begin(),
-                            IdxsInfo.end());
+    IdxInfo.DerivedInfoStartIdx = Data.getOrInsertDerivedInfoStartIdx(IdxsInfo);
   }
 
   if (EnableStackGrow) {

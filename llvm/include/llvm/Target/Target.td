@@ -1286,6 +1286,18 @@ def STATEPOINT : StandardPseudoInstruction {
   let hasSideEffects = true;
   let isCall = true;
 }
+def STATEPOINT_TAIL_CALL : StandardPseudoInstruction {
+  let OutOperandList = (outs variable_ops);
+  let InOperandList = (ins variable_ops);
+  let usesCustomInserter = true;
+  let mayLoad = true;
+  let mayStore = true;
+  let hasSideEffects = true;
+  let isCall = true;
+  let isTerminator = true;
+  let isReturn = true;
+  let isBarrier = true;
+}
 def LOAD_STACK_GUARD : StandardPseudoInstruction {
   let OutOperandList = (outs ptr_rc:$dst);
   let InOperandList = (ins);
