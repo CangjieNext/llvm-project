@@ -65,11 +65,10 @@ define void @test_deopt_use(ptr addrspace(1) %ptr) gc "statepoint-example" {
 ; CHECK-NEXT:    pushq %rax
 ; CHECK-NEXT:    .cfi_def_cfa_offset 16
 ; CHECK-NEXT:    movq %rdi, (%rsp)
-; CHECK-NEXT:    callq f@PLT
-; CHECK-NEXT:  .Ltmp2:
-; CHECK-NEXT:    popq %rax
+; CHECK-NEXT:    addq $8, %rsp
 ; CHECK-NEXT:    .cfi_def_cfa_offset 8
-; CHECK-NEXT:    retq
+; CHECK-NEXT:    jmp f@PLT # TAILCALL
+; CHECK-NEXT:  .Ltmp2:
   tail call token (i64, i32, ptr, i32, i32, ...)
       @llvm.experimental.gc.statepoint.p0(i64 0, i32 0, ptr elementtype(void ()) @f, i32 0, i32 0, i32 0, i32 0) ["gc-live" (ptr addrspace(1) %ptr), "deopt" (ptr addrspace(1) %ptr, i32 undef)]
   ret void
@@ -81,11 +80,10 @@ define void @test_dse(ptr addrspace(1) %ptr) gc "statepoint-example" {
 ; CHECK:       # %bb.0:
 ; CHECK-NEXT:    pushq %rax
 ; CHECK-NEXT:    .cfi_def_cfa_offset 16
-; CHECK-NEXT:    callq f@PLT
-; CHECK-NEXT:  .Ltmp3:
-; CHECK-NEXT:    popq %rax
+; CHECK-NEXT:    addq $8, %rsp
 ; CHECK-NEXT:    .cfi_def_cfa_offset 8
-; CHECK-NEXT:    retq
+; CHECK-NEXT:    jmp f@PLT # TAILCALL
+; CHECK-NEXT:  .Ltmp3:
   tail call token (i64, i32, ptr, i32, i32, ...)
       @llvm.experimental.gc.statepoint.p0(i64 0, i32 0, ptr elementtype(void ()) @f, i32 0, i32 0, i32 0, i32 0) ["gc-live" (ptr addrspace(1) %ptr)]
   ret void

@@ -199,7 +199,7 @@ void InstrEmitter::CreateVirtualRegisters(SDNode *Node,
   bool HasVRegVariadicDefs = !MF->getTarget().usesPhysRegsForValues() &&
                              II.isVariadic() && II.variadicOpsAreDefs();
   unsigned NumVRegs = HasVRegVariadicDefs ? NumResults : II.getNumDefs();
-  if (Node->getMachineOpcode() == TargetOpcode::STATEPOINT)
+  if (isStatepointOpcode(Node->getMachineOpcode()))
     NumVRegs = NumResults;
   for (unsigned i = 0; i < NumVRegs; ++i) {
     // If the specific node value is only used by a CopyToReg and the dest reg
@@ -990,7 +990,7 @@ EmitMachineNode(SDNode *Node, bool IsClone, bool IsCloned,
       NumDefs = NumResults;
     }
     ScratchRegs = TLI->getScratchRegisters((CallingConv::ID) CC);
-  } else if (Opc == TargetOpcode::STATEPOINT) {
+  } else if (isStatepointOpcode(Opc)) {
     NumDefs = NumResults;
   }
 
@@ -1114,7 +1114,7 @@ EmitMachineNode(SDNode *Node, bool IsClone, bool IsCloned,
   }
 
   const TargetMachine &TM = MF->getTarget();
-  if (Opc == TargetOpcode::STATEPOINT &&
+  if (isStatepointOpcode(Opc) &&
       isAArch64Machine(TM.getTargetTriple()) && CJPipeline) {
     UsedRegs.push_back(TLI->getRegisterByName("LR", LLT(), *MF));
   }
@@ -1150,7 +1150,7 @@ EmitMachineNode(SDNode *Node, bool IsClone, bool IsCloned,
 
   // STATEPOINT is too 'dynamic' to have meaningful machine description.
   // We have to manually tie operands.
-  if (Opc == TargetOpcode::STATEPOINT && NumDefs > 0) {
+  if (isStatepointOpcode(Opc) && NumDefs > 0) {
     assert(!HasPhysRegOuts && "STATEPOINT mishandled");
     MachineInstr *MI = MIB;
     unsigned Def = 0;

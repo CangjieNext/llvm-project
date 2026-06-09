@@ -654,7 +654,7 @@ bool MachineInstr::isCalDerivedPtrInCangjieCopyGC(
       }
       // return true if it's gep from a ref ptr
       for (auto &U : MRI->use_nodbg_operands(Reg)) {
-        if (U.getParent()->getOpcode() == TargetOpcode::STATEPOINT) {
+        if (isStatepointOpcode(U.getParent()->getOpcode())) {
           return true;
         }
       }
@@ -693,6 +693,7 @@ bool MachineInstr::isCandidateForCallSiteEntry(QueryType Type) const {
   case TargetOpcode::PATCHPOINT:
   case TargetOpcode::STACKMAP:
   case TargetOpcode::STATEPOINT:
+  case TargetOpcode::STATEPOINT_TAIL_CALL:
   case TargetOpcode::FENTRY_CALL:
     return false;
   }
@@ -1093,7 +1094,7 @@ void MachineInstr::tieOperands(unsigned DefIdx, unsigned UseIdx) {
     // statepoint tied operands are trivial to match (1-1 reg def with reg use),
     // but on normal instruction, the tied def must be within the first TiedMax
     // operands.
-    assert((isInlineAsm() || getOpcode() == TargetOpcode::STATEPOINT) &&
+    assert((isInlineAsm() || isStatepointOpcode(getOpcode())) &&
            "DefIdx out of range");
     UseMO.TiedTo = TiedMax;
   }
@@ -1114,7 +1115,7 @@ unsigned MachineInstr::findTiedOperandIdx(unsigned OpIdx) const {
     return MO.TiedTo - 1;
 
   // Uses on normal instructions can be out of range.
-  if (!isInlineAsm() && getOpcode() != TargetOpcode::STATEPOINT) {
+  if (!isInlineAsm() && !isStatepointOpcode(getOpcode())) {
     // Normal tied defs must be in the 0..TiedMax-1 range.
     if (MO.isUse())
       return TiedMax - 1;
@@ -1127,7 +1128,7 @@ unsigned MachineInstr::findTiedOperandIdx(unsigned OpIdx) const {
     llvm_unreachable("Can't find tied use");
   }
 
-  if (getOpcode() == TargetOpcode::STATEPOINT) {
+  if (isStatepointOpcode(getOpcode())) {
     // In STATEPOINT defs correspond 1-1 to GC pointer operands passed
     // on registers.
     StatepointOpers SO(this);
@@ -1470,7 +1471,7 @@ void MachineInstr::copyImplicitOps(MachineFunction &MF,
 
 bool MachineInstr::hasComplexRegisterTies() const {
   const MCInstrDesc &MCID = getDesc();
-  if (MCID.Opcode == TargetOpcode::STATEPOINT)
+  if (isStatepointOpcode(MCID.Opcode))
     return true;
   for (unsigned I = 0, E = getNumOperands(); I < E; ++I) {
     const auto &Operand = getOperand(I);

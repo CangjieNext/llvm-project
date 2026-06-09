@@ -25,6 +25,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/Support/Debug.h"
@@ -767,7 +768,7 @@ void CJStackPointerInserter::getAnalysisUsage(AnalysisUsage &AU) const {
 }
 
 bool CJStackPointerInserter::needRewriteCall(MachineInstr &MI) {
-  if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+  if (!isStatepointOpcode(MI.getOpcode()))
     return false;
 
   StatepointOpers SO(&MI);

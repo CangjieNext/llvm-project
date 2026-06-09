@@ -121,7 +121,7 @@ InsertPointAnalysis::computeLastInsertPoint(const LiveInterval &CurLI,
   // in landing pad. So we cannot split interval after statepoint instruction.
   if (SlotIndex::isSameInstr(VNI->def, LIP.second))
     if (auto *I = LIS.getInstructionFromIndex(LIP.second))
-      if (I->getOpcode() == TargetOpcode::STATEPOINT)
+      if (isStatepointOpcode(I->getOpcode()))
         return LIP.second;
 
   // If the value leaving MBB was defined after the call in MBB, it can't
@@ -177,7 +177,7 @@ void SplitAnalysis::analyzeUses() {
     // We don't want to split in the statepiont instruction point,
     // so we don't put it in the UseSlots here.
     if (!MO.isUndef() &&
-        MO.getParent()->getOpcode() != TargetOpcode::STATEPOINT) {
+        !isStatepointOpcode(MO.getParent()->getOpcode())) {
       UseSlots.push_back(LIS.getInstructionIndex(*MO.getParent()).getRegSlot());
     }
 
@@ -230,8 +230,8 @@ void SplitAnalysis::calcLiveBlockInfo() {
       if (LVI->end < Stop) {
         // The range shouldn't end mid-block if there are no uses and don`t
         // end in statepoint. This shouldn't happen.
-        if (LIS.getInstructionFromIndex(LVI->end)->getOpcode() !=
-            TargetOpcode::STATEPOINT) {
+        if (!isStatepointOpcode(
+                LIS.getInstructionFromIndex(LVI->end)->getOpcode())) {
           llvm_unreachable("range ends mid block with no uses");
           return;
         }

@@ -30,6 +30,7 @@
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetLowering.h"
+#include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/DebugInfo/DWARF/DWARFDataExtractor.h"
@@ -1978,7 +1979,7 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
   };
 
   auto IsCangjieSafepoint = [this](const MachineInstr *MI) {
-    return MI->getOpcode() != TargetOpcode::STATEPOINT
+    return !isStatepointOpcode(MI->getOpcode())
                ? false
                : StatepointOpers(MI).getID() ==
                          Cangjie::CJStatepointID::SafepointStub &&
@@ -2092,7 +2093,7 @@ static DebugLoc findPrologueEndLoc(const MachineFunction *MF) {
   // First known non-DBG_VALUE and non-frame setup location marks
   // the beginning of the function body.
   auto IsCangjieSafepoint = [](const MachineInstr *MI) {
-    return MI->getOpcode() != TargetOpcode::STATEPOINT
+    return !isStatepointOpcode(MI->getOpcode())
                ? false
                : StatepointOpers(MI).getID() ==
                      Cangjie::CJStatepointID::SafepointStub;

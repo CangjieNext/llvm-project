@@ -8,22 +8,18 @@
 define i64 addrspace(1)* @test_invoke_format(i64 addrspace(1)* %obj, i64 addrspace(1)* %obj1) gc "cangjie" personality i32 ()* @personality {
 ; CHECK-LABEL: @test_invoke_format(
 ; CHECK-NEXT:  entry:
-; CHECK-NEXT:    [[TOKEN:%.*]] = invoke token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i64 addrspace(1)* (i64 addrspace(1)*)* @callee, i32 1, i32 0, i64 addrspace(1)* [[OBJ:%.*]]) [ "gc-live"(i64 addrspace(1)* [[OBJ1:%.*]], i64 addrspace(1)* [[OBJ]]) ]
+; CHECK-NEXT:    [[TOKEN:%.*]] = invoke token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i64 addrspace(1)* (i64 addrspace(1)*)* @callee, i32 1, i32 0, i64 addrspace(1)* [[OBJ:%.*]]) [ "gc-live"(i64 addrspace(1)* [[OBJ1:%.*]]) ]
 ; CHECK-NEXT:    to label [[NORMAL_RETURN:%.*]] unwind label [[EXCEPTIONAL_RETURN:%.*]]
 ; CHECK:       normal_return:
 ; CHECK-NEXT:    [[RET_VAL1:%.*]] = call i64 addrspace(1)* @llvm.cj.gc.result.p1i64(token [[TOKEN]])
 ; CHECK-NEXT:    [[OBJ1_RELOC2:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
 ; CHECK-NEXT:    [[OBJ1_RELOC2_CASTED:%.*]] = bitcast i8 addrspace(1)* [[OBJ1_RELOC2]] to i64 addrspace(1)*
-; CHECK-NEXT:    [[OBJ_RELOC3:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 1, i32 1)
-; CHECK-NEXT:    [[OBJ_RELOC3_CASTED:%.*]] = bitcast i8 addrspace(1)* [[OBJ_RELOC3]] to i64 addrspace(1)*
 ; CHECK-NEXT:    ret i64 addrspace(1)* [[RET_VAL1]]
 ; CHECK:       exceptional_return:
 ; CHECK-NEXT:    [[LANDING_PAD4:%.*]] = landingpad token
 ; CHECK-NEXT:    cleanup
 ; CHECK-NEXT:    [[OBJ1_RELOC:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[LANDING_PAD4]], i32 0, i32 0)
 ; CHECK-NEXT:    [[OBJ1_RELOC_CASTED:%.*]] = bitcast i8 addrspace(1)* [[OBJ1_RELOC]] to i64 addrspace(1)*
-; CHECK-NEXT:    [[OBJ_RELOC:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[LANDING_PAD4]], i32 1, i32 1)
-; CHECK-NEXT:    [[OBJ_RELOC_CASTED:%.*]] = bitcast i8 addrspace(1)* [[OBJ_RELOC]] to i64 addrspace(1)*
 ; CHECK-NEXT:    ret i64 addrspace(1)* [[OBJ1_RELOC_CASTED]]
 ;
 entry:
@@ -42,10 +38,8 @@ exceptional_return:
 define i64 addrspace(1)* @test_call_format(i64 addrspace(1)* %obj, i64 addrspace(1)* %obj1) gc "cangjie" {
 ; CHECK-LABEL: @test_call_format(
 ; CHECK-NEXT:  entry:
-; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i64 addrspace(1)* (i64 addrspace(1)*)* @callee, i32 1, i32 0, i64 addrspace(1)* [[OBJ:%.*]]) [ "gc-live"(i64 addrspace(1)* [[OBJ]]) ]
+; CHECK-NEXT:    [[TOKEN:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i64 addrspace(1)* (i64 addrspace(1)*)* @callee, i32 1, i32 0, i64 addrspace(1)* [[OBJ:%.*]])
 ; CHECK-NEXT:    [[RET_VAL1:%.*]] = call i64 addrspace(1)* @llvm.cj.gc.result.p1i64(token [[TOKEN]])
-; CHECK-NEXT:    [[OBJ_RELOC:%.*]] = call coldcc i8 addrspace(1)* @llvm.cj.gc.relocate.p1i8(token [[TOKEN]], i32 0, i32 0)
-; CHECK-NEXT:    [[OBJ_RELOC_CASTED:%.*]] = bitcast i8 addrspace(1)* [[OBJ_RELOC]] to i64 addrspace(1)*
 ; CHECK-NEXT:    ret i64 addrspace(1)* [[RET_VAL1]]
 ;
 entry:

@@ -423,6 +423,9 @@ public:
     /// invoke of gc.statepoint.
     const BasicBlock *EHPadBB = nullptr;
 
+    /// Whether this statepoint represents a tail call.
+    bool IsTailCall = false;
+
     Function *ActualCalledFunction = nullptr;
 
     explicit StatepointLoweringInfo(SelectionDAG &DAG) : CLI(DAG) {}

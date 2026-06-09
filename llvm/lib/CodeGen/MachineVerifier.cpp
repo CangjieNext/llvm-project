@@ -1831,7 +1831,8 @@ void MachineVerifier::visitMachineInstrBefore(const MachineInstr *MI) {
     }
     break;
   }
-  case TargetOpcode::STATEPOINT: {
+  case TargetOpcode::STATEPOINT:
+  case TargetOpcode::STATEPOINT_TAIL_CALL: {
     StatepointOpers SO(MI);
     if (!MI->getOperand(SO.getIDPos()).isImm() ||
         !MI->getOperand(SO.getNBytesPos()).isImm() ||
@@ -3349,7 +3350,9 @@ void MachineVerifier::verifyStackFrame() {
 
     // Make sure a basic block with return ends with zero stack adjustment.
     if (!MBB->empty() && MBB->back().isReturn()) {
-      if (BBState.ExitIsSetup)
+      const bool IsTailCallStatepoint =
+          MBB->back().getOpcode() == TargetOpcode::STATEPOINT_TAIL_CALL;
+      if (BBState.ExitIsSetup && !IsTailCallStatepoint)
         report("A return block ends with a FrameSetup.", MBB);
       if (BBState.ExitValue)
         report("A return block ends with a nonzero stack adjustment.", MBB);

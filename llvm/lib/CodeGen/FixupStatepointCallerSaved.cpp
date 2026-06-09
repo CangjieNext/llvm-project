@@ -26,6 +26,7 @@
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Support/Debug.h"
@@ -352,7 +353,7 @@ public:
     // Invoke statepoint must be last one in block.
     bool Last = std::none_of(++MI.getIterator(), MBB->end().getInstrIterator(),
                              [](MachineInstr &I) {
-                               return I.getOpcode() == TargetOpcode::STATEPOINT;
+                               return isStatepointOpcode(I.getOpcode());
                              });
 
     if (!Last)
@@ -616,7 +617,7 @@ bool FixupStatepointCallerSaved::runOnMachineFunction(MachineFunction &MF) {
   SmallVector<MachineInstr *, 16> Statepoints;
   for (MachineBasicBlock &BB : MF) {
     for (MachineInstr &I : BB) {
-      if (I.getOpcode() == TargetOpcode::STATEPOINT) {
+      if (isStatepointOpcode(I.getOpcode())) {
         StatepointOpers SO(&I);
         if (!SO.isCJStackCheck())
           Statepoints.push_back(&I);
