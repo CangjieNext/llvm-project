@@ -1131,6 +1131,7 @@ bool TargetPassConfig::addISelPasses() {
       addPass(createCJRuntimeLoweringLegacyPass());
       addPass(createCangjieSpecificOptLegacyPass(0));
       addPass(createPlaceSafepointsLegacyPass());
+      addPass(createCJTailCallOptLegacyPass());
       addPass(createCJRewriteStatepointLegacyPass(0));
     }
     addPass(createCJBarrierLoweringPass(getOptLevel()));

@@ -93,6 +93,7 @@ void initializeCanonicalizeFreezeInLoopsPass(PassRegistry &);
 void initializeCJBarrierOptLegacyPassPass(PassRegistry &);
 void initializeCJBarrierSplitLegacyPassPass(PassRegistry &);
 void initializeCJRuntimeLoweringLegacyPassPass(PassRegistry &);
+void initializeCJTailCallOptLegacyPassPass(PassRegistry &);
 void initializeCJGenericIntrinsicOptLegacyPassPass(PassRegistry &);
 void initializeCJIRVerifierLegacyPassPass(PassRegistry &);
 void initializeCJLoopFloatOptLegacyPassPass(PassRegistry &);

@@ -584,6 +584,12 @@ ModulePass *createCJRuntimeLoweringLegacyPass();
 
 //===----------------------------------------------------------------------===//
 //
+// CJTailCallOpt - Mark safe cangjie tail-position calls.
+//
+ModulePass *createCJTailCallOptLegacyPass();
+
+//===----------------------------------------------------------------------===//
+//
 // CheckFastCall - Checks the fastcall from the optimized code and marks it
 //
 ModulePass *createCangjieSpecificOptLegacyPass(unsigned OptLevel);
