@@ -2276,7 +2276,13 @@ bool CJEscapeAnalysis::isEscapedValue(Value *V) {
     }
     return true;
   }
-  return true;
+  if (auto *LI = dyn_cast<LoadInst>(Base)) {
+    Type *Ty = LI->getType();
+    if (Ty->isPointerTy() && Ty->getPointerAddressSpace() == 1 &&
+        containsGCPtrType(Ty))
+      return true;
+  }
+  return false;
 }
 
 class EscapeAnalysisImpl : public InstVisitor<EscapeAnalysisImpl>,
