@@ -201,7 +201,7 @@ public:
   }
 
   bool runOnModule(Module &M);
-  void doExceptionOutline(Module &M);
+  bool doExceptionOutline(Module &M);
 
 private:
   // The function comparison operator is provided here so that FunctionNodes do
@@ -499,29 +499,143 @@ static Function* generateFunc(BasicBlock *BB, Function *OrigF) {
   return Func;
 }
 
-void MergeFunctions::doExceptionOutline(Module &M) {
-  SmallVector<std::pair<llvm::BasicBlock *, llvm::Function *>> ExceptionBBs;
+// ============================================================================
+// Cost model helpers for exception outlining
+// ============================================================================
+
+namespace {
+
+// Accumulate the hash of a sequence of 64-bit integers. This mirrors the
+// HashAccumulator64 used in FunctionComparator::functionHash. It is used to
+// compute a structural hash of a basic block for grouping identical throw
+// patterns before outlining.
+class HashAccumulator64 {
+  uint64_t Hash;
+
+public:
+  HashAccumulator64() { Hash = 0x6acaa36bef8325c5ULL; }
+
+  void add(uint64_t V) { Hash = hashing::detail::hash_16_bytes(Hash, V); }
+
+  uint64_t getHash() const { return Hash; }
+};
+
+} // end anonymous namespace
+
+/// Compute a structural hash of a basic block based on opcode sequence and
+/// callee names. This is similar to FunctionComparator::functionHash but
+/// additionally hashes callee names so that blocks calling different functions
+/// are placed in different groups. Hash collisions do not affect correctness —
+/// they may cause an extra isolated block to be outlined at a minor code size
+/// cost.
+static uint64_t computeBBHash(BasicBlock *BB) {
+  HashAccumulator64 H;
+  for (auto &Inst : *BB) {
+    H.add(Inst.getOpcode());
+    if (auto *CI = dyn_cast<CallInst>(&Inst)) {
+      if (Function *Callee = CI->getCalledFunction())
+        H.add(hash_value(Callee->getName()));
+    }
+  }
+  return H.getHash();
+}
+
+/// Count the number of instructions in a basic block as a simple code size
+/// proxy. For throw blocks, this represents the instructions that would be
+/// moved to the outlined function.
+static unsigned getBlockInstCount(BasicBlock *BB) {
+  unsigned Count = 0;
+  for (auto &I : *BB)
+    ++Count;
+  return Count;
+}
+
+/// Estimated instruction count of the codeRepl block that replaces the original
+/// throw block after outlining. For a throw block (ending in unreachable),
+/// CodeExtractor::emitCallAndSwitchStatement generates only: call + ret.
+static unsigned getCodeReplCost() {
+  return 2; // call + ret void
+}
+
+/// Estimated instruction count of the fixed overhead for the new outlined
+/// function: newFuncRoot br + function prologue + epilogue (~3 instructions).
+static unsigned getFuncOverhead() {
+  return 3;
+}
+
+bool MergeFunctions::doExceptionOutline(Module &M) {
+  bool Changed = false;
+
+  // ========== Phase 1: Collect + Group + Cost evaluation ==========
+  using ThrowPattern = std::pair<BasicBlock *, Function *>;
+  using HashType = uint64_t;
+
+  DenseMap<HashType, SmallVector<ThrowPattern, 4>> PatternGroups;
+  DenseMap<HashType, unsigned> PatternBlockCost;
 
   for (Function &F : M) {
     for (BasicBlock &BB : F) {
       for (Instruction &Inst : BB) {
-        if (isThrowExceptionInstruction(&Inst)) {
-          if (!isBBEligibleForOutline(&BB))
-            continue;
-          ExceptionBBs.push_back(std::make_pair(&BB, &F));
-        }
+        if (!isThrowExceptionInstruction(&Inst))
+          continue;
+        if (!isBBEligibleForOutline(&BB))
+          continue;
+
+        // Compute structural hash for grouping identical throw patterns.
+        HashType H = computeBBHash(&BB);
+        PatternGroups[H].push_back({&BB, &F});
+        if (!PatternBlockCost.count(H))
+          PatternBlockCost[H] = getBlockInstCount(&BB);
+        break; // Process this BB only once.
       }
     }
   }
 
-  for (auto &pair : ExceptionBBs) {
-    generateFunc(pair.first, pair.second);
+  // ========== Phase 2: Only outline groups with net code size savings ==========
+  unsigned CodeReplCost = getCodeReplCost();
+  unsigned FuncOverhead = getFuncOverhead();
+
+  for (auto &KV : PatternGroups) {
+    auto &Group = KV.second;
+    HashType H = KV.first;
+    unsigned N = Group.size();
+    unsigned BlockCost = PatternBlockCost[H];
+
+    // TotalSaving = (N-1)*BlockCost - N*CodeReplCost - FuncOverhead
+    //
+    // Before outlining: N copies of BlockCost instructions (N*BlockCost total).
+    // After outlining:  N codeRepl blocks (N*CodeReplCost) +
+    //                   1 outlined function body (BlockCost) +
+    //                   1 outlined function framework (FuncOverhead).
+    // Net: N*BlockCost - N*CodeReplCost - BlockCost - FuncOverhead
+    //    = (N-1)*BlockCost - N*CodeReplCost - FuncOverhead
+    int TotalSaving = ((int)N - 1) * (int)BlockCost
+                      - (int)N * (int)CodeReplCost
+                      - (int)FuncOverhead;
+
+    LLVM_DEBUG(dbgs() << "Exception outlining: hash=" << H
+                      << " count=" << N
+                      << " block_cost=" << BlockCost
+                      << " repl_cost=" << CodeReplCost
+                      << " func_overhead=" << FuncOverhead
+                      << " total_saving=" << TotalSaving
+                      << (TotalSaving > 0 ? " -> OUTLINE\n" : " -> SKIP\n"));
+
+    if (TotalSaving <= 0)
+      continue;
+
+    for (auto &P : Group) {
+      if (generateFunc(P.first, P.second))
+        Changed = true;
+    }
   }
+
+  return Changed;
 }
 
 bool MergeFunctions::runOnModule(Module &M) {
   bool Changed = false;
-  doExceptionOutline(M);
+  Changed = doExceptionOutline(M);
   SmallVector<GlobalValue *, 4> UsedV;
   collectUsedGlobalVariables(M, UsedV, /*CompilerUsed=*/false);
   collectUsedGlobalVariables(M, UsedV, /*CompilerUsed=*/true);
