@@ -2573,6 +2573,10 @@ public:
 
   bool run() {
     bool Changed = false;
+    if (GCNew.empty()) {
+      cleanupAnalysisState();
+      return Changed;
+    }
     for (Function *Func : SCCFunctions) {
       ProcessedFunc = Func;
       handleLiveness(Func);
@@ -2608,6 +2612,11 @@ public:
       }
     }
 
+    cleanupAnalysisState();
+    return Changed;
+  }
+
+  void cleanupAnalysisState() {
     for (auto PInfo : AllPtrLocInfo) {
       delete PInfo.second;
     }
@@ -2616,7 +2625,6 @@ public:
       delete MemInfo.second;
     }
     AllMemLocInfo.clear();
-    return Changed;
   }
 
   void walkBBs(BasicBlock *CurBB) {
