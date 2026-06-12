@@ -3327,6 +3327,30 @@ static bool skipLargeFunction(Function *F) {
   return false;
 }
 
+static bool hasRewriteableGCNew(Function *F) {
+  for (BasicBlock &BB : *F) {
+    for (Instruction &I : BB) {
+      auto *CB = dyn_cast<CallBase>(&I);
+      if (!CB)
+        continue;
+      Function *Callee = CB->getCalledFunction();
+      if (!Callee || !isRewriteableCangjieMallocFunc(Callee))
+        continue;
+      GlobalVariable *Klass = getNewKlass(CB);
+      if (Klass == nullptr)
+        continue;
+      bool HasRefs = false;
+      uint32_t AllocaSize = 0;
+      bool NonMoveArray = false;
+      Type *AllocaType =
+          getAllocaType(Klass, HasRefs, AllocaSize, NonMoveArray, CB);
+      if (AllocaType != nullptr || NonMoveArray)
+        return true;
+    }
+  }
+  return false;
+}
+
 static bool removeDeadBlocks(LazyCallGraph::SCC &C,
                              FunctionAnalysisManager &FAM) {
   bool Changed = false;
@@ -3372,18 +3396,31 @@ static bool escapeAnalysisImpl(LazyCallGraph::SCC &C, LazyCallGraph &CG,
   if (CJDisablePEA)
     return Changed;
   EscapeAnalysisImpl PEA(CGUpdater, &M, LookLoop);
+  // skip analysis for SCCs without rewriteable GC new
+  bool HasPEAWork = false;
   for (LazyCallGraph::Node &N : C) {
     Function *F = &N.getFunction();
-    if (skipLargeFunction(F)) {
+    if (skipLargeFunction(F))
       continue;
+    if (hasRewriteableGCNew(F)) {
+      HasPEAWork = true;
+      break;
     }
-    if (Simplified) {
-      FAM.invalidate(*F, PreservedAnalyses::none());
-    }
-    PEA.insertSCCFunction(F);
   }
-  PEA.initialize();
-  Changed |= PEA.run();
+  if (HasPEAWork) {
+    for (LazyCallGraph::Node &N : C) {
+      Function *F = &N.getFunction();
+      if (skipLargeFunction(F)) {
+        continue;
+      }
+      if (Simplified) {
+        FAM.invalidate(*F, PreservedAnalyses::none());
+      }
+      PEA.insertSCCFunction(F);
+    }
+    PEA.initialize();
+    Changed |= PEA.run();
+  }
   // Dead Blocks may appear after PEA, which will cause the analysis of these
   // BBs to fail, such as LoopInfo. If these BBs are not deleted in a timely
   // manner, incorrect results may be generated during subsequent optimization
