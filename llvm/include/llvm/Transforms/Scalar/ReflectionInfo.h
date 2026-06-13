@@ -55,6 +55,11 @@ enum EnumReflectionType : uint8_t {
   ERT_MAX,
 };
 
+enum EnumCtorReflectionType : uint8_t {
+   ECRT_ATTRIBUTE = 0,
+   ECRT_MAX,
+ };
+
 enum EnumDebugInfoType : uint8_t {
   EDT_TYPE_NAME = 0,
   EDT_ENUM_CTOR,

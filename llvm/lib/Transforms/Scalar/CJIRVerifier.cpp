@@ -519,8 +519,14 @@ private:
   // !{<name>, !{enum ctors}, !{instance methods}, !{static methods},
   //   !{ctor annotationMethods}, !{attributes}}
   void verifyEnumReflection(MDTuple *ReflectMD) {
-    Assert(ReflectMD->getNumOperands() == ERT_MAX,
+    Assert(ReflectMD->getNumOperands() == ERT_MAX ||
+           ReflectMD->getNumOperands() == ECRT_MAX,
            "EnumReflection format: operand numbers error!", ReflectMD);
+    if (ReflectMD->getNumOperands() == ECRT_MAX) {
+      const MDTuple *AttributeMD = getMDOperand(ReflectMD, ECRT_ATTRIBUTE);
+      verifyReflectionAttribute(AttributeMD);
+      return;
+    }
     // check enum ctors
     const MDTuple *CtorMDs = getMDOperand(ReflectMD, ERT_ENUM_CTOR);
     for (unsigned Idx = 0; Idx < CtorMDs->getNumOperands(); ++Idx) {
