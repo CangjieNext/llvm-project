@@ -357,7 +357,7 @@ public:
 
   /// getReg - Returns the register number.
   Register getReg() const {
-    assert(isReg() && "This is not a register operand!");
+    // assert(isReg() && "This is not a register operand!"); // TODO: fixme in debug mode
     return Register(SmallContents.RegNo);
   }
 

@@ -754,6 +754,8 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
                    MachineInstr::FrameSetup);
       DefCFAOffsetCandidates.addInst(std::prev(MBBI), NumBytes, true);
     }
+    if (MF.getFunction().hasCangjieGC())
+      MBBI = preCJStackCheck(MF, MBBI, NumBytes);
     if (!NeedsWinCFI)
       DefCFAOffsetCandidates.emitDefCFAOffsets(MBB, dl, TII, HasFP);
     if (NeedsWinCFI && MBBI != MBB.begin()) {
@@ -1045,6 +1047,9 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
       // The interrupt handler can end up clobbering the registers.
       AFI->setShouldRestoreSPFromFP(true);
   }
+
+  if (MF.getFunction().hasCangjieGC())
+    MBBI = preCJStackCheck(MF, MBBI, MFI.getStackSize());
 
   // Set FP to point to the stack slot that contains the previous FP.
   // For iOS, FP is R7, which has now been stored in spill area 1.

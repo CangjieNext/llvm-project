@@ -203,16 +203,28 @@ MachineBasicBlock::iterator TargetFrameLowering::preCJStackCheck(
     // Otherwise, it is placed at the end of BB.
     if (InsertPos == BBI) {
       MI->setCJStackSize(FrameSize);
+      if (MF.getName() == "_CNat5printHbb") {
+        MI->print(errs());
+        errs() << "YJQ00 Cangjie: " << MF.getName() << " FrameSize: " << FrameSize << "\n";
+      }
       return ++BBI;
     } else if (InsertPos != CurBB->end()) {
       MI->moveBefore(&*InsertPos);
       MI->setCJStackSize(FrameSize);
+      if (MF.getName() == "_CNat5printHbb") {
+        MI->print(errs());
+        errs() << "YJQ01 Cangjie: " << MF.getName() << " FrameSize: " << FrameSize << "\n";
+      }
     } else {
       auto CloneMI = MF.CloneMachineInstr(MI);
       CurBB->push_back(CloneMI);
       // The size is stored in DebugInstrNum interface temporarily and
       // it will be used for emitStackCheck.
       CloneMI->setCJStackSize(FrameSize);
+      if (MF.getName() == "_CNat5printHbb") {
+        CloneMI->print(errs());
+        errs() << "YJQ02 Cangjie: " << MF.getName() << " FrameSize: " << FrameSize << "\n";
+      }
       MI->eraseFromParent();
     }
     break;

@@ -4126,8 +4126,20 @@ AsmPrinter::tryGetCangjieStubCallNativeFunc(const MachineInstr *MI,
 
 void AsmPrinter::emitCangjieStackCheck(const MachineInstr &MI) {
   unsigned FrameSize = MI.peekCJStackSize() & 0x7fffffff;
-  if (isNonStackOverflowFunc(*MF, FrameSize))
+  if (MF->getName() == "_CNat5printHbb") {
+    MI.print(errs());
+    errs() << "YJQ10 Cangjie: " << MF->getName() << " FrameSize: " << FrameSize << "\n";
+  }
+  if (isNonStackOverflowFunc(*MF, FrameSize)) {// _CNat5printHbb
+    if (MF->getName() == "_CNat5printHbb") {
+      errs() << "YJQ11 Cangjie: " << MF->getName() << " isNonStackOverflowFunc" << "\n";
+    }
     return;
+  }
+
+  if (MF->getName() == "_CNat5printHbb") {
+    errs() << "YJQ12 Cangjie: " << MF->getName() << " isStackOverflowFunc" << "\n";
+  }
 
   emitCJStackCheck(MI);
 }
