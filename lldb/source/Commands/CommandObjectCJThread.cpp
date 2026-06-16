@@ -168,18 +168,16 @@ public:
 protected:
 
   bool DoExecute(Args &command, CommandReturnObject &result) override {
-    Status error;
-    m_exe_ctx.GetProcessPtr()->RefreshCJThreadList(error);
-    if (error.Fail()) return false;
-
-    Debugger &debugger = GetCommandInterpreter().GetDebugger();
-    TargetSP target_sp = debugger.GetSelectedTarget();
     Process *process = m_exe_ctx.GetProcessPtr();
-
     if (process == nullptr) {
       result.AppendError("no process");
       return false;
     }
+
+    Status error;
+    process->RefreshCJThreadList(error);
+    if (error.Fail())
+      return false;
 
     if (command.GetArgumentCount() != 1) {
       result.AppendError("cjthread select requires exactly one argument");
@@ -558,7 +556,6 @@ public:
             eCommandRequiresProcess | eCommandTryTargetAPILock |
             eCommandProcessMustBeLaunched | eCommandProcessMustBePaused, true)
         {}
-
 
   bool DoExecute(Args &command, CommandReturnObject &result) override {
     Status error;

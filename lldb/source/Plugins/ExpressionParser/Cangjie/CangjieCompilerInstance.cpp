@@ -112,6 +112,10 @@ void CangjieCompilerInstance::CheckTypeAndAddTy(OwnedPtr<AST::Type>& type)
     auto constType = RawStaticCast<AST::ConstantType *>(vaType->constantType.get());
     auto le = RawStaticCast<AST::LitConstExpr *>(constType->constantExpr.get());
     auto vaSize = stoll(le->stringValue);
+    // Max size of varray: 65536
+    if (vaSize < 0 || vaSize > 65536) {
+      vaSize = 0;
+    }
     CheckTypeAndAddTy(vaType->typeArgument);
     if (vaType->typeArgument) {
       vaType->SetTy(typeManager->GetVArrayTy(*vaType->typeArgument->GetTy(), vaSize));
@@ -146,6 +150,9 @@ Ptr<AST::Ty> CangjieCompilerInstance::GetInstantiatedTy(AST::ClassTy& cTy, Ptr<A
 
 OwnedPtr<AST::CallExpr> CangjieCompilerInstance::CreateSuperCall(AST::ClassDecl& cd)
 {
+  if (cd.inheritedTypes.empty()) {
+    return nullptr;
+  }
   auto superType = cd.inheritedTypes.front().get();
   if (!superType) {
     return nullptr;
@@ -246,18 +253,18 @@ void CangjieCompilerInstance::UpdateDeclTyByGeneric(Ptr<AST::Decl> decl) {
   if (!generic) {
     return;
   }
-  for (auto& it: generic->typeParameters) {
+  for (auto& it : generic->typeParameters) {
     auto gpd = RawStaticCast<AST::GenericParamDecl *>(it.get());
     CreateTyAndDefaultCtor(*gpd, {});
     typeArgs.push_back(gpd->GetTy());
   }
-  for (auto& it: generic->genericConstraints) {
+  for (auto& it : generic->genericConstraints) {
     auto gc = RawStaticCast<AST::GenericConstraint *>(it.get());
     if (gc->type->ref.target) {
       CreateTyAndDefaultCtor(*gc->type->ref.target, {});
       gc->type->SetTy(GetTyFromASTType(*gc->type->ref.target, {}));
     }
-    for (auto& bound:gc->upperBounds) {
+    for (auto& bound : gc->upperBounds) {
       auto rt = RawStaticCast<AST::RefType *>(bound.get());
       if (rt->ref.target) {
         CreateTyAndDefaultCtor(*rt->ref.target, {});
@@ -289,7 +296,7 @@ Ptr<Ty> CangjieCompilerInstance::GetTyFromASTType(Decl& decl, const std::vector<
       auto sd = As<ASTKind::STRUCT_DECL>(&decl);
       for (auto& it : sd->inheritedTypes) {
         CheckTypeAndAddTy(it);
-      }      
+      }
       return typeManager->GetStructTy(*sd, typeArgs);
     }
     case ASTKind::ENUM_DECL: {
@@ -474,7 +481,7 @@ std::string CangjieCompilerInstance::GetStringOfASTNode(const Ptr<Node>& node) {
 std::vector<OwnedPtr<FuncArg>> CangjieCompilerInstance::CreateFuncArgsFromCapturedVars(std::string ident)
 {
   std::vector<OwnedPtr<FuncArg>> funcargs;
-  for (auto& decl: m_tryExpr_result->curFile->decls) {
+  for (auto& decl : m_tryExpr_result->curFile->decls) {
     if (decl->astKind == AST::ASTKind::CLASS_DECL && decl->identifier == ident) {
       auto cd = As<AST::ASTKind::CLASS_DECL>(decl.get());
       for (auto& d : cd->body->decls) {
@@ -501,7 +508,7 @@ void CangjieCompilerInstance::AddCapturedVarsToTryExpr(
     std::vector<OwnedPtr<Decl>>& localDecls, AST::TryExpr& tryExpr) {
     auto hasCapturedVarsClass = [this](std::string fn) -> bool {
       auto classname = fn + "$class" + LOCAL_FUNC_CAPTUREDVAR;
-      for (auto& decl: m_tryExpr_result->curFile->decls) {
+      for (auto& decl : m_tryExpr_result->curFile->decls) {
         if (decl->astKind == AST::ASTKind::CLASS_DECL &&
           decl->identifier == classname) {
           return true;
@@ -509,7 +516,7 @@ void CangjieCompilerInstance::AddCapturedVarsToTryExpr(
       }
       return false;
     };
-    for (auto& decl: localDecls) {
+    for (auto& decl : localDecls) {
       if (decl->astKind != AST::ASTKind::FUNC_DECL) {
         continue;
       }
@@ -574,7 +581,7 @@ void CangjieCompilerInstance::AddLocalsToExprResult(std::vector<OwnedPtr<Decl>>&
     // Add capturedVars of local function first.
     AddCapturedVarsToTryExpr(localDecls, *tryExpr);
     // Add local variable then.
-    for (auto& decl: localDecls) {
+    for (auto& decl : localDecls) {
       if (decl->astKind != AST::ASTKind::VAR_DECL) {
         continue;
       }
@@ -717,7 +724,7 @@ bool CangjieCompilerInstance::PerformImportPackageForCjdb() {
     if (log) {
       LLDB_LOGF(log, "%s", helpInfo.c_str());
     }
-    std::cout<<"help: "<<helpInfo<<std::endl;
+    std::cout << "help: " << helpInfo << std::endl;
     return false;
   }
   bool inBlacklist = false;
@@ -812,7 +819,7 @@ std::vector<std::string> CangjieCompilerInstance::WalkAndCollectIdentifiers()
   Log *log = GetLog(LLDBLog::Expressions);
   if (log) {
     std::string ids = "";
-    for (auto tmpId:names) {
+    for (auto tmpId : names) {
       ids = ids + " ; " + tmpId;
     }
     LLDB_LOGF(log, "All collected identifiers are as follows: %s! \n", ids.c_str());
@@ -977,7 +984,10 @@ OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateEnumInitializer(Ptr<
     return nullptr;
   }
   if (enumTy->IsCoreOptionType()) {
-    // For Option type, initial is memberAccess, Option<Int64>.None
+    // For Option type, initial is memberAccess, Option<Int64>.None, 2 is size of constructors
+    if (edecl->constructors.size() < 2) {
+      return nullptr;
+    }
     auto noneCtor = edecl->constructors[1].get();
     if (noneCtor->astKind == AST::ASTKind::VAR_DECL) {
       auto init = RawStaticCast<AST::VarDecl*>(noneCtor);
@@ -1136,7 +1146,9 @@ OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateInitializer(Ptr<Cang
   if (ty->kind == Cangjie::AST::TypeKind::TYPE_VARRAY) {
     auto ret = MakeOwned<ArrayLit>();
     auto varrayTy = RawStaticCast<Cangjie::AST::VArrayTy *>(ty);
-    for (int64_t i = 0; i < varrayTy->size; i++) {
+    // Max size of varray: 65536
+    int64_t safe_size = (varrayTy->size > 0 && varrayTy->size <= 65536) ? varrayTy->size : 0;
+    for (int64_t i = 0; i < safe_size; i++) {
       ret->children.emplace_back(CreateInitializer(ty->typeArgs[0]));
     }
     ret->SetTy(ty);

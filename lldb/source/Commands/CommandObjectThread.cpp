@@ -453,7 +453,10 @@ protected:
 
     if (m_step_type == eStepTypeInto) {
       StackFrame *frame = thread->GetStackFrameAtIndex(0).get();
-      assert(frame != nullptr);
+      if (!frame) {
+        result.AppendError("no frames available for thread");
+        return false;
+      }
 
       if (frame->HasDebugInformation()) {
         AddressRange range;
@@ -509,6 +512,10 @@ protected:
             false, abort_other_plans, bool_stop_other_threads, new_plan_status);
     } else if (m_step_type == eStepTypeOver) {
       StackFrame *frame = thread->GetStackFrameAtIndex(0).get();
+      if (!frame) {
+        result.AppendError("no frames available for thread");
+        return false;
+      }
 
       if (frame->HasDebugInformation())
         new_plan_sp = thread->QueueThreadPlanForStepOverRange(
@@ -1604,6 +1611,10 @@ protected:
     StackFrame *frame = m_exe_ctx.GetFramePtr();
     Thread *thread = m_exe_ctx.GetThreadPtr();
     Target *target = m_exe_ctx.GetTargetPtr();
+    if (!frame || !reg_ctx || !thread || !target) {
+      result.AppendError("invalid execution context");
+      return false;
+    }
     const SymbolContext &sym_ctx =
         frame->GetSymbolContext(eSymbolContextLineEntry);
 

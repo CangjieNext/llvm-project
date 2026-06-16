@@ -541,9 +541,11 @@ bool CJRegisterContext::ReadRegister(const RegisterInfo *reg_info,
 bool CJRegisterContext::WriteRegister(const RegisterInfo *reg_info,
                                       const RegisterValue &value) {
   if (!reg_info)
-    return true;
+    return false;
 
   ProcessSP process_sp = GetThread().GetProcess();
+  if (!process_sp)
+    return false;
   const llvm::Triple triple = process_sp->GetSystemArchitecture().GetTriple();
 
   bool ok = false;
@@ -566,8 +568,7 @@ bool CJRegisterContext::WriteRegister(const RegisterInfo *reg_info,
   }
 
   if (!ok)
-    return true;
-
+    return false;
   llvm::StringRef alias =
       GetGenericRegisterAlias(reg_info->kinds[eRegisterKindGeneric]);
   if (!alias.empty())

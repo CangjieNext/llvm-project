@@ -25,7 +25,6 @@
 #include "lldb/lldb-private-types.h"
 #include "llvm/ADT/StringRef.h"
 #include "lldb/Core/Module.h"
-#include "lldb/Symbol/Variable.h"
 #include "lldb/Core/ValueObjectVariable.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
@@ -92,7 +91,7 @@ constexpr CJThreadLayoutOffsets offsets_aarch64_linux = {
     .offset_of_CJThread_dot_name = 464,
     .offset_of_Thread_dot_tid = 104,
     .offset_of_boundThread = 432,
-    .offset_of_boundCJThread =320
+    .offset_of_boundCJThread = 320
 };
 
 constexpr CJThreadLayoutOffsets offsets_aarch64_linux_ohos = {
@@ -105,7 +104,7 @@ constexpr CJThreadLayoutOffsets offsets_aarch64_linux_ohos = {
     .offset_of_CJThread_dot_name = 464,
     .offset_of_Thread_dot_tid = 104,
     .offset_of_boundThread = 432,
-    .offset_of_boundCJThread =320
+    .offset_of_boundCJThread = 320
 };
 
 constexpr CJThreadLayoutOffsets offsets_aarch64_darwin = {
@@ -257,6 +256,10 @@ std::vector<CJThreadInfoOverview> CollectAllCJThreads(Process &process,
 
   // Traverse the circular doubly linked list
   while (dulink_entry != list_head && dulink_entry != 0) {
+    if (dulink_entry < offsets.offset_of_CJThread_dot_allCJThreadDulink) {
+      status.SetErrorString("Invalid dulink entry address (underflow)");
+      break;
+    }
     lldb::addr_t cjthread_addr =
         dulink_entry - offsets.offset_of_CJThread_dot_allCJThreadDulink;
 
@@ -363,7 +366,7 @@ bool CJThread::RetrieveRegisterInfo(Process &process, CJDynamicRegisterInfoSP cj
     lldb::RegisterContextSP reg_ctx = firstThread->GetRegisterContext();
     if (!reg_ctx) return false;
 
-    for (int i = 0, n = reg_ctx->GetRegisterCount(); i < n; i ++) {
+    for (int i = 0, n = reg_ctx->GetRegisterCount(); i < n; i++) {
         const RegisterInfo *reg_info = reg_ctx->GetRegisterInfoAtIndex(i);
 
         std::vector<uint32_t> value_regs, invalidate_regs;
@@ -390,8 +393,10 @@ bool CJThread::RetrieveRegisterInfo(Process &process, CJDynamicRegisterInfoSP cj
 
     for (int i = 0, n = reg_ctx->GetRegisterSetCount(); i < n; i++) {
         const RegisterSet *rset = reg_ctx->GetRegisterSet(i);
-        for (int j = 0; j < (int)rset->num_registers; j ++) {
+        for (int j = 0; j < (int)rset->num_registers; j++) {
             int regno = rset->registers[j];
+            if (regno < 0 || regno >= (int)registers.size())
+              continue;
             registers[regno].set_name = ConstString(rset->name);
         }
     }
@@ -484,7 +489,10 @@ const char *CJThread::GetQueueName() {
 
 lldb::RegisterContextSP CJThread::GetRegisterContext() {
     if (m_cjthread_info.state == CJThreadState::eRunning) {
-      lldb::ThreadSP holding_osthread_sp = GetProcess()->GetThreadList().FindThreadByID(GetHostThreadID());
+      lldb::ProcessSP process_sp = GetProcess();
+      if (!process_sp)
+        return m_reg_context_sp;
+      lldb::ThreadSP holding_osthread_sp = process_sp->GetThreadList().FindThreadByID(GetHostThreadID());
       if (holding_osthread_sp) {
         return holding_osthread_sp->GetRegisterContext();
       }
@@ -509,7 +517,12 @@ lldb::RegisterContextSP CJThread::CreateRegisterContextForFrame(StackFrame *fram
 
 bool CJThread::CalculateStopInfo() {
   if (m_cjthread_info.state == CJThreadState::eRunning) {
-    lldb::ThreadSP os_thread = GetProcess()->GetThreadList().FindThreadByID(GetHostThreadID());
+    lldb::ProcessSP process_sp = GetProcess();
+    if (!process_sp) {
+      SetStopInfo(lldb::StopInfoSP());
+      return true;
+    }
+    lldb::ThreadSP os_thread = process_sp->GetThreadList().FindThreadByID(GetHostThreadID());
     if (os_thread) {
       lldb::StopInfoSP stop_info_sp = os_thread->GetPrivateStopInfo();
       if (stop_info_sp && stop_info_sp->IsValidForOperatingSystemThread(*this)) {
@@ -630,9 +643,14 @@ bool CJThread::WaitUntilCJThreadScheduled(Target &target, lldb::CJThreadSP selec
   do {
     StreamString stream_after_resume;
     process_sp->ResumeSynchronous(&stream_after_resume);
-    lldb::StopInfoSP info = process_sp->GetThreadList().GetSelectedThread()->GetStopInfo();
-    if (!info) continue;
-    if (info->GetStopReason() != lldb::eStopReasonBreakpoint) continue;
+    lldb::ThreadSP sel_thread = process_sp->GetThreadList().GetSelectedThread();
+    if (!sel_thread)
+      continue;
+    lldb::StopInfoSP info = sel_thread->GetStopInfo();
+    if (!info)
+      continue;
+    if (info->GetStopReason() != lldb::eStopReasonBreakpoint)
+      continue;
     process_sp->RefreshCJThreadList(error, true);
     if (error.Fail()) {
       return false;
