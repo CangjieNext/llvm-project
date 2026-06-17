@@ -1606,12 +1606,12 @@ PreservedAnalyses CJFillMetadata::run(Module &M, ModuleAnalysisManager &) const 
 
 namespace {
 
-// 从完整反射结构中提取 debug 字段，创建独立的小 debug global
-// - 8 字段 (FRT_PTRS / 类): 保留 [0] fieldNames → { i8* }
-// - 7 字段 (FET_PTRS / 枚举): 保留 [0]-[2] ctorInfo/modifier/ctorCnt → { i8*, i32, i32 }
-// - 其他字段数: 返回 nullptr，调用方置空指针
-// 原 .reflect global 不再被引用，由 DCE 自动清除
-GlobalVariable *downgradeReflectGlobal(GlobalVariable &ReflectGV) {
+// Extract debug-only fields from a reflect struct into a .dbg global.
+//   enum:  keep [0]-[2] (ctorInfo, modifier, ctorCnt) → { i8*, i32, i32 }
+//   class: keep [0]     (fieldNames)                  → { i8* }
+// IsEnum is determined from the owning TypeInfo/TypeTemplate's type byte,
+// not from field count (enum reflectType has 15+ operands).
+GlobalVariable *downgradeReflectGlobal(GlobalVariable &ReflectGV, bool IsEnum) {
   if (!ReflectGV.hasInitializer())
     return nullptr;
 
@@ -1621,31 +1621,32 @@ GlobalVariable *downgradeReflectGlobal(GlobalVariable &ReflectGV) {
 
   unsigned NumOps = Init->getNumOperands();
   unsigned DebugFields;
-
-  if (NumOps >= 8)      // 类: FRT_PTRS=8
-    DebugFields = 1;
-  else if (NumOps >= 7) // 枚举: FET_PTRS=7
+  if (IsEnum && NumOps >= 3)
     DebugFields = 3;
+  else if (NumOps >= 1)
+    DebugFields = 1;
   else
-    return nullptr;     // 枚举构造器等, 无调试结构对应
+    return nullptr;
 
-  // 构建 debug-only struct type
   SmallVector<Type *, 4> DebugTypes;
   for (unsigned I = 0; I < DebugFields; ++I)
     DebugTypes.push_back(Init->getOperand(I)->getType());
   auto *DebugST = StructType::get(ReflectGV.getContext(), DebugTypes);
 
-  // 提取 debug 字段作为初始化器
   SmallVector<Constant *, 4> DebugOps;
   for (unsigned I = 0; I < DebugFields; ++I)
     DebugOps.push_back(Init->getOperand(I));
 
-  // 创建新的小 debug global
   auto *DebugGV = new GlobalVariable(
       *ReflectGV.getParent(), DebugST, false, GlobalValue::InternalLinkage,
       ConstantStruct::get(DebugST, DebugOps),
       ReflectGV.getName() + ".dbg");
   DebugGV->setAlignment(ReflectGV.getAlign());
+  // Inherit CFileReflect + section so pointer fields are relocated to
+  // DataRefOffset64-relative offsets by CJMetadata.
+  DebugGV->addAttribute("CFileReflect");
+  if (ReflectGV.hasSection())
+    DebugGV->setSection(ReflectGV.getSection());
   return DebugGV;
 }
 
@@ -1655,48 +1656,50 @@ bool rewriteReflectionOperand(GlobalVariable &GV, unsigned FlagIdx,
     return false;
 
   auto *Init = dyn_cast<ConstantStruct>(GV.getInitializer());
-  if (Init == nullptr || Init->getNumOperands() <= ReflectionIdx)
+  if (!Init || Init->getNumOperands() <= ReflectionIdx)
     return false;
 
   auto *Flag = cast<ConstantInt>(Init->getOperand(FlagIdx));
-  uint64_t NewFlag = Flag->getZExtValue() & ~TF_REFLECTION;
+  if (!(Flag->getZExtValue() & TF_REFLECTION))
+    return false; // already off
 
-  // TF_REFLECTION 未置位 → 调试信息, 不动
-  if (NewFlag == Flag->getZExtValue())
+  // Try to downgrade the reflect struct to a minimal .dbg global.
+  Constant *NewReflectOp = nullptr;
+  auto *ReflectOp = Init->getOperand(ReflectionIdx);
+  if (!ReflectOp->isNullValue()) {
+    auto *CE = dyn_cast<ConstantExpr>(ReflectOp);
+    if (!CE || CE->getOpcode() != Instruction::BitCast)
+      return false;
+
+    auto *ReflectGV = dyn_cast<GlobalVariable>(CE->getOperand(0));
+    if (!ReflectGV)
+      return false;
+
+    // Read type kind from TypeInfo/TypeTemplate operand[1].
+    bool IsEnum = false;
+    if (Init->getNumOperands() > 1)
+      if (auto *TypeCI = dyn_cast<ConstantInt>(Init->getOperand(1)))
+        IsEnum = (TypeCI->getSExtValue() == TK_ENUM ||
+                  TypeCI->getSExtValue() == TK_TEMP_ENUM);
+
+    auto *DebugGV = downgradeReflectGlobal(*ReflectGV, IsEnum);
+    if (!DebugGV)
+      return false;
+
+    NewReflectOp = ConstantExpr::getBitCast(DebugGV, CE->getType());
+  }
+
+  if (!NewReflectOp)
     return false;
 
-  // TF_REFLECTION 已置位 → 需要降级
+  // Downgrade succeeded: clear flag + replace pointer.
   SmallVector<Constant *, 0> Ops;
   Ops.reserve(Init->getNumOperands());
   for (unsigned I = 0; I < Init->getNumOperands(); ++I)
     Ops.push_back(cast<Constant>(Init->getOperand(I)));
-
-  Ops[FlagIdx] = ConstantInt::get(Flag->getType(), NewFlag);
-
-  // 追踪 reflection 指针, 尝试降级为独立小 debug struct
-  bool Downgraded = false;
-  auto *ReflectOp = Init->getOperand(ReflectionIdx);
-  if (!ReflectOp->isNullValue()) {
-    if (auto *CE = dyn_cast<ConstantExpr>(ReflectOp)) {
-      if (CE->getOpcode() == Instruction::BitCast) {
-        if (auto *ReflectGV = dyn_cast<GlobalVariable>(CE->getOperand(0))) {
-          if (auto *DebugGV = downgradeReflectGlobal(*ReflectGV)) {
-            // 重定向 bitcast 指向新的小 debug global
-            Ops[ReflectionIdx] =
-                ConstantExpr::getBitCast(DebugGV, CE->getType());
-            Downgraded = true;
-          }
-        }
-      }
-    }
-  }
-
-  if (!Downgraded) {
-    // 无法降级 (枚举构造器等) → 置空指针, DCE 处理
-    Ops[ReflectionIdx] = ConstantPointerNull::get(
-        cast<PointerType>(ReflectOp->getType()));
-  }
-
+  Ops[FlagIdx] =
+      ConstantInt::get(Flag->getType(), Flag->getZExtValue() & ~TF_REFLECTION);
+  Ops[ReflectionIdx] = NewReflectOp;
   GV.setInitializer(ConstantStruct::get(Init->getType(), Ops));
   return true;
 }

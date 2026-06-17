@@ -261,6 +261,13 @@ struct CJFillMetadata : public PassInfoMixin<CJFillMetadata> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &) const;
 };
 
+// Strips reflection metadata from imported libraries in LTO PostLink.
+// For each TypeInfo/TypeTemplate whose TF_REFLECTION flag is set, attempts to
+// downgrade the reflect struct to a minimal .dbg global keeping only runtime
+// debug fields (enum: ctorInfo/modifier/ctorCnt; class: fieldNames). On success
+// the TF_REFLECTION bit is cleared and the pointer is redirected to the .dbg
+// global. GVs that cannot be downgraded are left untouched; the original
+// reflect structs replaced by downgrades are cleaned by downstream GlobalDCE.
 struct CJDisableImportLibReflection
     : public PassInfoMixin<CJDisableImportLibReflection> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &) const;
