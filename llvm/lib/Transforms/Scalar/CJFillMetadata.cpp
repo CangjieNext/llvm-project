@@ -895,6 +895,8 @@ Constant *ReflectInfo::getReflectionInfo(GlobalVariable *GV, bool IsEnum) {
     }
   } else {
     if (IsEnum) {
+      if (ReflectMD->getNumOperands() == ECRT_MAX)
+        return Int8PtrNull;
       return getEnumDebugInfo(ReflectMD);
     } else {
       return getClassDebugInfo(ReflectMD);
