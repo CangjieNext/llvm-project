@@ -261,6 +261,15 @@ struct CJFillMetadata : public PassInfoMixin<CJFillMetadata> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &) const;
 };
 
+// CJDisableImportLibReflection strips reflection metadata enabled by
+// --disable-reflection. For each TypeInfo/TypeTemplate whose reflection flag
+// bit is set, it clears that bit and rewrites the pointed-to reflect struct
+// into a small ".reflect.dbg" global keeping only the debug fields the runtime
+// still needs (enum: ctorInfo/modifier/ctorCnt; class: fieldNames). The dbg
+// global inherits CFileReflect + section so CJMetadata relocates its pointer
+// fields to DataRefOffset64 relative offsets, matching the original layout.
+// Reflect structs that cannot be downgraded (e.g. enum-ctor reflect) are
+// nulled instead; the unreferenced originals are left for DCE.
 struct CJDisableImportLibReflection
     : public PassInfoMixin<CJDisableImportLibReflection> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &) const;

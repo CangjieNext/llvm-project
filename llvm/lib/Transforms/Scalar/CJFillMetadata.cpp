@@ -1606,12 +1606,13 @@ PreservedAnalyses CJFillMetadata::run(Module &M, ModuleAnalysisManager &) const 
 
 namespace {
 
-// 从完整反射结构中提取 debug 字段，创建独立的小 debug global
-// - 8 字段 (FRT_PTRS / 类): 保留 [0] fieldNames → { i8* }
-// - 7 字段 (FET_PTRS / 枚举): 保留 [0]-[2] ctorInfo/modifier/ctorCnt → { i8*, i32, i32 }
-// - 其他字段数: 返回 nullptr，调用方置空指针
-// 原 .reflect global 不再被引用，由 DCE 自动清除
-GlobalVariable *downgradeReflectGlobal(GlobalVariable &ReflectGV) {
+// Extract debug fields from the full reflect struct into a small .dbg global.
+//   enum:  keep [0]-[2] (ctorInfo/modifier/ctorCnt) → { i8*, i32, i32 }
+//   class: keep [0]     (fieldNames)               → { i8* }
+// IsEnum comes from the owning TypeTemplate/TypeInfo (read from its type byte),
+// not from field-type guessing: an enum reflectType carries many methods and
+// can grow to 15+ operands, so field count is not a reliable discriminator.
+GlobalVariable *downgradeReflectGlobal(GlobalVariable &ReflectGV, bool IsEnum) {
   if (!ReflectGV.hasInitializer())
     return nullptr;
 
@@ -1621,31 +1622,34 @@ GlobalVariable *downgradeReflectGlobal(GlobalVariable &ReflectGV) {
 
   unsigned NumOps = Init->getNumOperands();
   unsigned DebugFields;
-
-  if (NumOps >= 8)      // 类: FRT_PTRS=8
-    DebugFields = 1;
-  else if (NumOps >= 7) // 枚举: FET_PTRS=7
+  if (IsEnum && NumOps >= 3)
     DebugFields = 3;
+  else if (NumOps >= 1)
+    DebugFields = 1;
   else
-    return nullptr;     // 枚举构造器等, 无调试结构对应
+    return nullptr;
 
-  // 构建 debug-only struct type
   SmallVector<Type *, 4> DebugTypes;
   for (unsigned I = 0; I < DebugFields; ++I)
     DebugTypes.push_back(Init->getOperand(I)->getType());
   auto *DebugST = StructType::get(ReflectGV.getContext(), DebugTypes);
 
-  // 提取 debug 字段作为初始化器
   SmallVector<Constant *, 4> DebugOps;
   for (unsigned I = 0; I < DebugFields; ++I)
     DebugOps.push_back(Init->getOperand(I));
 
-  // 创建新的小 debug global
   auto *DebugGV = new GlobalVariable(
       *ReflectGV.getParent(), DebugST, false, GlobalValue::InternalLinkage,
       ConstantStruct::get(DebugST, DebugOps),
       ReflectGV.getName() + ".dbg");
   DebugGV->setAlignment(ReflectGV.getAlign());
+  // Inherit CFileReflect + section so CJMetadata relocates pointer fields
+  // (e.g. enumCtorInfos) to DataRefOffset64 relative offsets. Otherwise [0]
+  // stays a bitcast absolute pointer and the runtime's this+offset lookup
+  // yields a bogus address, crashing MemoryCopy in SetEnumConstructors.
+  DebugGV->addAttribute("CFileReflect");
+  if (ReflectGV.hasSection())
+    DebugGV->setSection(ReflectGV.getSection());
   return DebugGV;
 }
 
@@ -1665,6 +1669,14 @@ bool rewriteReflectionOperand(GlobalVariable &GV, unsigned FlagIdx,
   if (NewFlag == Flag->getZExtValue())
     return false;
 
+  bool IsEnum = false;
+  if (Init->getNumOperands() > 1) {
+    if (auto *TypeCI = dyn_cast<ConstantInt>(Init->getOperand(1))) {
+      int64_t Kind = TypeCI->getSExtValue();
+      IsEnum = (Kind == TK_ENUM || Kind == TK_TEMP_ENUM);
+    }
+  }
+
   // TF_REFLECTION 已置位 → 需要降级
   SmallVector<Constant *, 0> Ops;
   Ops.reserve(Init->getNumOperands());
@@ -1680,7 +1692,7 @@ bool rewriteReflectionOperand(GlobalVariable &GV, unsigned FlagIdx,
     if (auto *CE = dyn_cast<ConstantExpr>(ReflectOp)) {
       if (CE->getOpcode() == Instruction::BitCast) {
         if (auto *ReflectGV = dyn_cast<GlobalVariable>(CE->getOperand(0))) {
-          if (auto *DebugGV = downgradeReflectGlobal(*ReflectGV)) {
+          if (auto *DebugGV = downgradeReflectGlobal(*ReflectGV, IsEnum)) {
             // 重定向 bitcast 指向新的小 debug global
             Ops[ReflectionIdx] =
                 ConstantExpr::getBitCast(DebugGV, CE->getType());
