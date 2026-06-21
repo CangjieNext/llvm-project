@@ -974,7 +974,11 @@ Value *llvm::findMemoryBasePointer(Value *V) {
       }
     } else if (auto *GEPI = dyn_cast<GetElementPtrInst>(CV)) {
       CV = GEPI->getPointerOperand();
-    } else if (auto *CE = dyn_cast<ConstantExpr>(CV)) {
+    } 
+    // else if (auto *FI = dyn_cast<FreezeInst>(CV)) {
+    //   CV = FI->getOperand(0);
+    // } 
+    else if (auto *CE = dyn_cast<ConstantExpr>(CV)) {
       CV = CE->getOperand(0);
     } else {
       break;
