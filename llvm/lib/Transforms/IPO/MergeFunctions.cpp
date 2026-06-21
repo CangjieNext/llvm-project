@@ -170,6 +170,13 @@ static cl::opt<bool>
                           cl::init(false),
                           cl::desc("Allow mergefunc to create aliases"));
 
+static cl::opt<unsigned> ExceptionOutlineMinSaving(
+    "mergefunc-exception-outline-min-saving",
+    cl::desc("Minimum estimated code-size saving (in number of instructions) "
+             "required for exception outlining. Groups with lower savings are "
+             "skipped."),
+    cl::init(1), cl::Hidden);
+
 namespace {
 
 class FunctionNode {
@@ -507,8 +514,8 @@ namespace {
 
 // Accumulate the hash of a sequence of 64-bit integers. This mirrors the
 // HashAccumulator64 used in FunctionComparator::functionHash. It is used to
-// compute a structural hash of a basic block for grouping identical throw
-// patterns before outlining.
+// compute a ProfitabilityKey for grouping throw candidates that are likely to
+// yield mergeable outlined functions.
 class HashAccumulator64 {
   uint64_t Hash;
 
@@ -522,21 +529,118 @@ public:
 
 } // end anonymous namespace
 
-/// Compute a structural hash of a basic block based on opcode sequence and
-/// callee names. This is similar to FunctionComparator::functionHash but
-/// additionally hashes callee names so that blocks calling different functions
-/// are placed in different groups. Hash collisions do not affect correctness —
-/// they may cause an extra isolated block to be outlined at a minor code size
-/// cost.
-static uint64_t computeBBHash(BasicBlock *BB) {
+/// Candidate throw block with pre-computed cost estimates.
+struct ThrowCandidate {
+  BasicBlock *BB;
+  Function *Parent;
+  unsigned BlockCost;
+  unsigned CodeReplCost;
+};
+
+/// Hash a Type pointer for use in ProfitabilityKey computation.
+static uint64_t hashType(Type *Ty) {
+  return hash_value(Ty);
+}
+
+/// Build a mapping from Value to input argument index based on the set of
+/// values that getInputArgs has determined will be lifted to outlined-function
+/// parameters by CodeExtractor.
+static DenseMap<Value *, unsigned>
+buildInputIndex(const SetVector<Value *> &Inputs) {
+  DenseMap<Value *, unsigned> Index;
+  for (unsigned I = 0; I < Inputs.size(); ++I)
+    Index[Inputs[I]] = I;
+  return Index;
+}
+
+/// Hash the shape of a Value operand for profitability grouping.
+///
+/// The key design decision: values that getInputArgs will lift to outlined-
+/// function parameters must NOT be hashed by their specific identity (the
+/// concrete constant / global name), because after extraction those become
+/// call-site arguments and the outlined function body is identical regardless
+/// of the specific value.  Hashing them by identity would over-split groups
+/// and miss legitimate merge opportunities.
+///
+/// Values that will stay inside the outlined function body ARE hashed by
+/// identity, since they affect whether FunctionComparator will consider two
+/// outlined functions equivalent.
+static void addOperandShapeToHash(HashAccumulator64 &H, Value *V,
+                                   const DenseMap<Value *, unsigned> &InputIndex) {
+  auto It = InputIndex.find(V);
+  if (It != InputIndex.end()) {
+    // This value will be parameterized — hash the input slot and type only.
+    H.add((uint64_t)Instruction::Call); // marker: input argument
+    H.add(It->second);                   // argument index in outlined function
+    H.add(hashType(V->getType()));       // type (for signature matching)
+    return;
+  }
+
+  // This value stays in the outlined function body — hash its identity.
+  if (auto *CI = dyn_cast<ConstantInt>(V)) {
+    H.add((uint64_t)Instruction::Add); // marker: body constant int
+    H.add(CI->getBitWidth());
+    if (CI->getBitWidth() <= 64)
+      H.add(CI->getZExtValue());
+    else
+      H.add(CI->getBitWidth());
+  } else if (auto *GV = dyn_cast<GlobalValue>(V)) {
+    H.add((uint64_t)Instruction::Load); // marker: body global
+    H.add(hash_value(GV->getName()));
+  } else if (auto *Arg = dyn_cast<Argument>(V)) {
+    H.add((uint64_t)Instruction::Sub); // marker: enclosing-function argument
+    H.add(Arg->getArgNo());
+    H.add(hashType(Arg->getType()));
+  } else if (isa<ConstantExpr>(V)) {
+    H.add((uint64_t)Instruction::And); // marker: constant expression
+    H.add(hashType(V->getType()));
+  } else if (isa<Constant>(V)) {
+    H.add((uint64_t)Instruction::And); // marker: other constant
+    H.add(hashType(V->getType()));
+  } else {
+    // Local instruction defined inside the region — hash the type as a proxy
+    // for the def-use structure.
+    H.add((uint64_t)Instruction::Or); // marker: local instruction
+    H.add(hashType(V->getType()));
+  }
+}
+
+/// Compute a profitability grouping key for a throw block.
+///
+/// The key describes the shape of the outlined function that CodeExtractor
+/// would produce, NOT the raw throw block IR.  It uses getInputArgs to
+/// determine which operands will become function parameters (and therefore
+/// should not be hashed by concrete value) and which will stay in the
+/// function body (and therefore DO need identity hashing).
+///
+/// This is NOT an eligibility check — all candidates that pass
+/// isThrowExceptionInstruction + isBBEligibleForOutline remain candidates.
+static uint64_t computeProfitabilityKey(BasicBlock *BB) {
+  SetVector<Value *> Inputs;
+  getInputArgs(BB, Inputs);
+  DenseMap<Value *, unsigned> InputIndex = buildInputIndex(Inputs);
+
   HashAccumulator64 H;
-  for (auto &Inst : *BB) {
-    H.add(Inst.getOpcode());
-    if (auto *CI = dyn_cast<CallInst>(&Inst)) {
-      if (Function *Callee = CI->getCalledFunction())
+
+  for (Instruction &I : *BB) {
+    H.add(I.getOpcode());
+    H.add(I.getNumOperands());
+
+    if (auto *CB = dyn_cast<CallBase>(&I)) {
+      if (Function *Callee = CB->getCalledFunction())
         H.add(hash_value(Callee->getName()));
     }
+
+    for (Value *Op : I.operands())
+      addOperandShapeToHash(H, Op, InputIndex);
   }
+
+  // Hash the types of all input arguments in order — this captures the
+  // outlined function's parameter-type signature.
+  for (Value *Input : Inputs)
+    H.add(hashType(Input->getType()));
+
+  H.add(BB->getTerminator()->getOpcode());
   return H.getHash();
 }
 
@@ -551,14 +655,21 @@ static unsigned getBlockInstCount(BasicBlock *BB) {
 }
 
 /// Estimated instruction count of the codeRepl block that replaces the original
-/// throw block after outlining. For a throw block (ending in unreachable),
-/// CodeExtractor::emitCallAndSwitchStatement generates only: call + ret.
-static unsigned getCodeReplCost() {
-  return 2; // call + ret void
+/// throw block after outlining.
+///
+/// For throw blocks ending in unreachable, CodeExtractor generates only
+///   call + ret (2 instructions).
+/// For other terminators a more conservative estimate is used (call +
+///   branch/switch + possible reloads ≈ 4), since we do not currently add
+///   new eligibility rules to exclude them.
+static unsigned getCodeReplCost(BasicBlock *BB) {
+  if (isa<UnreachableInst>(BB->getTerminator()))
+    return 2; // call + ret void
+  return 4;   // conservative: call + branch/switch/reload estimate
 }
 
 /// Estimated instruction count of the fixed overhead for the new outlined
-/// function: newFuncRoot br + function prologue + epilogue (~3 instructions).
+/// function: newFuncRoot br + conservative prologue/epilogue allowance.
 static unsigned getFuncOverhead() {
   return 3;
 }
@@ -567,11 +678,11 @@ bool MergeFunctions::doExceptionOutline(Module &M) {
   bool Changed = false;
 
   // ========== Phase 1: Collect + Group + Cost evaluation ==========
-  using ThrowPattern = std::pair<BasicBlock *, Function *>;
-  using HashType = uint64_t;
-
-  DenseMap<HashType, SmallVector<ThrowPattern, 4>> PatternGroups;
-  DenseMap<HashType, unsigned> PatternBlockCost;
+  // Candidate discovery uses the SAME conditions as the original
+  // implementation.  No new eligibility filters are added here — the cost
+  // model only decides whether to outline, not which blocks are candidates.
+  using ProfitabilityKey = uint64_t;
+  DenseMap<ProfitabilityKey, SmallVector<ThrowCandidate, 4>> Groups;
 
   for (Function &F : M) {
     for (BasicBlock &BB : F) {
@@ -581,51 +692,63 @@ bool MergeFunctions::doExceptionOutline(Module &M) {
         if (!isBBEligibleForOutline(&BB))
           continue;
 
-        // Compute structural hash for grouping identical throw patterns.
-        HashType H = computeBBHash(&BB);
-        PatternGroups[H].push_back({&BB, &F});
-        if (!PatternBlockCost.count(H))
-          PatternBlockCost[H] = getBlockInstCount(&BB);
+        ThrowCandidate C;
+        C.BB = &BB;
+        C.Parent = &F;
+        C.BlockCost = getBlockInstCount(&BB);
+        C.CodeReplCost = getCodeReplCost(&BB);
+
+        ProfitabilityKey Key = computeProfitabilityKey(&BB);
+        Groups[Key].push_back(C);
         break; // Process this BB only once.
       }
     }
   }
 
   // ========== Phase 2: Only outline groups with net code size savings ==========
-  unsigned CodeReplCost = getCodeReplCost();
   unsigned FuncOverhead = getFuncOverhead();
 
-  for (auto &KV : PatternGroups) {
+  for (auto &KV : Groups) {
     auto &Group = KV.second;
-    HashType H = KV.first;
     unsigned N = Group.size();
-    unsigned BlockCost = PatternBlockCost[H];
+
+    // A single-instance throw pattern can never yield a positive saving:
+    // saving = (1-1)*BlockCost - 1*CodeReplCost - FuncOverhead
+    //        = -CodeReplCost - FuncOverhead  →  always negative.
+    if (N < 2)
+      continue;
+
+    // All candidates in a group share the same ProfitabilityKey, so their
+    // BlockCost and CodeReplCost should be identical.  Use the first as
+    // representative.
+    unsigned BlockCost = Group.front().BlockCost;
+    unsigned CodeReplCost = Group.front().CodeReplCost;
 
     // TotalSaving = (N-1)*BlockCost - N*CodeReplCost - FuncOverhead
     //
-    // Before outlining: N copies of BlockCost instructions (N*BlockCost total).
+    // Before outlining: N copies of BlockCost instructions.
     // After outlining:  N codeRepl blocks (N*CodeReplCost) +
     //                   1 outlined function body (BlockCost) +
     //                   1 outlined function framework (FuncOverhead).
-    // Net: N*BlockCost - N*CodeReplCost - BlockCost - FuncOverhead
-    //    = (N-1)*BlockCost - N*CodeReplCost - FuncOverhead
     int TotalSaving = ((int)N - 1) * (int)BlockCost
                       - (int)N * (int)CodeReplCost
                       - (int)FuncOverhead;
 
-    LLVM_DEBUG(dbgs() << "Exception outlining: hash=" << H
+    LLVM_DEBUG(dbgs() << "Exception outlining: key=" << KV.first
                       << " count=" << N
                       << " block_cost=" << BlockCost
                       << " repl_cost=" << CodeReplCost
                       << " func_overhead=" << FuncOverhead
                       << " total_saving=" << TotalSaving
-                      << (TotalSaving > 0 ? " -> OUTLINE\n" : " -> SKIP\n"));
+                      << (TotalSaving >= (int)ExceptionOutlineMinSaving
+                              ? " -> OUTLINE\n"
+                              : " -> SKIP\n"));
 
-    if (TotalSaving <= 0)
+    if (TotalSaving < (int)ExceptionOutlineMinSaving)
       continue;
 
-    for (auto &P : Group) {
-      if (generateFunc(P.first, P.second))
+    for (ThrowCandidate &C : Group) {
+      if (generateFunc(C.BB, C.Parent))
         Changed = true;
     }
   }
