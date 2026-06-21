@@ -93,6 +93,8 @@ bool findAllocaInsts(Value *V, SetVector<Value *> &BaseSet, bool HasArg) {
     } else if (auto *SI = dyn_cast<SelectInst>(Ptr)) {
       WorkList.insert(SI->getTrueValue());
       WorkList.insert(SI->getFalseValue());
+    } else if (auto *FI = dyn_cast<FreezeInst>(Ptr)) {
+      WorkList.insert(FI->getOperand(0));
     } else if (isa<GetElementPtrInst>(Ptr) || isa<CastInst>(Ptr)) {
       WorkList.insert(Ptr->stripInBoundsOffsets());
     } else if (isa<AllocaInst>(Ptr)) {
