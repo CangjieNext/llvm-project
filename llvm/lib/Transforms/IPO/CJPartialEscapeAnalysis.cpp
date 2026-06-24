@@ -2262,21 +2262,51 @@ Value *CJEscapeAnalysis::getBaseValue(Value *CV, int &Offset) {
   return V;
 }
 
+// Syntactic force-escape predicate; never consults dataflow state.
+//   true  -- base originates outside PEA's intra-function view.
+//            Caller MUST mark the target Escaped.
+//   false -- local / not provably external (alloca, fresh CJ_MCC_New*,
+//            phi, select, gc.result, ...).  isEscapedValue contributes
+//            NO escape; callers may still escape for independent reasons
+//            (loop-depth mismatch etc.), and the dataflow owns the rest.
 bool CJEscapeAnalysis::isEscapedValue(Value *V) {
   int Offset = 0;
   Value *Base = getBaseValue(V, Offset);
+  // External from caller.
   if (isa<Argument>(Base)) {
     return true;
   }
   if (isa<GlobalVariable>(Base) || isa<ConstantExpr>(Base)) {
+    // Non-GC-pointer globals never carry a GC ref and cannot escape one.
     if (auto PT = dyn_cast<PointerType>(Base->getType())) {
       if (!containsGCPtrType(PT->getNonOpaquePointerElementType())) {
         return false;
       }
     }
+    // Module-level object graph; origin is outside PEA's intra-function view.
     return true;
   }
-  return true;
+  if (auto *LI = dyn_cast<LoadInst>(Base)) {
+    Type *Ty = LI->getType();
+    if (Ty->isPointerTy() && Ty->getPointerAddressSpace() == 1) {
+      int PtrOff = 0;
+      Value *PtrBase = getBaseValue(LI->getPointerOperand(), PtrOff);
+      // Local allocations whose field stores are recorded in Def:
+      // the dataflow can reconstruct the loaded ref's escape.
+      if (isa<AllocaInst>(PtrBase))
+        return false;
+      auto *CB = dyn_cast<CallBase>(PtrBase);
+      auto *Callee = CB ? CB->getCalledFunction() : nullptr;
+      if (Callee && isRewriteableCangjieMallocFunc(Callee))
+        return false;
+      // Heap / global / callee field — store outside this function,
+      // Def has no record; force-escape.
+      return true;
+    }
+  }
+  // Locally-created / derived values (alloca, fresh CJ_MCC_New*, phi,
+  // select, gc.result, ...).  Their escape is tracked by the dataflow.
+  return false;
 }
 
 class EscapeAnalysisImpl : public InstVisitor<EscapeAnalysisImpl>,
