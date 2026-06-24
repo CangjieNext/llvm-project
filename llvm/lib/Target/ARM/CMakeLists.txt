@@ -19,6 +19,8 @@ tablegen(LLVM ARMGenSystemRegister.inc -gen-searchable-tables)
 
 add_public_tablegen_target(ARMCommonTableGen)
 
+include_directories(${CANGJIE_DEMANGLE_DIR})
+
 add_llvm_target(ARMCodeGen
   A15SDOptimizer.cpp
   ARMAsmPrinter.cpp
@@ -68,6 +70,9 @@ add_llvm_target(ARMCodeGen
   Thumb2ITBlockPass.cpp
   Thumb2InstrInfo.cpp
   Thumb2SizeReduction.cpp
+
+  ADDITIONAL_HEADER_DIRS
+  ${CANGJIE_DEMANGLE_DIR}
 
   LINK_COMPONENTS
   ARMDesc
