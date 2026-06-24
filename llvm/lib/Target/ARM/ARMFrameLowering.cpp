@@ -113,6 +113,7 @@
 #include "ARMConstantPoolValue.h"
 #include "ARMMachineFunctionInfo.h"
 #include "ARMSubtarget.h"
+#include "CangjieDemangle.h"
 #include "MCTargetDesc/ARMAddressingModes.h"
 #include "MCTargetDesc/ARMBaseInfo.h"
 #include "Utils/ARMBaseInfo.h"
@@ -172,6 +173,10 @@ SpillAlignedNEONRegs("align-neon-spills", cl::Hidden, cl::init(true),
 namespace llvm {
 extern cl::opt<bool> CJPipeline;
 }
+
+// Maximum stack size allowed for a cangjie function frame: 2 GB.
+// Emitting a frame at or beyond this size aborts compilation.
+static constexpr uint64_t CangjieMaxStackSize = 2ULL * 1024 * 1024 * 1024;
 
 static MachineBasicBlock::iterator
 skipAlignedDPRCS2Spills(MachineBasicBlock::iterator MI,
@@ -723,6 +728,17 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
   Align Alignment = STI.getFrameLowering()->getStackAlign();
   unsigned ArgRegsSaveSize = AFI->getArgRegsSaveSize();
   unsigned NumBytes = MFI.getStackSize();
+  if (CJPipeline && MFI.getStackSize() >= CangjieMaxStackSize) {
+    auto D = Cangjie::Demangle(MF.getName().str());
+    std::string DemangledName = D.GetPkgName() +
+                                std::string(D.GetPkgName().empty() ? "" : "::") +
+                                D.GetFullName();
+    report_fatal_error("The stacksize of " + Twine(DemangledName) +
+                           " exceeds cangjie max stacksize(2GB).\nCompilation "
+                           "stopped! Please check the implementation of " +
+                           Twine(DemangledName) + "!",
+                       false);
+  }
   const std::vector<CalleeSavedInfo> &CSI = MFI.getCalleeSavedInfo();
   int FPCXTSaveSize = 0;
   bool NeedsWinCFI = needsWinCFI(MF);
