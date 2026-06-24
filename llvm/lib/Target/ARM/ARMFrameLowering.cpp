@@ -113,6 +113,7 @@
 #include "ARMConstantPoolValue.h"
 #include "ARMMachineFunctionInfo.h"
 #include "ARMSubtarget.h"
+#include "CangjieDemangle.h"
 #include "MCTargetDesc/ARMAddressingModes.h"
 #include "MCTargetDesc/ARMBaseInfo.h"
 #include "Utils/ARMBaseInfo.h"
@@ -723,6 +724,18 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
   Align Alignment = STI.getFrameLowering()->getStackAlign();
   unsigned ArgRegsSaveSize = AFI->getArgRegsSaveSize();
   unsigned NumBytes = MFI.getStackSize();
+  constexpr uint64_t CangjieMaxStackSize = 2ULL * 1024 * 1024 * 1024;
+  if (CJPipeline && MFI.getStackSize() >= CangjieMaxStackSize) {
+    auto D = Cangjie::Demangle(MF.getName().str());
+    std::string DemangledName = D.GetPkgName() +
+                                std::string(D.GetPkgName().empty() ? "" : "::") +
+                                D.GetFullName();
+    report_fatal_error("The stacksize of " + Twine(DemangledName) +
+                           " exceeds cangjie max stacksize(2GB).\nCompilation "
+                           "stopped! Please check the implementation of " +
+                           Twine(DemangledName) + "!",
+                       false);
+  }
   const std::vector<CalleeSavedInfo> &CSI = MFI.getCalleeSavedInfo();
   int FPCXTSaveSize = 0;
   bool NeedsWinCFI = needsWinCFI(MF);
