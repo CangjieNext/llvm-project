@@ -2276,7 +2276,23 @@ bool CJEscapeAnalysis::isEscapedValue(Value *V) {
     }
     return true;
   }
-  return true;
+  // A GC reference loaded from a heap object's field may point into a heap
+  // object graph we cannot fully track here; treat it as escaped. But loading
+  // a heap pointer out of a stack record (e.g. the data pointer stored inside
+  // a stack-allocated Array<T> struct) is fine: the pointer's escape status is
+  // already tracked by the EscapeBBInfo/Def maps, so we don't treat it as
+  // escaped here. Other instructions (alloca, fresh CJ_MCC_New*, phi, select,
+  // ...) are locally created/derived and also left to EscapeBBInfo/Def.
+  if (auto *LI = dyn_cast<LoadInst>(Base)) {
+    Type *Ty = LI->getType();
+    if (Ty->isPointerTy() && Ty->getPointerAddressSpace() == 1) {
+      int PtrOff = 0;
+      Value *PtrBase = getBaseValue(LI->getPointerOperand(), PtrOff);
+      if (!isa<AllocaInst>(PtrBase))
+        return true;
+    }
+  }
+  return false;
 }
 
 class EscapeAnalysisImpl : public InstVisitor<EscapeAnalysisImpl>,
