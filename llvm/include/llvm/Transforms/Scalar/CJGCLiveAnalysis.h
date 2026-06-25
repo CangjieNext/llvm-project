@@ -241,12 +241,11 @@ public:
 
   void computeFieldLiveInValues(BasicBlock::reverse_iterator Begin,
                                 BasicBlock::reverse_iterator End,
-                                SetVector<FieldInfo *> &LiveTmp);
+                                SetVector<FieldInfo *> &LiveTmp,
+                                SetVector<FieldInfo *> *KillSet = nullptr);
 
   void computeFieldLiveOutSeed(BasicBlock *BB,
                                SetVector<FieldInfo *> &LiveOuts);
-
-  void computeFieldKillSet(BasicBlock *BB, SetVector<FieldInfo *> &KillSet);
 
   void computeLiveness();
 
