@@ -95,6 +95,8 @@ bool findAllocaInsts(Value *V, SetVector<Value *> &BaseSet, bool HasArg) {
       WorkList.insert(SI->getFalseValue());
     } else if (isa<GetElementPtrInst>(Ptr) || isa<CastInst>(Ptr)) {
       WorkList.insert(Ptr->stripInBoundsOffsets());
+    } else if (auto *FI = dyn_cast<FreezeInst>(Ptr)) {
+      WorkList.insert(FI->getOperand(0));
     } else if (isa<AllocaInst>(Ptr)) {
       if (isMemoryContainsGCPtrType(Ptr->getType())) {
         BaseSet.insert(Ptr);
@@ -103,7 +105,8 @@ bool findAllocaInsts(Value *V, SetVector<Value *> &BaseSet, bool HasArg) {
     } else {
       assert((isa<Constant>(Ptr) || isa<CallInst>(Ptr) ||
               isa<InvokeInst>(Ptr) || isa<LoadInst>(Ptr) ||
-              isa<Argument>(Ptr) || isa<ExtractValueInst>(Ptr)) &&
+              isa<Argument>(Ptr) || isa<ExtractValueInst>(Ptr) ||
+              isa<FreezeInst>(Ptr)) &&
              "unexpected instructions in findStructPtrAlloca");
       if (isa<Argument>(Ptr) && HasArg) {
         BaseSet.insert(Ptr);
