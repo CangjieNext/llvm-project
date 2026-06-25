@@ -103,7 +103,7 @@ bool findAllocaInsts(Value *V, SetVector<Value *> &BaseSet, bool HasArg) {
     } else {
       assert((isa<Constant>(Ptr) || isa<CallInst>(Ptr) ||
               isa<InvokeInst>(Ptr) || isa<LoadInst>(Ptr) ||
-              isa<Argument>(Ptr) || isa<ExtractValueInst>(Ptr)) &&
+              isa<Argument>(Ptr) || isa<ExtractValueInst>(Ptr) &&
              "unexpected instructions in findStructPtrAlloca");
       if (isa<Argument>(Ptr) && HasArg) {
         BaseSet.insert(Ptr);
@@ -734,16 +734,24 @@ void StructLiveAnalysis::insertMemsetForPhiStruct() {
   }
 }
 
-/// Compute the struct-live for each instruction.
+/// Compute the struct-live for each instruction.  If \p KillSet is
+/// non-null, also accumulate the block-level KillSet (union of all
+/// memory-def points) in the same reverse scan, avoiding a separate
+/// forward pass through the block.
 void StructLiveAnalysis::computeFieldLiveInValues(
     BasicBlock::reverse_iterator Begin, BasicBlock::reverse_iterator End,
-    SetVector<FieldInfo *> &LiveTmp) {
+    SetVector<FieldInfo *> &LiveTmp,
+    SetVector<FieldInfo *> *KillSet) {
   for (auto &I : make_range(Begin, End)) {
     SetVector<FieldInfo *> MemDefSet;
     SetVector<FieldInfo *> MemUseSet;
-    if (hasMemoryDefineOrUseValue(&I, MemDefSet, MemUseSet) != MemoryNone) {
+    MemoryAccess Status = hasMemoryDefineOrUseValue(&I, MemDefSet, MemUseSet);
+    if (Status != MemoryNone) {
       LiveTmp.set_subtract(MemDefSet);
       LiveTmp.set_union(MemUseSet);
+    }
+    if (KillSet != nullptr && (Status & DefineMemory)) {
+      KillSet->set_union(MemDefSet);
     }
   }
 }
@@ -777,19 +785,6 @@ void StructLiveAnalysis::computeFieldLiveOutSeed(
   }
 }
 
-void StructLiveAnalysis::computeFieldKillSet(BasicBlock *BB,
-                                             SetVector<FieldInfo *> &KillSet) {
-  for (Instruction &I : *BB) {
-    SetVector<FieldInfo *> MemDefSet;
-    SetVector<FieldInfo *> MemUseSet;
-
-    MemoryAccess Status = hasMemoryDefineOrUseValue(&I, MemDefSet, MemUseSet);
-    if (Status & DefineMemory) {
-      KillSet.set_union(MemDefSet);
-    }
-  }
-}
-
 /// Compute the live-in set for every basic block in the function
 void StructLiveAnalysis::computeLiveness() {
   InstLiveSetCache.clear();
@@ -798,9 +793,10 @@ void StructLiveAnalysis::computeLiveness() {
   // Seed the liveness for each individual block
   for (BasicBlock &BB : F) {
     Data.KillSet[&BB].clear();
-    computeFieldKillSet(&BB, Data.KillSet[&BB]);
     Data.LiveSet[&BB].clear();
-    computeFieldLiveInValues(BB.rbegin(), BB.rend(), Data.LiveSet[&BB]);
+    // Compute LiveSet and KillSet in a single reverse scan through the BB.
+    computeFieldLiveInValues(BB.rbegin(), BB.rend(), Data.LiveSet[&BB],
+                             &Data.KillSet[&BB]);
     Data.LiveOut[&BB] = SetVector<FieldInfo *>();
     computeFieldLiveOutSeed(&BB, Data.LiveOut[&BB]);
     Data.LiveIn[&BB] = Data.LiveOut[&BB];
