@@ -109,11 +109,6 @@ public:
   }
 
   bool doSplit() {
-    if (Size == 8) {
-      IsRead ? createReadRefByOffset(0) : createWriteRefByOffset(0);
-      return true;
-    }
-
     SmallVector<uint64_t, 8> AllRefPos;
     auto [BeginPos, EndPos] = findReferencePositions(
         IsRead ? Dst : Src, AllRefPos);
@@ -123,7 +118,6 @@ public:
     SplitPosion Posions(BeginPos, EndPos, AllRefPos);
     switch (AllRefPos.size()) {
     case 0:
-      report_fatal_error("The read struct does not contain a reference!");
       return false;
     case 1:
       splitForOneRef(Posions, 0);
@@ -140,8 +134,17 @@ public:
     }
   }
 
+  bool isCompleteRefInRange(uint64_t RefPos, uint64_t RefSize,
+                            uint64_t BeginPos, uint64_t EndPos) {
+    return RefPos >= BeginPos && RefPos <= EndPos &&
+           RefSize <= EndPos - RefPos;
+  }
+
+  uint64_t getRefSize() { return DL.getPointerSize(1); }
+
   void splitForOneRef(SplitPosion &Pos, uint64_t RefIdx) {
-    if (Pos.SplitSize == 8) {
+    uint64_t RefSize = getRefSize();
+    if (Pos.SplitSize == RefSize) {
       IsRead ? createReadRefByOffset(Pos.SplitBeginPos) :
                createWriteRefByOffset(Pos.SplitBeginPos);
       return;
@@ -151,8 +154,8 @@ public:
     if (RefPos == Pos.SplitBeginPos) {
       // Reference is at the front of struct
       IsRead ? createReadRefByOffset(RefPos) : createWriteRefByOffset(RefPos);
-      createMemoryByOffset(RefPos + 8, Pos.SplitEndPos); // 8: pointer size
-    } else if (RefPos + 8 == Pos.SplitEndPos) {
+      createMemoryByOffset(RefPos + RefSize, Pos.SplitEndPos);
+    } else if (RefPos + RefSize == Pos.SplitEndPos) {
       // Reference is at the end of struct
       createMemoryByOffset(Pos.SplitBeginPos, RefPos);
       IsRead ? createReadRefByOffset(RefPos) : createWriteRefByOffset(RefPos);
@@ -160,23 +163,24 @@ public:
       // Reference is at the middle of struct
       createMemoryByOffset(Pos.SplitBeginPos, RefPos);
       IsRead ? createReadRefByOffset(RefPos) : createWriteRefByOffset(RefPos);
-      createMemoryByOffset(RefPos + 8, Pos.SplitEndPos); // 8: pointer size
+      createMemoryByOffset(RefPos + RefSize, Pos.SplitEndPos);
     }
   }
 
   void splitForTwoRef(SplitPosion &Pos, uint64_t RefIdx1, uint64_t RefIdx2) {
     // RefPos1 location must be before RefPos2
+    uint64_t RefSize = getRefSize();
     uint64_t RefPos1 = Pos.SplitRefPos[RefIdx1];
     uint64_t RefPos2 = Pos.SplitRefPos[RefIdx2];
     if (RefPos1 == Pos.SplitBeginPos) {
       // Ref1 is at the front of struct
       IsRead ? createReadRefByOffset(RefPos1) : createWriteRefByOffset(RefPos1);
-      Pos.SplitSize = Pos.SplitSize - 8;
-      Pos.SplitBeginPos = RefPos1 + 8;
+      Pos.SplitSize = Pos.SplitSize - RefSize;
+      Pos.SplitBeginPos = RefPos1 + RefSize;
       splitForOneRef(Pos, RefIdx2);
-    } else if (RefPos2 + 8 == Pos.SplitEndPos) {
+    } else if (RefPos2 + RefSize == Pos.SplitEndPos) {
       // Ref2 is at the end of struct
-      Pos.SplitSize = Pos.SplitSize - 8;
+      Pos.SplitSize = Pos.SplitSize - RefSize;
       Pos.SplitEndPos = RefPos2;
       splitForOneRef(Pos, RefIdx1);
       IsRead ? createReadRefByOffset(RefPos2) : createWriteRefByOffset(RefPos2);
@@ -184,8 +188,8 @@ public:
       // Ref1 and Ref2 is at the middle of struct
       createMemoryByOffset(Pos.SplitBeginPos, RefPos1);
       IsRead ? createReadRefByOffset(RefPos1) : createWriteRefByOffset(RefPos1);
-      Pos.SplitSize = Pos.SplitSize - 8 - (RefPos1 - Pos.SplitBeginPos);
-      Pos.SplitBeginPos = RefPos1 + 8;
+      Pos.SplitSize = Pos.SplitSize - RefSize - (RefPos1 - Pos.SplitBeginPos);
+      Pos.SplitBeginPos = RefPos1 + RefSize;
       splitForOneRef(Pos, RefIdx2);
     }
   }
@@ -193,17 +197,18 @@ public:
   // ref1, ref2 and ref3 must be in order.
   void splitForThreeRef(SplitPosion &Pos, uint64_t RefIdx1, uint64_t RefIdx2,
                         uint64_t RefIdx3) {
+    uint64_t RefSize = getRefSize();
     uint64_t RefPos1 = Pos.SplitRefPos[RefIdx1];
     uint64_t RefPos3 = Pos.SplitRefPos[RefIdx3];
     if (RefPos1 == Pos.SplitBeginPos) {
       // Ref1 is at the front of struct
       IsRead ? createReadRefByOffset(RefPos1) : createWriteRefByOffset(RefPos1);
-      Pos.SplitSize = Pos.SplitSize - 8;
-      Pos.SplitBeginPos = RefPos1 + 8;
+      Pos.SplitSize = Pos.SplitSize - RefSize;
+      Pos.SplitBeginPos = RefPos1 + RefSize;
       splitForTwoRef(Pos, RefIdx2, RefIdx3);
-    } else if (RefPos3 + 8 == Pos.SplitEndPos) {
+    } else if (RefPos3 + RefSize == Pos.SplitEndPos) {
       // Ref3 is at the end of struct
-      Pos.SplitSize = Pos.SplitSize - 8;
+      Pos.SplitSize = Pos.SplitSize - RefSize;
       Pos.SplitEndPos = RefPos3;
       splitForTwoRef(Pos, RefIdx1, RefIdx2);
       IsRead ? createReadRefByOffset(RefPos3) : createWriteRefByOffset(RefPos3);
@@ -211,8 +216,8 @@ public:
       // Ref1, Ref2 and Ref3 is at the middle of struct
       createMemoryByOffset(Pos.SplitBeginPos, RefPos1);
       IsRead ? createReadRefByOffset(RefPos1) : createWriteRefByOffset(RefPos1);
-      Pos.SplitSize = Pos.SplitSize - 8 - (RefPos1 - Pos.SplitBeginPos);
-      Pos.SplitBeginPos = RefPos1 + 8;
+      Pos.SplitSize = Pos.SplitSize - RefSize - (RefPos1 - Pos.SplitBeginPos);
+      Pos.SplitBeginPos = RefPos1 + RefSize;
       splitForTwoRef(Pos, RefIdx2, RefIdx3);
     }
   }
@@ -236,7 +241,9 @@ public:
         return;
       Type *EleTy = ST->getElementType(i);
       if (isGCPointerType(EleTy)) {
-        AllRefPos.push_back(Offset);
+        uint64_t RefSize = DL.getTypeStoreSize(EleTy);
+        if (isCompleteRefInRange(Offset, RefSize, BeginPos, EndPos))
+          AllRefPos.push_back(Offset);
       } else if (auto *EST = dyn_cast<StructType>(EleTy)) {
         findReferencePositionInStruct(EST, BeginPos, EndPos, Offset, AllRefPos);
       } else if (auto *EAT = dyn_cast<ArrayType>(EleTy)) {
@@ -251,8 +258,11 @@ public:
     uint64_t EleNum = AT->getNumElements();
     Type *EleType = AT->getElementType();
     if (isa<PointerType>(EleType) && isGCPointerType(EleType)) {
+      uint64_t EleSize = DL.getTypeAllocSize(EleType);
       for (uint64_t Idx = 0; Idx < EleNum; Idx++) {
-        AllRefPos.push_back(CurPos + 8 * Idx); // 8: pointer size
+        uint64_t RefPos = CurPos + EleSize * Idx;
+        if (isCompleteRefInRange(RefPos, EleSize, BeginPos, EndPos))
+          AllRefPos.push_back(RefPos);
       }
     } else if (auto *ArrayStruct = dyn_cast<StructType>(EleType)) {
       uint64_t EleSize = DL.getStructLayout(ArrayStruct)->getSizeInBytes();

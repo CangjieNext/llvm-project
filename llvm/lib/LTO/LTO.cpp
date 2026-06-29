@@ -1338,7 +1338,6 @@ public:
     AddStreamFn &CacheAddStream = *CacheAddStreamOrErr;
     if (CacheAddStream)
       return RunThinBackend(CacheAddStream);
-
     return Error::success();
   }
 
