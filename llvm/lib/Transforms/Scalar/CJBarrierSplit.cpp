@@ -387,9 +387,7 @@ static bool needToSplit(Instruction *I) {
     return false;
   Intrinsic::ID ID = II->getIntrinsicID();
   if (ID == Intrinsic::cj_gcread_struct ||
-      ID == Intrinsic::cj_gcread_static_struct ||
-      ID == Intrinsic::cj_gcwrite_struct ||
-      ID == Intrinsic::cj_gcwrite_static_struct) {
+      ID == Intrinsic::cj_gcread_static_struct) {
     if (isa<ConstantInt>(getSize(II))) {
       return true;
     }
