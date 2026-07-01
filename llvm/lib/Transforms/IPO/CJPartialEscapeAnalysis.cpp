@@ -33,6 +33,7 @@
 #include "llvm/IR/SafepointIRVerifier.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Utils/CallGraphUpdater.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Scalar.h"
 
@@ -49,6 +50,8 @@ static cl::opt<unsigned> CJMaxNonMoveArraySize("cj-max-nonmove-array-size",
 namespace llvm {
 cl::opt<bool> CJDisablePEA("cj-disable-partial-ea",
                                   cl::Hidden, cl::init(false));
+cl::opt<bool> CJEASupportFinalizer("cj-ea-support-finalizer",
+                                  cl::Hidden, cl::init(true));
 
 GlobalVariable *getNewKlass(CallBase *I) {
   GlobalVariable *Klass =
@@ -125,10 +128,39 @@ bool isRewriteableCangjieMallocFunc(Function *F) {
   auto FuncName = F->getName();
   if (FuncName.startswith("CJ_MCC_NewObject") ||
       FuncName.startswith("CJ_MCC_NewArray") ||
+      FuncName.startswith("CJ_MCC_NewFinalizer") ||
       FuncName.startswith("CJ_MCC_NewObjArray")) {
     return true;
   }
   return false;
+}
+
+bool isCangjieNewFinalizerFunc(Function *F) {
+  return F->getName().startswith("CJ_MCC_NewFinalizer");
+}
+
+Function *getFinalizerMethod(GlobalVariable *Klass, Module *M) {
+  if (Klass == nullptr)
+    return nullptr;
+  Constant *Init = Klass->getInitializer();
+  if (Init == nullptr)
+    return nullptr;
+  for (unsigned I = 0; I < Init->getNumOperands(); ++I) {
+    Constant *Op = Init->getAggregateElement(I);
+    if (Op == nullptr || !Op->getType()->isPointerTy())
+      continue;
+    Value *Ptr = Op;
+    if (auto *BC = dyn_cast<ConstantExpr>(Op)) {
+      if (!BC->isCast() || !BC->getOperand(0)->getType()->isPointerTy())
+        continue;
+      Ptr = BC->getOperand(0);
+    }
+    Function *F = dyn_cast<Function>(Ptr);
+    if (F && F->getName().contains("~init"))
+      return F;
+  }
+  LLVM_DEBUG(dbgs() << "Cannot extract finalizer method from TypeInfo.\n");
+  return nullptr;
 }
 
 class NonEscapeRewriter : public InstVisitor<NonEscapeRewriter> {
@@ -136,21 +168,182 @@ class NonEscapeRewriter : public InstVisitor<NonEscapeRewriter> {
 
 public:
   explicit NonEscapeRewriter(
-      CallGraphUpdater *CGUpdater, Module *M)
-      : CGUpdater(CGUpdater), M(M) {
+      CallGraphUpdater *CGUpdater, Module *M, LoopInfo *LI = nullptr)
+      : CGUpdater(CGUpdater), M(M), LI(LI) {
     CJMemset = Intrinsic::getDeclaration(
         M, Intrinsic::cj_memset,
         {IntegerType::getInt8PtrTy(M->getContext(), 0)});
   }
 
+  void setLoopInfo(LoopInfo *LoopInfo) { LI = LoopInfo; }
+
+  bool prepareFinalizer(SmallVectorImpl<Instruction *> &InsertPoints) {
+    CallBase *CB = dyn_cast<CallBase>(OldInst);
+    if (!CB || !CB->getCalledFunction() ||
+        !isCangjieNewFinalizerFunc(CB->getCalledFunction()))
+      return true;
+    IsFinalizer = true;
+    FinalizerKlass = getNewKlass(CB);
+    FinalizerMethod = getFinalizerMethod(FinalizerKlass, M);
+    FinalizerInsertBB = CB->getParent();
+    if (FinalizerMethod == nullptr)
+      return false;
+    if (hasExceptionPath(FinalizerInsertBB))
+      return false;
+    collectFinalizerInsertPoints(InsertPoints);
+    if (InsertPoints.empty())
+      return false;
+    return true;
+  }
+
   bool rewrite(Instruction *Old, BasicBlock *NewInstInsertBB) {
     OldInst = Old;
     Visited.clear();
+    IsFinalizer = false;
+    FinalizerMethod = nullptr;
+    FinalizerInsertBB = nullptr;
+    FinalizerKlass = nullptr;
+    SmallVector<Instruction *, 4> InsertPoints;
+    if (CJEASupportFinalizer && !prepareFinalizer(InsertPoints)) {
+      return false;
+    }
     if (!createNewAllocaInst(NewInstInsertBB)) {
       return false;
     }
     rewriteNewInst();
+    if (IsFinalizer && FinalizerInsertBB != nullptr) {
+      insertFinalizerCall(InsertPoints);
+    }
     return true;
+  }
+
+  bool hasExceptionPath(BasicBlock *CreateBB) {
+    SmallSet<BasicBlock *, 16> VisitedBB;
+    SmallVector<BasicBlock *, 8> Stack;
+    Stack.push_back(CreateBB);
+    while (!Stack.empty()) {
+      BasicBlock *BB = Stack.pop_back_val();
+      if (!VisitedBB.insert(BB).second)
+        continue;
+
+      Instruction *T = BB->getTerminator();
+      if (isa<UnreachableInst>(T) || isa<ResumeInst>(T))
+        return true;
+
+      for (BasicBlock *Succ : successors(BB)) {
+        if (VisitedBB.count(Succ) == 0)
+          Stack.push_back(Succ);
+      }
+    }
+    return false;
+  }
+
+  bool isFinalizerUsedAcrossBBs() {
+    BasicBlock *CreateBB = FinalizerInsertBB;
+    SmallVector<Instruction *, 16> Worklist;
+    SmallPtrSet<Instruction *, 16> Visited;
+
+    for (User *U : OldInst->users()) {
+      if (auto *I = dyn_cast<Instruction>(U))
+        Worklist.push_back(I);
+    }
+
+    while (!Worklist.empty()) {
+      Instruction *I = Worklist.pop_back_val();
+      if (!Visited.insert(I).second)
+        continue;
+
+      if (I->getParent() != CreateBB)
+        return true;
+
+      if (isa<PHINode>(I))
+        return true;
+
+      if (isa<BitCastInst>(I) || isa<AddrSpaceCastInst>(I) ||
+          isa<GetElementPtrInst>(I) || isa<SelectInst>(I)) {
+        for (User *U : I->users()) {
+          if (auto *UI = dyn_cast<Instruction>(U))
+            Worklist.push_back(UI);
+        }
+      }
+    }
+    return false;
+  }
+
+  void collectFinalizerInsertPoints(SmallVectorImpl<Instruction *> &Points) {
+    Instruction *Term = FinalizerInsertBB->getTerminator();
+
+    if (isa<ReturnInst>(Term)) {
+      Points.push_back(Term);
+      return;
+    }
+
+    bool IsInLoop = false;
+    if (LI) {
+      IsInLoop = (LI->getLoopFor(FinalizerInsertBB) != nullptr);
+    } else {
+      for (BasicBlock *Succ : successors(FinalizerInsertBB)) {
+        if (Succ == FinalizerInsertBB) {
+          IsInLoop = true;
+          break;
+        }
+      }
+    }
+    if (IsInLoop) {
+      if (!isFinalizerUsedAcrossBBs())
+        Points.push_back(Term);
+      return;
+    }
+
+    SmallSet<BasicBlock *, 16> VisitedBB;
+    SmallVector<BasicBlock *, 8> Stack;
+    Stack.push_back(FinalizerInsertBB);
+    while (!Stack.empty()) {
+      BasicBlock *BB = Stack.pop_back_val();
+      if (!VisitedBB.insert(BB).second)
+        continue;
+
+      Instruction *T = BB->getTerminator();
+      if (isa<ReturnInst>(T)) {
+        Points.push_back(T);
+        continue;
+      }
+
+      for (BasicBlock *Succ : successors(BB)) {
+        if (VisitedBB.count(Succ) == 0)
+          Stack.push_back(Succ);
+      }
+    }
+  }
+
+  void insertFinalizerCall(SmallVectorImpl<Instruction *> &InsertPoints) {
+    bool ShouldInline = (InsertPoints.size() == 1);
+    if (ShouldInline) {
+      FinalizerMethod->removeFnAttr(Attribute::NoInline);
+    }
+
+    Type *PI8AS1Ty = Type::getInt8PtrTy(M->getContext(), 1);
+    for (Instruction *InsertPoint : InsertPoints) {
+      IRBuilder<> Builder(InsertPoint);
+      Value *ObjPtr = Builder.CreateAddrSpaceCast(NewInst, PI8AS1Ty);
+      SmallVector<Value *, 4> Args;
+      Args.push_back(ObjPtr);
+      if (FinalizerMethod->getFunctionType()->getNumParams() > 1) {
+        Value *OuterTI = Builder.CreateBitCast(
+            FinalizerKlass,
+            FinalizerMethod->getFunctionType()->getParamType(1));
+        Args.push_back(OuterTI);
+      }
+      CallInst *CI = Builder.CreateCall(FinalizerMethod, Args);
+
+      if (CGUpdater)
+        CGUpdater->removeCallSite(*CI);
+
+      if (ShouldInline) {
+        InlineFunctionInfo IFI;
+        InlineFunction(*CI, IFI);
+      }
+    }
   }
 
   bool handleStructAS1Cast(AllocaInst *Old) {
@@ -487,7 +680,12 @@ private:
   Function *CJMemset;
   SmallVector<Instruction *, 8> Queue;
   SmallSetVector<User *, 8> Visited;
+  bool IsFinalizer = false;
+  Function *FinalizerMethod = nullptr;
+  BasicBlock *FinalizerInsertBB = nullptr;
+  GlobalVariable *FinalizerKlass = nullptr;
   bool StructAS1Replace = false;
+  LoopInfo *LI = nullptr;
   static DenseMap<PHINode *, SmallSetVector<Instruction *, 8>> RewritePhiIncoming;
   DenseMap<SelectInst *, SmallSetVector<Instruction *, 8>> RewriteSIIncoming;
   DenseMap<CallInst *, SmallSetVector<Instruction *, 8>> RewriteArrayCopy;
@@ -985,6 +1183,8 @@ public:
       // New Obj in loop can't handle now.
       if (!AllLocations[i]->isEscaped()) {
         NewLocation *New = dyn_cast<NewLocation>(AllLocations[i]);
+        Function *F = dyn_cast<Instruction>(New->Val)->getParent()->getParent();
+        Rewriter.setLoopInfo(&LookupLoopInfo(*F));
         Changed |= Rewriter.rewrite(dyn_cast<Instruction>(New->Val),
                                     New->NewInstInsertBB);
       }
@@ -2604,6 +2804,8 @@ public:
       if (!OnceEscapedValue.count(Partial.first)) {
         LLVM_DEBUG(dbgs() << "not escaped obj:");
         LLVM_DEBUG(dbgs() << "  " << *Partial.first << "\n");
+        Function *F = Partial.first->getParent()->getParent();
+        Rewriter.setLoopInfo(&LookupLoopInfo(*F));
         Rewriter.rewrite(Partial.first, Partial.second);
         Changed = true;
       } else {
