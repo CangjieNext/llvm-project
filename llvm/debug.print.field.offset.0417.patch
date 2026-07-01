@@ -1,0 +1,230 @@
+diff --git a/llvm/lib/Target/ARM/ARMAsmPrinter.cpp b/llvm/lib/Target/ARM/ARMAsmPrinter.cpp
+index b4cfb57a913d..9340a3d5b865 100644
+--- a/llvm/lib/Target/ARM/ARMAsmPrinter.cpp
++++ b/llvm/lib/Target/ARM/ARMAsmPrinter.cpp
+@@ -26,6 +26,7 @@
+ #include "llvm/BinaryFormat/COFF.h"
+ #include "llvm/CodeGen/MachineFunctionPass.h"
+ #include "llvm/CodeGen/MachineJumpTableInfo.h"
++#include "llvm/CodeGen/MachineMemOperand.h"
+ #include "llvm/CodeGen/MachineModuleInfoImpls.h"
+ #include "llvm/CodeGen/StackMaps.h"
+ #include "llvm/IR/Constants.h"
+@@ -54,6 +55,144 @@ using namespace llvm;
+ 
+ #define DEBUG_TYPE "asm-printer"
+ 
++namespace {
++
++static bool shouldDumpCJMIOffset(const Function &F) {
++  return F.getName().equals("_CGV7default22var_1710060587481_1385Hv");
++}
++
++static int getMemoryOperandStartIdx(const MachineInstr &MI) {
++  const MCInstrDesc &Desc = MI.getDesc();
++  for (unsigned I = Desc.NumDefs; I < Desc.getNumOperands(); ++I) {
++    if (Desc.OpInfo[I].OperandType == MCOI::OPERAND_MEMORY)
++      return I;
++  }
++  return -1;
++}
++
++static bool decodeMemoryByteOffset(const MachineInstr &MI, unsigned MemOpIdx,
++                                   int64_t &ByteOffset) {
++  ARMII::AddrMode AddrMode =
++      ARMII::AddrMode(MI.getDesc().TSFlags & ARMII::AddrModeMask);
++
++  switch (AddrMode) {
++  case ARMII::AddrMode2: {
++    const MachineOperand &OffsetReg = MI.getOperand(MemOpIdx + 1);
++    const MachineOperand &OffsetImm = MI.getOperand(MemOpIdx + 2);
++    if (!OffsetReg.isReg() || !OffsetImm.isImm() || OffsetReg.getReg() != 0)
++      return false;
++    ByteOffset = ARM_AM::getAM2Offset(OffsetImm.getImm());
++    if (ARM_AM::getAM2Op(OffsetImm.getImm()) == ARM_AM::sub)
++      ByteOffset = -ByteOffset;
++    return true;
++  }
++  case ARMII::AddrMode3: {
++    const MachineOperand &OffsetReg = MI.getOperand(MemOpIdx + 1);
++    const MachineOperand &OffsetImm = MI.getOperand(MemOpIdx + 2);
++    if (!OffsetReg.isReg() || !OffsetImm.isImm() || OffsetReg.getReg() != 0)
++      return false;
++    ByteOffset = ARM_AM::getAM3Offset(OffsetImm.getImm());
++    if (ARM_AM::getAM3Op(OffsetImm.getImm()) == ARM_AM::sub)
++      ByteOffset = -ByteOffset;
++    return true;
++  }
++  case ARMII::AddrMode5: {
++    const MachineOperand &OffsetImm = MI.getOperand(MemOpIdx + 1);
++    if (!OffsetImm.isImm())
++      return false;
++    ByteOffset = ARM_AM::getAM5Offset(OffsetImm.getImm()) * 4;
++    if (ARM_AM::getAM5Op(OffsetImm.getImm()) == ARM_AM::sub)
++      ByteOffset = -ByteOffset;
++    return true;
++  }
++  case ARMII::AddrMode5FP16: {
++    const MachineOperand &OffsetImm = MI.getOperand(MemOpIdx + 1);
++    if (!OffsetImm.isImm())
++      return false;
++    ByteOffset = ARM_AM::getAM5FP16Offset(OffsetImm.getImm()) * 2;
++    if (ARM_AM::getAM5FP16Op(OffsetImm.getImm()) == ARM_AM::sub)
++      ByteOffset = -ByteOffset;
++    return true;
++  }
++  case ARMII::AddrModeT1_1:
++    if (!MI.getOperand(MemOpIdx + 1).isImm())
++      return false;
++    ByteOffset = MI.getOperand(MemOpIdx + 1).getImm();
++    return true;
++  case ARMII::AddrModeT1_2:
++    if (!MI.getOperand(MemOpIdx + 1).isImm())
++      return false;
++    ByteOffset = MI.getOperand(MemOpIdx + 1).getImm() * 2;
++    return true;
++  case ARMII::AddrModeT1_4:
++  case ARMII::AddrModeT1_s:
++    if (!MI.getOperand(MemOpIdx + 1).isImm())
++      return false;
++    ByteOffset = MI.getOperand(MemOpIdx + 1).getImm() * 4;
++    return true;
++  case ARMII::AddrModeT2_i12:
++  case ARMII::AddrModeT2_i8:
++  case ARMII::AddrModeT2_i8pos:
++  case ARMII::AddrModeT2_i8neg:
++  case ARMII::AddrModeT2_i8s4:
++  case ARMII::AddrMode_i12:
++  case ARMII::AddrModeT2_i7:
++  case ARMII::AddrModeT2_i7s2:
++  case ARMII::AddrModeT2_i7s4:
++    if (!MI.getOperand(MemOpIdx + 1).isImm())
++      return false;
++    ByteOffset = MI.getOperand(MemOpIdx + 1).getImm();
++    return true;
++  case ARMII::AddrModeT2_ldrex:
++    if (!MI.getOperand(MemOpIdx + 1).isImm())
++      return false;
++    ByteOffset = MI.getOperand(MemOpIdx + 1).getImm() * 4;
++    return true;
++  default:
++    return false;
++  }
++}
++
++static void dumpFinalMemoryInstructionOffset(const MachineInstr &MI) {
++  const Function &F = MI.getParent()->getParent()->getFunction();
++  if (!shouldDumpCJMIOffset(F) || (!MI.mayLoad() && !MI.mayStore()))
++    return;
++
++  errs() << "llc final mem function: " << F.getName() << "\n";
++  errs() << "llc final mem bb: " << MI.getParent()->getName() << "\n";
++  errs() << "llc final mem mi: ";
++  MI.print(errs());
++  errs() << "\n";
++
++  ARMII::AddrMode AddrMode =
++      ARMII::AddrMode(MI.getDesc().TSFlags & ARMII::AddrModeMask);
++  errs() << "llc final mem addrmode: " << ARMII::AddrModeToString(AddrMode)
++         << "\n";
++
++  int MemOpIdx = getMemoryOperandStartIdx(MI);
++  if (MemOpIdx >= 0) {
++    int64_t ByteOffset = 0;
++    if (decodeMemoryByteOffset(MI, MemOpIdx, ByteOffset))
++      errs() << "llc final mem immediate byte offset: " << ByteOffset << "\n";
++    else
++      errs() << "llc final mem immediate byte offset: <non-immediate or "
++                "unsupported>\n";
++  } else {
++    errs() << "llc final mem immediate byte offset: <no memory operand>\n";
++  }
++
++  for (const MachineMemOperand *MMO : MI.memoperands()) {
++    errs() << "llc final mem mmo offset: " << MMO->getOffset() << "\n";
++    if (const Value *V = MMO->getValue()) {
++      errs() << "llc final mem mmo value: ";
++      V->printAsOperand(errs(), false);
++      errs() << "\n";
++    }
++  }
++}
++
++} // namespace
++
+ ARMAsmPrinter::ARMAsmPrinter(TargetMachine &TM,
+                              std::unique_ptr<MCStreamer> Streamer)
+     : AsmPrinter(TM, std::move(Streamer)), Subtarget(nullptr), AFI(nullptr),
+@@ -127,6 +266,27 @@ bool ARMAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
+   const Function &F = MF.getFunction();
+   const TargetMachine& TM = MF.getTarget();
+ 
++  // 打印函数名和字段offset信息
++  llvm::errs() << "whh llc ARM32 Function: " << F.getName() << "\n";
++  const llvm::DataLayout& DL = getDataLayout();
++  if (F.getName().equals("_CGV7default22var_1710060587481_1385Hv")) {
++    for (const llvm::BasicBlock& BB : F) {
++      for (const llvm::Instruction& I : BB) {
++        if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&I)) {
++          llvm::Type* sourceType = gep->getSourceElementType();
++          if (auto* structType = llvm::dyn_cast<llvm::StructType>(sourceType)) {
++            const llvm::StructLayout* SL = DL.getStructLayout(structType);
++            for (unsigned i = 0; i < structType->getNumElements(); ++i) {
++              uint64_t offset = SL->getElementOffset(i);
++              llvm::errs() << "llc Field " << i
++                          << " offset: " << offset << "\n";
++            }
++          }
++        }
++      }
++    }
++  }
++
+   // Collect all globals that had their storage promoted to a constant pool.
+   // Functions are emitted before variables, so this accumulates promoted
+   // globals from all functions in PromotedGlobals.
+@@ -1524,6 +1684,8 @@ void ARMAsmPrinter::emitInstruction(const MachineInstr *MI) {
+   // ARM_MC::verifyInstructionPredicates(MI->getOpcode(),
+   //                                   getSubtargetInfo().getFeatureBits());
+ 
++  dumpFinalMemoryInstructionOffset(*MI);
++
+   const DataLayout &DL = getDataLayout();
+   MCTargetStreamer &TS = *OutStreamer->getTargetStreamer();
+   ARMTargetStreamer &ATS = static_cast<ARMTargetStreamer &>(TS);
+diff --git a/llvm/lib/Transforms/Scalar/CJRuntimeLowering.cpp b/llvm/lib/Transforms/Scalar/CJRuntimeLowering.cpp
+index 03797260f468..874d49257a6f 100644
+--- a/llvm/lib/Transforms/Scalar/CJRuntimeLowering.cpp
++++ b/llvm/lib/Transforms/Scalar/CJRuntimeLowering.cpp
+@@ -1083,6 +1083,31 @@ PreservedAnalyses CJRuntimeLowering::run(Module &M,
+ 
+   // traversal Function-Instruction to lower intrinsic
+   for (Function &F : M) {
++
++    // 打印函数名
++    llvm::errs() << "whh Function: " << F.getName() << "\n";
++    // 打印函数体
++    const llvm::DataLayout& DL = F.getParent()->getDataLayout();
++    if (F.getName().equals("_CGV7default22var_1710060587481_1385Hv"))
++      for (llvm::BasicBlock& BB : F) {
++          for (llvm::Instruction& I : BB) {
++              if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&I)) {
++                  // 获取 GEP 指令的偏移信息
++                  llvm::Type* sourceType = gep->getSourceElementType();
++                  if (auto* structType = 
++                      llvm::dyn_cast<llvm::StructType>(sourceType)) {
++                      // 打印每个field的offset
++                      const llvm::StructLayout* SL = DL.getStructLayout(structType);
++                      for (unsigned i = 0; i < structType->getNumElements(); ++i) {
++                          uint64_t offset = SL->getElementOffset(i);
++                          llvm::errs() << "Field " << i 
++                                      << " offset: " << offset << "\n";
++                      }
++                  }
++              }
++          }
++      }
++
+     auto &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
+     // Insert a gv for native Func
+     if (F.hasFnAttribute("cj2c") || F.hasFnAttribute("c2cj")) {
