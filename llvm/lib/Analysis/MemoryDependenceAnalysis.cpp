@@ -478,7 +478,7 @@ MemDepResult MemoryDependenceResults::getSimplePointerDependencyFrom(
           if (const CallBase *CB =
                   dyn_cast<CallBase>(getUnderlyingObject(Loc.Ptr))) {
             Function *F = CB->getCalledFunction();
-            if (F && (F->getName() == "CJ_MCC_NewFinalizerStub" ||
+            if (F && (F->getName().startswith("CJ_MCC_NewFinalizer") ||
                       F->getName() == "CJ_MCC_OnFinalizerCreated"))
               continue;
           }
