@@ -150,6 +150,7 @@ struct Configuration {
   llvm::StringRef installName;
   llvm::StringRef mapFile;
   llvm::StringRef ltoObjPath;
+  llvm::StringRef ltoObjectPath;
   llvm::StringRef thinLTOJobs;
   llvm::StringRef umbrella;
   uint32_t ltoo = 2;

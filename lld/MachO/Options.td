@@ -952,6 +952,10 @@ def object_path_lto : Separate<["-"], "object_path_lto">,
 def lto_emit_obj_only : Flag<["-"], "lto-emit-obj-only">,
     HelpText<"Stop after emitting LTO native object files">,
     Group<grp_rare>;
+def lto_object_path : Separate<["--"], "lto-object-path">,
+    MetaVarName<"<file>">,
+    HelpText<"Merge LTO native objects into a single relocatable object file">,
+    Group<grp_rare>;
 def cache_path_lto : Separate<["-"], "cache_path_lto">,
     MetaVarName<"<path>">,
     HelpText<"Use <path> as a directory for the incremental LTO cache">,

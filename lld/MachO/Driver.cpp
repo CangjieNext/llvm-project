@@ -64,7 +64,9 @@ std::unique_ptr<Configuration> macho::config;
 std::unique_ptr<DependencyTracker> macho::depTracker;
 
 static HeaderFileType getOutputType(const InputArgList &args) {
-  // TODO: -r, -dylinker, -preload...
+  if (args.hasArg(OPT_r))
+    return MH_OBJECT;
+  // TODO: -dylinker, -preload...
   Arg *outputArg = args.getLastArg(OPT_bundle, OPT_dylib, OPT_execute);
   if (outputArg == nullptr)
     return MH_EXECUTE;
@@ -1383,7 +1385,15 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     config->umbrella = arg->getValue();
   }
   config->ltoObjPath = args.getLastArgValue(OPT_object_path_lto);
+  config->ltoObjectPath = args.getLastArgValue(OPT_lto_object_path);
   config->ltoEmitObjOnly = args.hasArg(OPT_lto_emit_obj_only);
+
+  if (!config->ltoObjectPath.empty() && !config->ltoEmitObjOnly)
+    error("--lto-object-path requires -lto-emit-obj-only");
+
+  if (!config->ltoObjectPath.empty() && !config->ltoObjPath.empty())
+    error("--lto-object-path and -object_path_lto cannot be used together");
+
   config->ltoo = args::getInteger(args, OPT_lto_O, 2);
   if (config->ltoo > 3)
     error("--lto-O: invalid optimization level: " + Twine(config->ltoo));

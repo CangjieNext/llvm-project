@@ -22,6 +22,7 @@
 #include "llvm/Support/Caching.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/ObjCARC.h"
 
@@ -180,6 +181,88 @@ std::vector<ObjFile *> BitcodeCompiler::compile() {
       if (objCount > 1)
         fatal("-object_path_lto must specify a directory when using ThinLTO");
     }
+  }
+
+  // --lto-object-path: merge LTO native objects into a single relocatable output.
+  if (!config->ltoObjectPath.empty()) {
+    SmallVector<std::string, 8> tmpObjPaths;
+
+    // RAII guard: remove temp files on any exit path.
+    // Released paths are excluded from cleanup.
+    auto cleanup = [&] {
+      for (const std::string &path : tmpObjPaths)
+        fs::remove(path);
+    };
+    auto release = [&](const std::string &path) {
+      tmpObjPaths.erase(
+          std::remove(tmpObjPaths.begin(), tmpObjPaths.end(), path),
+          tmpObjPaths.end());
+    };
+
+    for (unsigned i = 0; i != maxTasks; ++i) {
+      if (buf[i].empty())
+        continue;
+      SmallString<128> tmpPath;
+      if (auto ec = fs::createTemporaryFile("lto", "o", tmpPath))
+        fatal("cannot create temporary file for LTO object: " + ec.message());
+      saveBuffer(buf[i], tmpPath);
+      // saveBuffer calls error() internally on failure; escalate to fatal.
+      if (errorCount())
+        fatal("failed to write LTO object to " + tmpPath);
+      tmpObjPaths.push_back(tmpPath.str().str());
+    }
+
+    if (tmpObjPaths.empty())
+      fatal("no LTO native object was produced");
+
+    if (tmpObjPaths.size() == 1) {
+      // Single object: write to a temp output first, then atomically rename.
+      SmallString<128> tmpOutPath;
+      if (auto ec = fs::createTemporaryFile("lto-merged", "o", tmpOutPath))
+        fatal("cannot create temporary output file: " + ec.message());
+      std::error_code ec = fs::rename(tmpObjPaths[0], tmpOutPath);
+      if (ec) {
+        ec = fs::copy_file(tmpObjPaths[0], tmpOutPath);
+        if (ec)
+          fatal("cannot copy LTO object to output: " + ec.message());
+      }
+      release(tmpObjPaths[0]);
+      ec = fs::rename(tmpOutPath, config->ltoObjectPath);
+      if (ec)
+        fatal("cannot rename " + tmpOutPath + " to " + config->ltoObjectPath +
+              ": " + ec.message());
+    } else {
+      // Multiple objects: spawn ld64.lld -r to merge them.
+      std::string lldPath = sys::fs::getMainExecutable(nullptr, nullptr);
+      if (lldPath.empty() || !fs::exists(lldPath))
+        fatal("cannot locate ld64.lld executable for LTO object merging");
+
+      SmallVector<StringRef, 16> args;
+      args.push_back(lldPath);
+      args.push_back("-r");
+      args.push_back("-o");
+      args.push_back(config->ltoObjectPath);
+      for (const std::string &p : tmpObjPaths)
+        args.push_back(p);
+
+      std::string errMsg;
+      raw_string_ostream errOS(errMsg);
+      bool executionFailed = false;
+      int rc = sys::ExecuteAndWait(lldPath, args, /*Env=*/std::nullopt,
+                                   /*Redirects=*/{}, /*SecondsToWait=*/0,
+                                   /*MemoryLimit=*/0, &errMsg,
+                                   &executionFailed);
+      if (executionFailed)
+        fatal("failed to execute ld64.lld for LTO object merging: " + errMsg);
+      if (rc != 0)
+        fatal("ld64.lld -r exited with " + Twine(rc) +
+              (errMsg.empty() ? "" : ": " + errMsg));
+      if (!fs::exists(config->ltoObjectPath))
+        fatal("ld64.lld -r did not produce " + config->ltoObjectPath);
+    }
+
+    cleanup();
+    return {};
   }
 
   std::vector<ObjFile *> ret;
