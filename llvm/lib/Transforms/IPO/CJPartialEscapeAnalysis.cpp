@@ -33,6 +33,7 @@
 #include "llvm/IR/SafepointIRVerifier.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Utils/CallGraphUpdater.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Scalar.h"
 
@@ -125,10 +126,40 @@ bool isRewriteableCangjieMallocFunc(Function *F) {
   auto FuncName = F->getName();
   if (FuncName.startswith("CJ_MCC_NewObject") ||
       FuncName.startswith("CJ_MCC_NewArray") ||
+      FuncName.startswith("CJ_MCC_NewFinalizer") ||
       FuncName.startswith("CJ_MCC_NewObjArray")) {
     return true;
   }
   return false;
+}
+
+bool isCangjieNewFinalizerFunc(Function *F) {
+  return F->getName().startswith("CJ_MCC_NewFinalizer");
+}
+
+Function *getFinalizerMethod(GlobalVariable *Klass, Module *M) {
+  if (Klass == nullptr)
+    return nullptr;
+  Constant *Init = Klass->getInitializer();
+  if (Init == nullptr)
+    return nullptr;
+  for (unsigned I = 0; I < Init->getNumOperands(); ++I) {
+    Constant *Op = Init->getAggregateElement(I);
+    if (Op && Op->getType()->isPointerTy()) {
+      if (auto *BC = dyn_cast<ConstantExpr>(Op)) {
+        if (BC->isCast() && BC->getOperand(0)->getType()->isPointerTy()) {
+          Function *F = dyn_cast<Function>(BC->getOperand(0));
+          if (F && F->getName().contains("~init"))
+            return F;
+        }
+      }
+      Function *F = dyn_cast<Function>(Op);
+      if (F && F->getName().contains("~init"))
+        return F;
+    }
+  }
+  LLVM_DEBUG(dbgs() << "Cannot extract finalizer method from TypeInfo.\n");
+  return nullptr;
 }
 
 class NonEscapeRewriter : public InstVisitor<NonEscapeRewriter> {
@@ -146,11 +177,51 @@ public:
   bool rewrite(Instruction *Old, BasicBlock *NewInstInsertBB) {
     OldInst = Old;
     Visited.clear();
+    IsFinalizer = false;
+    FinalizerMethod = nullptr;
+    FinalizerInsertBB = nullptr;
+    FinalizerKlass = nullptr;
+    CallBase *CB = dyn_cast<CallBase>(Old);
+    if (CB && CB->getCalledFunction() &&
+        isCangjieNewFinalizerFunc(CB->getCalledFunction())) {
+      IsFinalizer = true;
+      FinalizerKlass = getNewKlass(CB);
+      FinalizerMethod = getFinalizerMethod(FinalizerKlass, M);
+      FinalizerInsertBB = CB->getParent();
+      if (FinalizerMethod == nullptr)
+        return false;
+    }
+
     if (!createNewAllocaInst(NewInstInsertBB)) {
       return false;
     }
     rewriteNewInst();
+    if (IsFinalizer && FinalizerInsertBB != nullptr) {
+      insertFinalizerCall();
+    }
     return true;
+  }
+
+  void insertFinalizerCall() {
+    FinalizerMethod->removeFnAttr(Attribute::NoInline);
+    Instruction *Terminator = FinalizerInsertBB->getTerminator();
+    IRBuilder<> Builder(Terminator);
+    Type *PI8AS1Ty = Type::getInt8PtrTy(M->getContext(), 1);
+    Value *ObjPtr = Builder.CreateAddrSpaceCast(NewInst, PI8AS1Ty);
+    SmallVector<Value *, 4> Args;
+    Args.push_back(ObjPtr);
+    if (FinalizerMethod->getFunctionType()->getNumParams() > 1) {
+      Value *OuterTI = Builder.CreateBitCast(
+          FinalizerKlass, FinalizerMethod->getFunctionType()->getParamType(1));
+      Args.push_back(OuterTI);
+    }
+    CallInst *CI = Builder.CreateCall(FinalizerMethod, Args);
+
+    if (CGUpdater)
+      CGUpdater->removeCallSite(*CI);
+
+    InlineFunctionInfo IFI;
+    InlineResult IR = InlineFunction(*CI, IFI);
   }
 
   bool handleStructAS1Cast(AllocaInst *Old) {
@@ -487,6 +558,10 @@ private:
   Function *CJMemset;
   SmallVector<Instruction *, 8> Queue;
   SmallSetVector<User *, 8> Visited;
+  bool IsFinalizer = false;
+  Function *FinalizerMethod = nullptr;
+  BasicBlock *FinalizerInsertBB = nullptr;
+  GlobalVariable *FinalizerKlass = nullptr;
   bool StructAS1Replace = false;
   static DenseMap<PHINode *, SmallSetVector<Instruction *, 8>> RewritePhiIncoming;
   DenseMap<SelectInst *, SmallSetVector<Instruction *, 8>> RewriteSIIncoming;
