@@ -33,6 +33,7 @@
 #include "llvm/IR/SafepointIRVerifier.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Utils/CallGraphUpdater.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Scalar.h"
 
@@ -60,6 +61,8 @@ cl::opt<unsigned> CJPEAMaxCycNonzero(
              "out. A cyclic SCC with non-zero offsets makes spreadMemEscape "
              "cumulative offset-paths diverge; this is a deterministic graph "
              "property and the direct topology root cause of the blow-up."));
+cl::opt<bool> CJEASupportFinalizer("cj-ea-support-finalizer",
+                                  cl::Hidden, cl::init(true));
 
 GlobalVariable *getNewKlass(CallBase *I) {
   GlobalVariable *Klass =
@@ -136,10 +139,147 @@ bool isRewriteableCangjieMallocFunc(Function *F) {
   auto FuncName = F->getName();
   if (FuncName.startswith("CJ_MCC_NewObject") ||
       FuncName.startswith("CJ_MCC_NewArray") ||
+      FuncName.startswith("CJ_MCC_NewFinalizer") ||
       FuncName.startswith("CJ_MCC_NewObjArray")) {
     return true;
   }
   return false;
+}
+
+bool isCangjieNewFinalizerFunc(Function *F) {
+  return F->getName().startswith("CJ_MCC_NewFinalizer");
+}
+
+// Get the finalizer method (~init) for a class described by the given TypeInfo
+// global variable.
+Function *getFinalizerMethod(GlobalVariable *Klass, Module *M) {
+  if (Klass == nullptr || !Klass->hasInitializer())
+    return nullptr;
+
+  TypeInfo TI(Klass);
+
+  if (!TI.isGenericType()) {
+    Value *Ptr = TI.get(CIT_GENERIC_FROM)->stripPointerCasts();
+    if (auto *F = dyn_cast<Function>(Ptr))
+      return F;
+  }
+
+  LLVM_DEBUG(dbgs() << "Cannot extract finalizer method from TypeInfo.\n");
+  return nullptr;
+}
+
+static bool hasExceptionPath(BasicBlock *CreateBB) {
+  SmallSet<BasicBlock *, 16> VisitedBB;
+  SmallVector<BasicBlock *, 8> Stack;
+  Stack.push_back(CreateBB);
+  while (!Stack.empty()) {
+    BasicBlock *BB = Stack.pop_back_val();
+    if (!VisitedBB.insert(BB).second)
+      continue;
+    Instruction *T = BB->getTerminator();
+    if (isa<UnreachableInst>(T) || isa<ResumeInst>(T))
+      return true;
+    for (BasicBlock *Succ : successors(BB))
+      if (VisitedBB.count(Succ) == 0)
+        Stack.push_back(Succ);
+  }
+  return false;
+}
+
+// Check whether the result of NewFinalizer is used across basic blocks or
+// flows into a PHI.  Used to decide whether a loop-bound finalizer can be
+// scalar-replaced safely.
+static bool
+finalizerUsedAcrossBBs(Instruction *NewFinalizer, BasicBlock *CreateBB) {
+  SmallVector<Instruction *, 16> Worklist;
+  SmallPtrSet<Instruction *, 16> Visited;
+  for (User *U : NewFinalizer->users())
+    if (auto *I = dyn_cast<Instruction>(U))
+      Worklist.push_back(I);
+  while (!Worklist.empty()) {
+    Instruction *I = Worklist.pop_back_val();
+    if (!Visited.insert(I).second)
+      continue;
+    if (I->getParent() != CreateBB)
+      return true;
+    if (isa<PHINode>(I))
+      return true;
+    if (isa<BitCastInst>(I) || isa<AddrSpaceCastInst>(I) ||
+        isa<GetElementPtrInst>(I) || isa<SelectInst>(I)) {
+      for (User *U : I->users())
+        if (auto *UI = dyn_cast<Instruction>(U))
+          Worklist.push_back(UI);
+    }
+  }
+  return false;
+}
+
+static void collectFinalizerInsertPointsImpl(Instruction *NewFinalizer,
+                                                BasicBlock *CreateBB,
+                                                LoopInfo *LI,
+                                                SmallVectorImpl<Instruction *> &Points) {
+  Instruction *Term = CreateBB->getTerminator();
+  if (isa<ReturnInst>(Term)) {
+    Points.push_back(Term);
+    return;
+  }
+
+  bool IsInLoop = false;
+  if (LI) {
+    IsInLoop = (LI->getLoopFor(CreateBB) != nullptr);
+  } else {
+    for (BasicBlock *Succ : successors(CreateBB)) {
+      if (Succ == CreateBB) {
+        IsInLoop = true;
+        break;
+      }
+    }
+  }
+  if (IsInLoop) {
+    if (!finalizerUsedAcrossBBs(NewFinalizer, CreateBB))
+      Points.push_back(Term);
+    return;
+  }
+
+  SmallSet<BasicBlock *, 16> VisitedBB;
+  SmallVector<BasicBlock *, 8> Stack;
+  Stack.push_back(CreateBB);
+  while (!Stack.empty()) {
+    BasicBlock *BB = Stack.pop_back_val();
+    if (!VisitedBB.insert(BB).second)
+      continue;
+    Instruction *T = BB->getTerminator();
+    if (isa<ReturnInst>(T)) {
+      Points.push_back(T);
+      continue;
+    }
+    for (BasicBlock *Succ : successors(BB))
+      if (VisitedBB.count(Succ) == 0)
+        Stack.push_back(Succ);
+  }
+}
+
+// Check whether at least one valid insertion point exists for the explicit
+// ~init call of a stack-allocated finalizer.  
+static bool hasFinalizerInsertPoints(Instruction *NewFinalizer,
+                                        BasicBlock *CreateBB, LoopInfo *LI) {
+  SmallVector<Instruction *, 4> Points;
+  collectFinalizerInsertPointsImpl(NewFinalizer, CreateBB, LI, Points);
+  return !Points.empty();
+}
+
+static bool canStackAllocateFinalizer(CallBase *CB, Module *M, LoopInfo *LI) {
+  GlobalVariable *Klass = getNewKlass(CB);
+  if (Klass == nullptr)
+    return false;
+  if (getFinalizerMethod(Klass, M) == nullptr)
+    return false;
+  BasicBlock *BB = CB->getParent();
+  if (hasExceptionPath(BB))
+    return false;
+  if (!hasFinalizerInsertPoints(CB, BB, LI))
+    return false;
+  return true;
 }
 
 class NonEscapeRewriter : public InstVisitor<NonEscapeRewriter> {
@@ -147,21 +287,87 @@ class NonEscapeRewriter : public InstVisitor<NonEscapeRewriter> {
 
 public:
   explicit NonEscapeRewriter(
-      CallGraphUpdater *CGUpdater, Module *M)
-      : CGUpdater(CGUpdater), M(M) {
+      CallGraphUpdater *CGUpdater, Module *M, LoopInfo *LI = nullptr)
+      : CGUpdater(CGUpdater), M(M), LI(LI) {
     CJMemset = Intrinsic::getDeclaration(
         M, Intrinsic::cj_memset,
         {IntegerType::getInt8PtrTy(M->getContext(), 0)});
   }
 
+  void setLoopInfo(LoopInfo *LoopInfo) { LI = LoopInfo; }
+
+  bool prepareFinalizer(SmallVectorImpl<Instruction *> &InsertPoints) {
+    CallBase *CB = dyn_cast<CallBase>(OldInst);
+    if (!CB || !CB->getCalledFunction() ||
+        !isCangjieNewFinalizerFunc(CB->getCalledFunction()))
+      return true;
+    IsFinalizer = true;
+    FinalizerKlass = getNewKlass(CB);
+    FinalizerMethod = getFinalizerMethod(FinalizerKlass, M);
+    FinalizerInsertBB = CB->getParent();
+    if (FinalizerMethod == nullptr)
+      return false;
+    if (hasExceptionPath(FinalizerInsertBB))
+      return false;
+    collectFinalizerInsertPoints(InsertPoints);
+    if (InsertPoints.empty())
+      return false;
+    return true;
+  }
+
   bool rewrite(Instruction *Old, BasicBlock *NewInstInsertBB) {
     OldInst = Old;
     Visited.clear();
+    IsFinalizer = false;
+    FinalizerMethod = nullptr;
+    FinalizerInsertBB = nullptr;
+    FinalizerKlass = nullptr;
+    SmallVector<Instruction *, 4> InsertPoints;
+    if (CJEASupportFinalizer && !prepareFinalizer(InsertPoints)) {
+      return false;
+    }
     if (!createNewAllocaInst(NewInstInsertBB)) {
       return false;
     }
     rewriteNewInst();
+    if (IsFinalizer && FinalizerInsertBB != nullptr) {
+      insertFinalizerCall(InsertPoints);
+    }
     return true;
+  }
+
+  void collectFinalizerInsertPoints(SmallVectorImpl<Instruction *> &Points) {
+    collectFinalizerInsertPointsImpl(OldInst, FinalizerInsertBB, LI, Points);
+  }
+
+  void insertFinalizerCall(SmallVectorImpl<Instruction *> &InsertPoints) {
+    bool ShouldInline = (InsertPoints.size() == 1);
+    if (ShouldInline) {
+      FinalizerMethod->removeFnAttr(Attribute::NoInline);
+    }
+
+    Type *PI8AS1Ty = Type::getInt8PtrTy(M->getContext(), 1);
+    for (Instruction *InsertPoint : InsertPoints) {
+      IRBuilder<> Builder(InsertPoint);
+      Value *ObjPtr = Builder.CreateAddrSpaceCast(NewInst, PI8AS1Ty);
+      SmallVector<Value *, 4> Args;
+      Args.push_back(ObjPtr);
+      if (FinalizerMethod->getFunctionType()->getNumParams() > 1) {
+        Value *OuterTI = Builder.CreateBitCast(
+            FinalizerKlass,
+            FinalizerMethod->getFunctionType()->getParamType(1));
+        Args.push_back(OuterTI);
+      }
+      CallInst *CI = Builder.CreateCall(FinalizerMethod, Args);
+
+      if (CGUpdater)
+        CGUpdater->removeCallSite(*CI);
+
+      if (ShouldInline) {
+        InlineFunctionInfo IFI;
+        InlineFunction(*CI, IFI);
+      }
+    }
   }
 
   bool handleStructAS1Cast(AllocaInst *Old) {
@@ -498,7 +704,12 @@ private:
   Function *CJMemset;
   SmallVector<Instruction *, 8> Queue;
   SmallSetVector<User *, 8> Visited;
+  bool IsFinalizer = false;
+  Function *FinalizerMethod = nullptr;
+  BasicBlock *FinalizerInsertBB = nullptr;
+  GlobalVariable *FinalizerKlass = nullptr;
   bool StructAS1Replace = false;
+  LoopInfo *LI = nullptr;
   static DenseMap<PHINode *, SmallSetVector<Instruction *, 8>> RewritePhiIncoming;
   DenseMap<SelectInst *, SmallSetVector<Instruction *, 8>> RewriteSIIncoming;
   DenseMap<CallInst *, SmallSetVector<Instruction *, 8>> RewriteArrayCopy;
@@ -903,6 +1114,22 @@ public:
           }
           ObjectLocation *Loc =
               new NewLocation(ObjectVal, Func, LoopDepth, PreHeader);
+          // For NewFinalizer, pre-flight the rewrite conditions during the
+          // first (EADepthImpl) analysis phase.  If the object cannot be
+          // stack-allocated , mark it escaped now so that walkEdges propagates
+          // the escape to every object referenced by this finalizer (e.g.
+          // closures captured by the finalizer's free lambda). This must happen
+          // here, before walkEdges runs, because the second phase
+          // (EscapeAnalysisImpl) runs after ObjectLocation graph is destroyed.
+          if (!Loc->Escaped) {
+            if (auto *CB = dyn_cast<CallBase>(ObjectVal)) {
+              Function *Callee = CB->getCalledFunction();
+              if (Callee && isCangjieNewFinalizerFunc(Callee) &&
+                  !canStackAllocateFinalizer(CB, M, &LI)) {
+                Loc->Escaped = true;
+              }
+            }
+          }
           AllLocations.push_back(Loc);
           ValueToLocMap[ObjectVal] = Loc;
           enqueueUsers(ObjectVal);
@@ -996,6 +1223,8 @@ public:
       // New Obj in loop can't handle now.
       if (!AllLocations[i]->isEscaped()) {
         NewLocation *New = dyn_cast<NewLocation>(AllLocations[i]);
+        Function *F = dyn_cast<Instruction>(New->Val)->getParent()->getParent();
+        Rewriter.setLoopInfo(&LookupLoopInfo(*F));
         Changed |= Rewriter.rewrite(dyn_cast<Instruction>(New->Val),
                                     New->NewInstInsertBB);
       }
@@ -2749,6 +2978,8 @@ public:
       if (!OnceEscapedValue.count(Partial.first)) {
         LLVM_DEBUG(dbgs() << "not escaped obj:");
         LLVM_DEBUG(dbgs() << "  " << *Partial.first << "\n");
+        Function *F = Partial.first->getParent()->getParent();
+        Rewriter.setLoopInfo(&LookupLoopInfo(*F));
         Rewriter.rewrite(Partial.first, Partial.second);
         Changed = true;
       } else {
@@ -3322,27 +3553,44 @@ public:
     handleMemcpyOrWriteAgg(&I, P, V, CSI);
   }
 
+  // Shared handling of Cangjie malloc call sites (CallInst and InvokeInst).
+  // Returns true if CB is a rewriteable Cangjie malloc (including
+  // NewFinalizer); the caller should return immediately in that case.
+  // Returns false for non-malloc calls so the caller can continue with
+  // intrinsic handling.
+  bool tryStackAllocateNewFinalizer(CallBase *CB) {
+    Function *Callee = CB->getCalledFunction();
+    if (!Callee || !isRewriteableCangjieMallocFunc(Callee))
+      return false;
+    GlobalVariable *Klass = getNewKlass(CB);
+    if (Klass == nullptr) {
+      EscapeBBInfo[CB->getParent()][GCPtr::create(CB, *this, LI)] = Escaped;
+      return true;
+    }
+    if (isCangjieNewFinalizerFunc(Callee)) {
+      LoopInfo *CurLI = &LookupLoopInfo(*CB->getParent()->getParent());
+      if (!canStackAllocateFinalizer(CB, M, CurLI)) {
+        EscapeBBInfo[CB->getParent()][GCPtr::create(CB, *this, LI)] = Escaped;
+        return true;
+      }
+    }
+    bool HasRefs = false;
+    uint32_t AllocaSize = 0;
+    bool NonMoveArray = false;
+    Type *AllocaType =
+        getAllocaType(Klass, HasRefs, AllocaSize, NonMoveArray, CB);
+    if (AllocaType != nullptr || NonMoveArray) {
+      insertGCNew(CB);
+    } else {
+      EscapeBBInfo[CB->getParent()][GCPtr::create(CB, *this, LI)] = Escaped;
+    }
+    return true;
+  }
+
   void visitInvokeInst(InvokeInst &II) {
-    Function *Callee = II.getCalledFunction();
-    if (Callee && isRewriteableCangjieMallocFunc(Callee)) {
-      GlobalVariable *Klass = getNewKlass(&II);
-      if (Klass == nullptr) {
-        EscapeBBInfo[II.getParent()][GCPtr::create(&II, *this, LI)] = Escaped;
-        return;
-      }
-      bool HasRefs = false;
-      uint32_t AllocaSize = 0;
-      bool NonMoveArray = false;
-      Type *AllocaType =
-          getAllocaType(Klass, HasRefs, AllocaSize, NonMoveArray, &II);
-      if (AllocaType != nullptr || NonMoveArray) {
-        insertGCNew(&II);
-      } else {
-        EscapeBBInfo[II.getParent()][GCPtr::create(&II, *this, LI)] = Escaped;
-      }
+    if (tryStackAllocateNewFinalizer(&II)) {
       return;
     }
-
     handleCallArgs(II);
   }
 
@@ -3351,23 +3599,7 @@ public:
       if (handleCangjieSL(&CI)) {
         return;
       }
-      Function *Callee = CI.getCalledFunction();
-      if (isRewriteableCangjieMallocFunc(Callee)) {
-        GlobalVariable *Klass = getNewKlass(&CI);
-        if (Klass == nullptr) {
-          EscapeBBInfo[CI.getParent()][GCPtr::create(&CI, *this, LI)] = Escaped;
-          return;
-        }
-        bool HasRefs = false;
-        uint32_t AllocaSize = 0;
-        bool NonMoveArray = false;
-        Type *AllocaType =
-            getAllocaType(Klass, HasRefs, AllocaSize, NonMoveArray, &CI);
-        if (AllocaType != nullptr || NonMoveArray) {
-          insertGCNew(&CI);
-        } else {
-          EscapeBBInfo[CI.getParent()][GCPtr::create(&CI, *this, LI)] = Escaped;
-        }
+      if (tryStackAllocateNewFinalizer(&CI)) {
         return;
       }
     }
