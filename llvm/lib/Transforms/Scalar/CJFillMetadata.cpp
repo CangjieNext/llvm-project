@@ -886,7 +886,6 @@ Constant *ReflectInfo::getReflectionInfo(GlobalVariable *GV, bool IsEnum) {
       if (ReflectMD->getNumOperands() == ERT_MAX)
         return getEnumReflectInfo(ReflectMD);
       if (ReflectMD->getNumOperands() == ECRT_MAX)
-        // for compatibility: old runtime cannot parse this metadata field
         return Int8PtrNull;
       report_fatal_error(GV->getName() +
                          ": enum reflect info's operand number error!");
@@ -926,7 +925,7 @@ Constant *ReflectInfo::getClassReflectInfo(const MDTuple *ReflectMD) {
 }
 
 // Reflection: !{type name, enum ctors, instance methods, static methods,
-//               type attributes}
+//               ctor annotationMethods, type attributes}
 Constant *ReflectInfo::getEnumReflectInfo(const MDTuple *ReflectMD) {
   // record all reflection info
   EnumReflectInfo Info(M);
@@ -938,23 +937,11 @@ Constant *ReflectInfo::getEnumReflectInfo(const MDTuple *ReflectMD) {
                          getMDOperand(ReflectMD, ERT_INSTANCE_METHOD));
   parseStaticMethodMDs(Info.StaticMethods,
                        getMDOperand(ReflectMD, ERT_STATIC_METHOD));
+  parseCtorAnnotationMDs(Info.CtorAnnotationMethods,
+                         getMDOperand(ReflectMD, ERT_CTOR_ANNOTATIONS));
 
   SmallVector<Constant *, 0> BodyVec(FET_PTRS);
   fillEnumReflectInfo(Info, BodyVec);
-
-  std::string GVName = TIName.str() + ".reflect";
-  auto *ReflectGV = createGlobalVal(GVName, GVName + "Type", BodyVec);
-  return ConstantExpr::getBitCast(ReflectGV, Int8PtrTy);
-}
-
-// Reflection: !{type attributes}
-Constant *ReflectInfo::getEnumCtorReflectInfo(const MDTuple *ReflectMD) {
-  EnumCtorReflectInfo Info(M);
-  parseAttributes(getMDOperand(ReflectMD, ECRT_ATTRIBUTE), Info.Modifier,
-                  Info.Annotation);
-
-  SmallVector<Constant *, 0> BodyVec(FECT_PTRS);
-  fillEnumCtorReflectInfo(Info, BodyVec);
 
   std::string GVName = TIName.str() + ".reflect";
   auto *ReflectGV = createGlobalVal(GVName, GVName + "Type", BodyVec);
@@ -1181,13 +1168,9 @@ void ReflectInfo::fillEnumReflectInfo(EnumReflectInfo &Info,
   for (unsigned Idx = 0; Idx < Info.StaticMethods.size(); ++Idx) {
     BodyVec.push_back(Info.StaticMethods[Idx]->fillMethodInfo(Idx, TIName));
   }
-}
-
-void ReflectInfo::fillEnumCtorReflectInfo(EnumCtorReflectInfo &Info,
-                                          SmallVector<Constant *, 0> &BodyVec) {
-  BodyVec[FECT_ANNOTATION] = Info.Annotation;
-  BodyVec[FECT_MODIFIER] = ConstantInt::get(Int32Ty, Info.Modifier);
-  BodyVec[FECT_CTOR_CNT] = ConstantInt::get(Int32Ty, 0);
+  for (unsigned Idx = 0; Idx < Info.CtorAnnotationMethods.size(); ++Idx) {
+    BodyVec.push_back(Info.CtorAnnotationMethods[Idx]);
+  }
 }
 
 void ReflectInfo::parseAttributes(MDTuple *Attr, unsigned &Modifier,
@@ -1337,6 +1320,22 @@ void ReflectInfo::parseEnumCtorMDs(SmallVectorImpl<EnumCtorInfo> &Info,
     CtorInfo.CtorName = getStringFromMD(MethodMD, 0);
     CtorInfo.TypeName = getStringFromMD(MethodMD, 1);
     Info.emplace_back(CtorInfo);
+  }
+}
+
+void ReflectInfo::parseCtorAnnotationMDs(SmallVectorImpl<Constant *> &Infos,
+                                         MDTuple *CtorAnnoMDs) {
+  for (unsigned Idx = 0; Idx < CtorAnnoMDs->getNumOperands(); ++Idx) {
+    StringRef AnnoMethodName = getStringFromMD(CtorAnnoMDs, Idx);
+    if (AnnoMethodName.empty()) {
+      Infos.push_back(Int8PtrNull);
+      continue;
+    }
+    Function *Func = M.getFunction(AnnoMethodName);
+    if (Func == nullptr) {
+      report_fatal_error(AnnoMethodName + ": can't find this ctor anno func!");
+    }
+    Infos.push_back(ConstantExpr::getBitCast(Func, Int8PtrTy));
   }
 }
 
