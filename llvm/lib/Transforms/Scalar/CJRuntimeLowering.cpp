@@ -15,6 +15,7 @@
 
 #include "llvm/Transforms/Scalar/CJRuntimeLowering.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
@@ -55,6 +56,9 @@ cl::opt<bool> EnableCJNewArrayFast("enable-cangjie-new-array-fastpath",
 cl::opt<bool> EnableCJExceptionTailExtract(
     "enable-cangjie-exception-tail-extract", cl::init(true),
     cl::ReallyHidden);
+cl::opt<bool> EnableCJStrInterpExtract(
+    "enable-cangjie-strinterp-extract", cl::init(true),
+    cl::ReallyHidden);
 } // namespace llvm
 
 namespace {
@@ -65,6 +69,13 @@ const static StringRef ExceptionCtor0MangleStr =
     "__cj_exception_tail_helper0";
 const static StringRef ExceptionCtorStringMangleStr =
     "__cj_exception_tail_helper_string";
+// StringBuilder string interpolation extraction constants.
+const static StringRef StringBuilderTIName = "std.core:StringBuilder.ti";
+const static StringRef StringBuilderInitPrefix = "_CNat13StringBuilder6<init>";
+const static StringRef StringBuilderAppendPrefix = "_CNat13StringBuilder6append";
+const static StringRef StringBuilderToStringName =
+    "_CNat13StringBuilder8toStringHv";
+const static StringRef StrInterpHelperPrefix = "__cj_si_";
 const static StringRef C2NStubStr = "CJ_MCC_C2NStub";
 const static StringRef N2CStubStr = "CJ_MCC_N2CStub";
 const static StringRef FinalizerStr = "CJ_MCC_OnFinalizerCreated";
@@ -670,50 +681,107 @@ public:
 
   void markLoweringDivisionCheck(CallBase *CI) { DivisionChecks.push_back(CI); }
 
-  bool isLTOModule() const {
-    if (M.getModuleIdentifier() == "ld-temp.o")
-      return true;
-    return M.getModuleFlag("ThinLTO") != nullptr;
-  }
-
-  bool hasCommandLineFlag(StringRef Name) const {
-    auto &Opts = cl::getRegisteredOptions();
-    auto It = Opts.find(Name);
-    return It != Opts.end() && It->second->getNumOccurrences() > 0;
-  }
-
-  bool isLTOCompileMode() const {
-    return CJLTOOpt || hasCommandLineFlag("cangjie-lto") || isLTOModule();
-  }
-
-  bool extractExceptionTails(Function &F) {
-    if (!EnableCJExceptionTailExtract ||
-        Triple(F.getParent()->getTargetTriple()).isOSWindows() ||
-        isLTOCompileMode())
-      return false;
-
-    SmallVector<CallInst *, 8> ThrowCalls;
-    for (Instruction &I : instructions(F)) {
-      auto *CI = dyn_cast<CallInst>(&I);
-      if (!CI || CI->getCalledFunction() == nullptr)
-        continue;
-      if (!CI->getCalledFunction()->getName().equals("CJ_MCC_ThrowException"))
-        continue;
-      if (!isa<UnreachableInst>(CI->getNextNode()))
-        continue;
-      ThrowCalls.push_back(CI);
+    bool isLTOModule() const
+    {
+        if (M.getModuleIdentifier() == "ld-temp.o")
+            return true;
+        return M.getModuleFlag("ThinLTO") != nullptr;
     }
 
-    bool Changed = false;
-    for (CallInst *ThrowCI : ThrowCalls) {
-      // The worklist is collected before we rewrite the function. Skip any
-      // entry that has already been removed while processing an earlier tail.
-      if (ThrowCI->getParent() == nullptr)
-        continue;
-      Changed |= tryExtractExceptionTail(ThrowCI);
+    bool hasCommandLineFlag(StringRef Name) const
+    {
+        auto &Opts = cl::getRegisteredOptions();
+        auto It = Opts.find(Name);
+        return It != Opts.end() && It->second->getNumOccurrences() > 0;
     }
-    return Changed;
-  }
+
+    bool isLTOCompileMode() const
+    {
+        return CJLTOOpt || hasCommandLineFlag("cangjie-lto") || isLTOModule();
+    }
+
+    bool extractExceptionTails(Function &F)
+    {
+        if (!EnableCJExceptionTailExtract ||
+            Triple(F.getParent()->getTargetTriple()).isOSWindows() ||
+            isLTOCompileMode())
+            return false;
+
+        SmallVector<CallInst *, 8> ThrowCalls;
+        for (Instruction &I : instructions(F)) {
+            auto *CI = dyn_cast<CallInst>(&I);
+            if (!CI || CI->getCalledFunction() == nullptr)
+                continue;
+            if (!CI->getCalledFunction()->getName().equals("CJ_MCC_ThrowException"))
+                continue;
+            if (!isa<UnreachableInst>(CI->getNextNode()))
+                continue;
+            ThrowCalls.push_back(CI);
+        }
+
+        bool Changed = false;
+        for (CallInst *ThrowCI : ThrowCalls) {
+            // The worklist is collected before we rewrite the function. Skip any
+            // entry that has already been removed while processing an earlier tail.
+            if (ThrowCI->getParent() == nullptr)
+                continue;
+            Changed |= tryExtractExceptionTail(ThrowCI);
+        }
+        return Changed;
+    }
+
+  /// Scan a function for StringBuilder interpolation sequences and extract
+  /// each into a shared helper function.
+    bool extractStringInterpSequences(Function &F)
+    {
+        if (!EnableCJStrInterpExtract ||
+            Triple(F.getParent()->getTargetTriple()).isOSWindows() ||
+            isLTOCompileMode())
+            return false;
+
+        GlobalVariable *SBTI = M.getGlobalVariable(StringBuilderTIName);
+        if (!SBTI)
+            return false;
+
+        // Don't transform our own generated helpers.
+        if (F.getName().startswith(StrInterpHelperPrefix))
+            return false;
+
+        // Find all malloc.object calls that create StringBuilders.
+        SmallVector<CallInst *, 8> MallocCalls;
+        for (Instruction &I : instructions(F)) {
+            auto *CI = dyn_cast<CallInst>(&I);
+            if (!CI)
+                continue;
+            Function *Callee = CI->getCalledFunction();
+            if (!Callee)
+                continue;
+            if (CI->getIntrinsicID() != Intrinsic::cj_malloc_object)
+                continue;
+            if (CI->getArgOperand(0)->stripPointerCasts() != SBTI)
+                continue;
+            MallocCalls.push_back(CI);
+        }
+
+        // Track mallocs erased while processing an earlier sequence so we never
+        // dereference a freed instruction (a malloc appears at most once in the
+        // worklist, but be explicit rather than probing getParent()).
+        SmallPtrSet<CallInst *, 8> Erased;
+        bool Changed = false;
+        for (CallInst *MallocCI : MallocCalls) {
+            if (Erased.count(MallocCI))
+                continue;
+            StringInterpSequence Seq;
+            if (collectStringInterpSequence(MallocCI, Seq)) {
+                // Record before rewriting: replaceStringInterpWithHelper may erase
+                // the malloc, leaving Seq.MallocCall dangling.
+                Erased.insert(MallocCI);
+                replaceStringInterpWithHelper(Seq, F);
+                Changed = true;
+            }
+        }
+        return Changed;
+    }
 
   bool loweringGCDiv(CallBase *CI) {
     IRBuilder<> Builder(CI);
@@ -812,228 +880,593 @@ private:
   // map intrinsic to runtime API function type.
   DenseMap<StringRef, Function *> RTFuncMap;
 
-  bool isStdCoreStringPtr(Type *Ty) const {
-    auto *PtrTy = dyn_cast<PointerType>(Ty);
-    if (!PtrTy)
-      return false;
-    auto *StructTy =
-        dyn_cast<StructType>(PtrTy->getNonOpaquePointerElementType());
-    return StructTy != nullptr && StructTy->hasName() &&
-           StructTy->getName().equals("record.std.core:String");
-  }
+    bool isStdCoreStringPtr(Type *Ty) const
+    {
+        auto *PtrTy = dyn_cast<PointerType>(Ty);
+        if (!PtrTy)
+            return false;
+        auto *StructTy =
+            dyn_cast<StructType>(PtrTy->getNonOpaquePointerElementType());
+        return StructTy != nullptr && StructTy->hasName() &&
+               StructTy->getName().equals("record.std.core:String");
+    }
 
   enum class ExceptionTailHelperKind {
     Ctor0,
     CtorString,
   };
 
-  StringRef getExceptionTailHelperName(ExceptionTailHelperKind Kind) const {
-    switch (Kind) {
-    case ExceptionTailHelperKind::Ctor0:
-      return ExceptionCtor0MangleStr;
-    case ExceptionTailHelperKind::CtorString:
-      return ExceptionCtorStringMangleStr;
-    }
-    llvm_unreachable("unknown exception tail helper kind");
-  }
-
-  void initializeExceptionTailHelper(Function &Func, Function &Caller) {
-    Func.addFnAttr(Attribute::NoReturn);
-    Func.addFnAttr(Attribute::NoInline);
-    Func.addFnAttr(Attribute::Cold);
-    Func.addFnAttr(Attribute::OptimizeForSize);
-    Func.addFnAttr(Attribute::MinSize);
-    Func.setGC("cangjie");
-    if (Caller.hasPersonalityFn())
-      Func.setPersonalityFn(Caller.getPersonalityFn());
-    else if (Function *Personality = M.getFunction("__cj_personality_v0$"))
-      Func.setPersonalityFn(Personality);
-  }
-
-  Function *getOrInsertNewObjectFunc() {
-    auto *RefTy = Type::getInt8PtrTy(C, 1);
-    auto *NewObjTy = FunctionType::get(
-        RefTy, {Type::getInt8PtrTy(C), Type::getInt32Ty(C)}, false);
-    Function *NewObjFunc = M.getFunction("CJ_MCC_NewObject");
-    if (NewObjFunc == nullptr)
-      NewObjFunc =
-          M.declareCJRuntimeFunc("CJ_MCC_NewObject", NewObjTy, false, true);
-    return NewObjFunc;
-  }
-
-  Function *getOrInsertThrowExceptionFunc() {
-    auto *RefTy = Type::getInt8PtrTy(C, 1);
-    auto *ThrowTy = FunctionType::get(Type::getVoidTy(C), {RefTy}, false);
-    Function *ThrowFunc = M.getFunction("CJ_MCC_ThrowException");
-    if (ThrowFunc == nullptr)
-      ThrowFunc =
-          M.declareCJRuntimeFunc("CJ_MCC_ThrowException", ThrowTy, false,
-                                 false);
-    return ThrowFunc;
-  }
-
-  void buildExceptionTailHelperBody(Function &Func,
-                                    ExceptionTailHelperKind Kind,
-                                    PointerType *TypeInfoTy, Type *MsgTy) {
-    auto *RefTy = Type::getInt8PtrTy(C, 1);
-    auto *TypeInfoStructTy =
-        cast<StructType>(TypeInfoTy->getNonOpaquePointerElementType());
-    Function *NewObjFunc = getOrInsertNewObjectFunc();
-    Function *ThrowFunc = getOrInsertThrowExceptionFunc();
-
-    auto ArgIt = Func.arg_begin();
-    Argument *TypeInfo = &*ArgIt++;
-    TypeInfo->setName("ti");
-    Argument *Ctor = &*ArgIt++;
-    Ctor->setName("ctor");
-    Argument *Msg = nullptr;
-    if (Kind == ExceptionTailHelperKind::CtorString) {
-      Msg = &*ArgIt++;
-      Msg->setName("msg");
+    StringRef getExceptionTailHelperName(ExceptionTailHelperKind Kind) const
+    {
+        switch (Kind) {
+        case ExceptionTailHelperKind::Ctor0:
+            return ExceptionCtor0MangleStr;
+        case ExceptionTailHelperKind::CtorString:
+            return ExceptionCtorStringMangleStr;
+        }
+        llvm_unreachable("unknown exception tail helper kind");
     }
 
-    BasicBlock *Entry = BasicBlock::Create(C, "entry", &Func);
-    IRBuilder<> IRB(Entry);
-    Value *SizePtr = IRB.CreateStructGEP(TypeInfoStructTy, TypeInfo, CIT_SIZE);
-    Value *Size = IRB.CreateLoad(Type::getInt32Ty(C), SizePtr);
-    // Keep the helper's allocation math identical to setHeapMallocSizeAlign():
-    // add the object header, then round up to the runtime's 8-byte alignment.
-    Value *SizeAdd = IRB.CreateAdd(Size, IRB.getInt32(ObjectHeadSize + 7));
-    Value *AlignedSize = IRB.CreateAnd(SizeAdd, IRB.getInt32(~7));
-    Value *Obj = IRB.CreateCall(NewObjFunc,
-                                {IRB.CreateBitCast(TypeInfo,
-                                                   Type::getInt8PtrTy(C)),
-                                 AlignedSize});
-    if (Kind == ExceptionTailHelperKind::Ctor0) {
-      auto *CtorTy =
-          FunctionType::get(Type::getVoidTy(C), {RefTy, TypeInfoTy}, false);
-      IRB.CreateCall(CtorTy, Ctor, {Obj, TypeInfo});
-    } else {
-      auto *CtorTy = FunctionType::get(Type::getVoidTy(C),
-                                       {RefTy, MsgTy, TypeInfoTy}, false);
-      IRB.CreateCall(CtorTy, Ctor, {Obj, Msg, TypeInfo});
-    }
-    IRB.CreateCall(ThrowFunc, {Obj});
-    IRB.CreateUnreachable();
-  }
-
-  Function *getOrInsertExceptionTailFunc(ExceptionTailHelperKind Kind,
-                                         PointerType *TypeInfoTy, Type *MsgTy,
-                                         Function &Caller) {
-    auto *RefTy = Type::getInt8PtrTy(C, 1);
-    SmallVector<Type *, 3> CtorArgTys{RefTy};
-    if (Kind == ExceptionTailHelperKind::CtorString)
-      CtorArgTys.push_back(MsgTy);
-    CtorArgTys.push_back(TypeInfoTy);
-    auto *CtorTy = FunctionType::get(Type::getVoidTy(C), CtorArgTys, false);
-    // Helper ABI:
-    //   helper0(TypeInfo*, void (ref, TypeInfo*)*)
-    //   helper_string(TypeInfo*, void (ref, String*, TypeInfo*)*, String*)
-    SmallVector<Type *, 3> HelperArgTys{TypeInfoTy,
-                                        PointerType::getUnqual(CtorTy)};
-    if (Kind == ExceptionTailHelperKind::CtorString)
-      HelperArgTys.push_back(MsgTy);
-    auto *FT = FunctionType::get(Type::getVoidTy(C), HelperArgTys, false);
-
-    Function *Func = M.getFunction(getExceptionTailHelperName(Kind));
-    if (Func == nullptr) {
-      Func = Function::Create(FT, GlobalValue::InternalLinkage,
-                              getExceptionTailHelperName(Kind), &M);
-      initializeExceptionTailHelper(*Func, Caller);
-      buildExceptionTailHelperBody(*Func, Kind, TypeInfoTy, MsgTy);
-    }
-    return Func;
-  }
-
-  bool tryExtractExceptionTail(CallInst *ThrowCI) {
-    // Match the canonical cold throw tail:
-    //   %obj = call @CJ_MCC_NewObject(...)
-    //   call @exception_ctor(%obj, [msg,] %ti)
-    //   call @CJ_MCC_ThrowException(%obj)
-    //   unreachable
-    //
-    // Replacing the tail with a helper call keeps the hot path small and lets
-    // the backend see one shared cold sequence instead of N duplicated blocks.
-    if (ThrowCI->getFunction()->getName().equals(ExceptionCtor0MangleStr) ||
-        ThrowCI->getFunction()->getName().equals(ExceptionCtorStringMangleStr))
-      return false;
-
-    Value *ThrownObj = ThrowCI->getArgOperand(0)->stripPointerCasts();
-    auto *NewObjCall = dyn_cast<CallInst>(ThrownObj);
-    // The freshly allocated object must only feed the ctor and the throw.
-    // Any extra user means the tail is not self-contained enough to erase.
-    constexpr unsigned ExceptionTailUseCount = 2;
-    if (NewObjCall == nullptr || NewObjCall->getCalledFunction() == nullptr ||
-        !NewObjCall->getCalledFunction()->getName().equals("CJ_MCC_NewObject") ||
-        NewObjCall->getNumUses() != ExceptionTailUseCount)
-      return false;
-
-    CallInst *CtorCall = nullptr;
-    for (Instruction *Prev = ThrowCI->getPrevNode(); Prev != nullptr;
-         Prev = Prev->getPrevNode()) {
-      if (isa<DbgInfoIntrinsic>(Prev))
-        continue;
-      if (auto *CI = dyn_cast<CallInst>(Prev)) {
-        CtorCall = CI;
-        break;
-      }
-    }
-    if (CtorCall == nullptr || CtorCall->arg_empty() ||
-        CtorCall->getArgOperand(0)->stripPointerCasts() != NewObjCall)
-      return false;
-
-    if (NewObjCall->getParent() != CtorCall->getParent() ||
-        CtorCall->getParent() != ThrowCI->getParent())
-      return false;
-
-    Value *TypeInfo = nullptr;
-    Function *Helper = nullptr;
-    SmallVector<Value *, 3> HelperArgs;
-    IRBuilder<> IRB(ThrowCI);
-    Value *CtorPtr = CtorCall->getCalledOperand();
-
-    if (CtorCall->arg_size() == 2) {
-      TypeInfo = CtorCall->getArgOperand(1);
-      Helper = getOrInsertExceptionTailFunc(
-          ExceptionTailHelperKind::Ctor0,
-          cast<PointerType>(TypeInfo->getType()), nullptr,
-          *ThrowCI->getFunction());
-      HelperArgs = {TypeInfo, CtorPtr};
-    } else if (CtorCall->arg_size() == 3 &&
-               isStdCoreStringPtr(CtorCall->getArgOperand(1)->getType())) {
-      TypeInfo = CtorCall->getArgOperand(2);
-      Helper = getOrInsertExceptionTailFunc(
-          ExceptionTailHelperKind::CtorString,
-          cast<PointerType>(TypeInfo->getType()),
-          CtorCall->getArgOperand(1)->getType(), *ThrowCI->getFunction());
-      HelperArgs = {TypeInfo, CtorPtr, CtorCall->getArgOperand(1)};
-    } else {
-      return false;
+    void initializeExceptionTailHelper(Function &Func, Function &Caller)
+    {
+        Func.addFnAttr(Attribute::NoReturn);
+        Func.addFnAttr(Attribute::NoInline);
+        Func.addFnAttr(Attribute::Cold);
+        Func.addFnAttr(Attribute::OptimizeForSize);
+        Func.addFnAttr(Attribute::MinSize);
+        Func.setGC("cangjie");
+        if (Caller.hasPersonalityFn())
+            Func.setPersonalityFn(Caller.getPersonalityFn());
+        else if (Function *Personality = M.getFunction("__cj_personality_v0$"))
+            Func.setPersonalityFn(Personality);
     }
 
-    auto *HelperCall = IRB.CreateCall(Helper, HelperArgs);
-    HelperCall->setDebugLoc(ThrowCI->getDebugLoc());
-    HelperCall->setDoesNotReturn();
-
-    Instruction *ThrownArgInst =
-        dyn_cast<Instruction>(ThrowCI->getArgOperand(0));
-    SmallVector<Instruction *, 4> DeadInstRoots;
-    for (Value *Arg : NewObjCall->args()) {
-      if (auto *Inst = dyn_cast<Instruction>(Arg))
-        DeadInstRoots.push_back(Inst);
+    Function *getOrInsertNewObjectFunc()
+    {
+        auto *RefTy = Type::getInt8PtrTy(C, 1);
+        auto *NewObjTy = FunctionType::get(
+            RefTy, {Type::getInt8PtrTy(C), Type::getInt32Ty(C)}, false);
+        Function *NewObjFunc = M.getFunction("CJ_MCC_NewObject");
+        if (NewObjFunc == nullptr)
+            NewObjFunc =
+                M.declareCJRuntimeFunc("CJ_MCC_NewObject", NewObjTy, false, true);
+        return NewObjFunc;
     }
-    ThrowCI->eraseFromParent();
-    CtorCall->eraseFromParent();
-    // Delete a now-dead throw-side cast chain before checking whether the
-    // allocation itself can be dropped as well.
-    if (ThrownArgInst != nullptr && ThrownArgInst != NewObjCall)
-      RecursivelyDeleteTriviallyDeadInstructions(ThrownArgInst);
-    if (NewObjCall->use_empty())
-      NewObjCall->eraseFromParent();
-    for (Instruction *Inst : DeadInstRoots)
-      RecursivelyDeleteTriviallyDeadInstructions(Inst);
-    return true;
-  }
+
+    Function *getOrInsertThrowExceptionFunc()
+    {
+        auto *RefTy = Type::getInt8PtrTy(C, 1);
+        auto *ThrowTy = FunctionType::get(Type::getVoidTy(C), {RefTy}, false);
+        Function *ThrowFunc = M.getFunction("CJ_MCC_ThrowException");
+        if (ThrowFunc == nullptr)
+            ThrowFunc = M.declareCJRuntimeFunc("CJ_MCC_ThrowException", ThrowTy,
+                                               false, false);
+        return ThrowFunc;
+    }
+
+    void buildExceptionTailHelperBody(Function &Func, ExceptionTailHelperKind Kind,
+                                      PointerType *TypeInfoTy, Type *MsgTy)
+    {
+        auto *RefTy = Type::getInt8PtrTy(C, 1);
+        auto *TypeInfoStructTy =
+            cast<StructType>(TypeInfoTy->getNonOpaquePointerElementType());
+        Function *NewObjFunc = getOrInsertNewObjectFunc();
+        Function *ThrowFunc = getOrInsertThrowExceptionFunc();
+
+        auto ArgIt = Func.arg_begin();
+        Argument *TypeInfo = &*ArgIt++;
+        TypeInfo->setName("ti");
+        Argument *Ctor = &*ArgIt++;
+        Ctor->setName("ctor");
+        Argument *Msg = nullptr;
+        if (Kind == ExceptionTailHelperKind::CtorString) {
+            Msg = &*ArgIt++;
+            Msg->setName("msg");
+        }
+
+        BasicBlock *Entry = BasicBlock::Create(C, "entry", &Func);
+        IRBuilder<> IRB(Entry);
+        Value *SizePtr = IRB.CreateStructGEP(TypeInfoStructTy, TypeInfo, CIT_SIZE);
+        Value *Size = IRB.CreateLoad(Type::getInt32Ty(C), SizePtr);
+        // Keep the helper's allocation math identical to setHeapMallocSizeAlign():
+        // add the object header, then round up to the runtime's 8-byte alignment.
+        Value *SizeAdd = IRB.CreateAdd(Size, IRB.getInt32(ObjectHeadSize + 7));
+        Value *AlignedSize = IRB.CreateAnd(SizeAdd, IRB.getInt32(~7));
+        Value *Obj = IRB.CreateCall(
+            NewObjFunc,
+            {IRB.CreateBitCast(TypeInfo, Type::getInt8PtrTy(C)), AlignedSize});
+        if (Kind == ExceptionTailHelperKind::Ctor0) {
+            auto *CtorTy =
+                FunctionType::get(Type::getVoidTy(C), {RefTy, TypeInfoTy}, false);
+            IRB.CreateCall(CtorTy, Ctor, {Obj, TypeInfo});
+        } else {
+            auto *CtorTy = FunctionType::get(Type::getVoidTy(C),
+                                             {RefTy, MsgTy, TypeInfoTy}, false);
+            IRB.CreateCall(CtorTy, Ctor, {Obj, Msg, TypeInfo});
+        }
+        IRB.CreateCall(ThrowFunc, {Obj});
+        IRB.CreateUnreachable();
+    }
+
+    Function *getOrInsertExceptionTailFunc(ExceptionTailHelperKind Kind,
+                                           PointerType *TypeInfoTy, Type *MsgTy,
+                                           Function &Caller)
+    {
+        auto *RefTy = Type::getInt8PtrTy(C, 1);
+        SmallVector<Type *, 3> CtorArgTys{RefTy};
+        if (Kind == ExceptionTailHelperKind::CtorString)
+            CtorArgTys.push_back(MsgTy);
+        CtorArgTys.push_back(TypeInfoTy);
+        auto *CtorTy = FunctionType::get(Type::getVoidTy(C), CtorArgTys, false);
+        // Helper ABI:
+        //   helper0(TypeInfo*, void (ref, TypeInfo*)*)
+        //   helper_string(TypeInfo*, void (ref, String*, TypeInfo*)*, String*)
+        SmallVector<Type *, 3> HelperArgTys{TypeInfoTy,
+                                            PointerType::getUnqual(CtorTy)};
+        if (Kind == ExceptionTailHelperKind::CtorString)
+            HelperArgTys.push_back(MsgTy);
+        auto *FT = FunctionType::get(Type::getVoidTy(C), HelperArgTys, false);
+
+        Function *Func = M.getFunction(getExceptionTailHelperName(Kind));
+        if (Func == nullptr) {
+            Func = Function::Create(FT, GlobalValue::InternalLinkage,
+                                    getExceptionTailHelperName(Kind), &M);
+            initializeExceptionTailHelper(*Func, Caller);
+            buildExceptionTailHelperBody(*Func, Kind, TypeInfoTy, MsgTy);
+        }
+        return Func;
+    }
+
+    bool tryExtractExceptionTail(CallInst *ThrowCI)
+    {
+        // Match the canonical cold throw tail:
+        //   %obj = call @CJ_MCC_NewObject(...)
+        //   call @exception_ctor(%obj, [msg,] %ti)
+        //   call @CJ_MCC_ThrowException(%obj)
+        //   unreachable
+        //
+        // Replacing the tail with a helper call keeps the hot path small and lets
+        // the backend see one shared cold sequence instead of N duplicated blocks.
+        if (ThrowCI->getFunction()->getName().equals(ExceptionCtor0MangleStr) ||
+            ThrowCI->getFunction()->getName().equals(ExceptionCtorStringMangleStr))
+            return false;
+
+        Value *ThrownObj = ThrowCI->getArgOperand(0)->stripPointerCasts();
+        auto *NewObjCall = dyn_cast<CallInst>(ThrownObj);
+        // The freshly allocated object must only feed the ctor and the throw.
+        // Any extra user means the tail is not self-contained enough to erase.
+        constexpr unsigned ExceptionTailUseCount = 2;
+        if (NewObjCall == nullptr || NewObjCall->getCalledFunction() == nullptr ||
+            !NewObjCall->getCalledFunction()->getName().equals(
+                "CJ_MCC_NewObject") ||
+            NewObjCall->getNumUses() != ExceptionTailUseCount)
+            return false;
+
+        CallInst *CtorCall = nullptr;
+        for (Instruction *Prev = ThrowCI->getPrevNode(); Prev != nullptr;
+             Prev = Prev->getPrevNode()) {
+            if (isa<DbgInfoIntrinsic>(Prev))
+                continue;
+            if (auto *CI = dyn_cast<CallInst>(Prev)) {
+                CtorCall = CI;
+                break;
+            }
+        }
+        if (CtorCall == nullptr || CtorCall->arg_empty() ||
+            CtorCall->getArgOperand(0)->stripPointerCasts() != NewObjCall)
+            return false;
+
+        if (NewObjCall->getParent() != CtorCall->getParent() ||
+            CtorCall->getParent() != ThrowCI->getParent())
+            return false;
+
+        Value *TypeInfo = nullptr;
+        Function *Helper = nullptr;
+        SmallVector<Value *, 3> HelperArgs;
+        IRBuilder<> IRB(ThrowCI);
+        Value *CtorPtr = CtorCall->getCalledOperand();
+
+        if (CtorCall->arg_size() == 2) {
+            TypeInfo = CtorCall->getArgOperand(1);
+            Helper =
+                getOrInsertExceptionTailFunc(ExceptionTailHelperKind::Ctor0,
+                                             cast<PointerType>(TypeInfo->getType()),
+                                             nullptr, *ThrowCI->getFunction());
+            HelperArgs = {TypeInfo, CtorPtr};
+        } else if (CtorCall->arg_size() == 3 &&
+                   isStdCoreStringPtr(CtorCall->getArgOperand(1)->getType())) {
+            TypeInfo = CtorCall->getArgOperand(2);
+            Helper = getOrInsertExceptionTailFunc(
+                ExceptionTailHelperKind::CtorString,
+                cast<PointerType>(TypeInfo->getType()),
+                CtorCall->getArgOperand(1)->getType(), *ThrowCI->getFunction());
+            HelperArgs = {TypeInfo, CtorPtr, CtorCall->getArgOperand(1)};
+        } else {
+            return false;
+        }
+
+        auto *HelperCall = IRB.CreateCall(Helper, HelperArgs);
+        HelperCall->setDebugLoc(ThrowCI->getDebugLoc());
+        HelperCall->setDoesNotReturn();
+
+        Instruction *ThrownArgInst =
+            dyn_cast<Instruction>(ThrowCI->getArgOperand(0));
+        SmallVector<Instruction *, 4> DeadInstRoots;
+        for (Value *Arg : NewObjCall->args()) {
+            if (auto *Inst = dyn_cast<Instruction>(Arg))
+                DeadInstRoots.push_back(Inst);
+        }
+        ThrowCI->eraseFromParent();
+        CtorCall->eraseFromParent();
+        // Delete a now-dead throw-side cast chain before checking whether the
+        // allocation itself can be dropped as well.
+        if (ThrownArgInst != nullptr && ThrownArgInst != NewObjCall)
+            RecursivelyDeleteTriviallyDeadInstructions(ThrownArgInst);
+        if (NewObjCall->use_empty())
+            NewObjCall->eraseFromParent();
+        for (Instruction *Inst : DeadInstRoots)
+            RecursivelyDeleteTriviallyDeadInstructions(Inst);
+        return true;
+    }
+
+  // ================================================================
+  // StringBuilder String Interpolation Extraction
+  // ================================================================
+  //
+  // Identifies the pattern:
+  //   %obj = call @llvm.cj.malloc.object(@"std.core:StringBuilder.ti", SIZE)
+  //   call @StringBuilder.<init>(%obj, CAPACITY, @StringBuilder.ti)
+  //   call @StringBuilder.appendXXX(sret, %obj, arg1, @StringBuilder.ti)
+  //   call @StringBuilder.appendYYY(sret, %obj, arg2, @StringBuilder.ti)
+  //   ...
+  //   call @StringBuilder.toString(sret_result, %obj, @StringBuilder.ti)
+  //
+  // And extracts the entire sequence into a shared helper function keyed
+  // by the ordered list of append function signatures. Multiple call sites
+  // with the same append signature sequence share the same helper.
+
+  /// Describes a single StringBuilder append call within a string
+  /// interpolation sequence.
+  struct AppendInfo {
+    CallInst *CI;        // The append CallInst
+    Function *AppendFn;  // The resolved append function
+    Value *DataArg;      // The "real" argument (string literal, i64, etc.)
+  };
+
+  /// Describes a complete StringBuilder interpolation sequence.
+  struct StringInterpSequence {
+    CallInst *MallocCall;
+    CallInst *InitCall;
+    SmallVector<AppendInfo, 6> Appends;
+    CallInst *ToStringCall;
+    Instruction *MemsetInst; // optional memset before toString
+  };
+
+  /// Try to collect a full interpolation sequence starting from a malloc call.
+    bool collectStringInterpSequence(CallInst *MallocCI, StringInterpSequence &Seq)
+    {
+        Seq.MallocCall = MallocCI;
+        Value *Obj = MallocCI; // the i8 addrspace(1)* StringBuilder object
+
+        // Quick early exit: if any user is outside this block, obj escapes.
+        for (User *U : Obj->users()) {
+            auto *I = dyn_cast<Instruction>(U);
+            if (!I || I->getParent() != MallocCI->getParent())
+                return false;
+        }
+
+        // Returns true if any operand of I (ignoring pointer casts) is Obj.
+        auto usesObj = [&](Instruction *I) {
+            for (Use &Op : I->operands())
+                if (Op.get()->stripPointerCasts() == Obj)
+                    return true;
+            return false;
+        };
+
+        // Walk instructions forward from MallocCI to find the sequence in order.
+        Seq.InitCall = nullptr;
+        Seq.ToStringCall = nullptr;
+        Seq.MemsetInst = nullptr;
+        Seq.Appends.clear();
+
+        // Candidate memsets seen between malloc and toString; the one that targets
+        // the toString sret is selected after the walk completes.
+        SmallVector<IntrinsicInst *, 2> CandidateMemsets;
+
+        for (Instruction *I = MallocCI->getNextNode(); I != nullptr;
+             I = I->getNextNode()) {
+            // Skip debug intrinsics.
+            if (isa<DbgInfoIntrinsic>(I))
+                continue;
+
+            // Remember memset candidates (compiler inserts a memset before toString
+            // to zero the sret). Do not commit to one until we know the toString
+            // sret, otherwise we may erase an unrelated memset later.
+            if (auto *II = dyn_cast<IntrinsicInst>(I)) {
+                if (II->getIntrinsicID() == Intrinsic::cj_memset) {
+                    CandidateMemsets.push_back(II);
+                    continue;
+                }
+            }
+
+            // Skip non-call instructions (bitcast, alloca, store, etc.)
+            // that don't use Obj.
+            auto *CI = dyn_cast<CallInst>(I);
+            if (!CI) {
+                if (usesObj(I))
+                    return false; // Obj escapes through non-call instruction
+                continue;         // safe to skip (bitcast, alloca, etc.)
+            }
+
+            Function *Callee = CI->getCalledFunction();
+            if (!Callee) {
+                // Indirect call — bail if it uses Obj, otherwise ignore.
+                if (usesObj(CI))
+                    return false;
+                continue;
+            }
+
+            StringRef Name = Callee->getName();
+
+            // Check: is this a StringBuilder.<init> call?
+            if (Name.startswith(StringBuilderInitPrefix)) {
+                if (Seq.InitCall != nullptr)
+                    return false; // duplicate init
+                // Verify Obj is arg 0.
+                if (CI->getArgOperand(0)->stripPointerCasts() != Obj)
+                    return false;
+                Seq.InitCall = CI;
+                continue;
+            }
+
+            // Check: is this a StringBuilder.append* call?
+            if (Name.startswith(StringBuilderAppendPrefix)) {
+                if (Seq.InitCall == nullptr)
+                    return false; // append before init
+                // append signature: (sret %Unit, obj, dataArg, ti) — exactly 4
+                // args. We rebuild the call with all 4 operands, so require the
+                // full shape.
+                if (CI->arg_size() != 4)
+                    return false;
+                if (CI->getArgOperand(1)->stripPointerCasts() != Obj)
+                    return false;
+                AppendInfo AI;
+                AI.CI = CI;
+                AI.AppendFn = Callee;
+                AI.DataArg = CI->getArgOperand(2);
+                Seq.Appends.push_back(AI);
+                continue;
+            }
+
+            // Check: is this StringBuilder.toString?
+            if (Name.equals(StringBuilderToStringName)) {
+                if (Seq.InitCall == nullptr || Seq.Appends.empty())
+                    return false;
+                // toString signature: (sret %String, obj, ti)
+                if (CI->getArgOperand(1)->stripPointerCasts() != Obj)
+                    return false;
+                Seq.ToStringCall = CI;
+                break; // sequence is complete
+            }
+
+            // Any other direct call — bail if it uses Obj at all.
+            if (usesObj(CI))
+                return false; // unknown call using Obj
+
+            continue;
+        }
+
+        // Validate: must have init + at least 1 append + toString.
+        if (!Seq.InitCall || Seq.Appends.empty() || !Seq.ToStringCall)
+            return false;
+        // Simple interpolation with only 1 append (e.g. "${x}") doesn't save size
+        // when accounting for the function abstracting overhead.
+        if (Seq.Appends.size() < 2)
+            return false;
+
+        // The malloc size must be a constant. The helper bakes it in and shares
+        // the body across call sites, so a non-constant size (which would also be
+        // an illegal cross-function reference) or a mismatched size cannot be
+        // supported here. The size is folded into the signature key below so that
+        // sequences differing only in size get distinct helpers.
+        if (!isa<ConstantInt>(Seq.MallocCall->getArgOperand(1)))
+            return false;
+
+        size_t ExpectedUses = 1 + Seq.Appends.size() + 1;
+        size_t ActualUses = 0;
+        for (User *U : Obj->users()) {
+            if (!isa<DbgInfoIntrinsic>(U))
+                ++ActualUses;
+        }
+        if (ActualUses != ExpectedUses)
+            return false;
+
+        // The sequence is accepted. Select the memset that targets the toString
+        // sret (if any); anything else is unrelated and must be left untouched.
+        Value *SretTarget = Seq.ToStringCall->getArgOperand(0)->stripPointerCasts();
+        for (IntrinsicInst *MS : CandidateMemsets) {
+            if (MS->getArgOperand(0)->stripPointerCasts() == SretTarget) {
+                Seq.MemsetInst = MS;
+                break;
+            }
+        }
+        return true;
+    }
+
+  /// Build a unique key for this append signature sequence so that
+  /// call sites with the same pattern share the same helper function.
+    std::string buildSignatureKey(const StringInterpSequence &Seq)
+    {
+        std::string Key;
+        raw_string_ostream OS(Key);
+        // Fold the (constant) malloc size into the key so sequences that share an
+        // append signature but allocate differently don't collide on one helper.
+        uint64_t MallocSize =
+            cast<ConstantInt>(Seq.MallocCall->getArgOperand(1))->getZExtValue();
+        OS << "strinterp_" << Seq.Appends.size() << "_sz" << MallocSize;
+        for (const auto &AI : Seq.Appends) {
+            OS << "_" << AI.AppendFn->getName();
+        }
+        OS.flush();
+        return Key;
+    }
+
+  /// Cache of generated helper functions keyed by signature. The key owns its
+  /// storage (std::string), so entries stay valid as the map grows.
+  DenseMap<std::string, Function *> StrInterpHelperCache;
+  /// Counter for generating short unique helper names.
+  unsigned StrInterpHelperCounter = 0;
+
+  /// Get or create a helper function for the given interpolation signature.
+  ///
+  /// The helper function has the signature:
+  ///   void __cj_si_N(sret %String* result, i64 capacity, arg1, arg2, ..., argN)
+  /// and its body does:
+  ///   %obj = malloc(StringBuilder.ti, 32)
+  ///   StringBuilder.<init>(obj, capacity, ti)
+  ///   StringBuilder.append*(sret, obj, arg1, ti)
+  ///   StringBuilder.append*(sret, obj, arg2, ti)
+  ///   ...
+  ///   StringBuilder.toString(sret result, obj, ti)
+    Function *getOrCreateStrInterpHelper(const StringInterpSequence &Seq,
+                                         const std::string &Key, Function &Caller)
+    {
+        auto It = StrInterpHelperCache.find(Key);
+        if (It != StrInterpHelperCache.end())
+            return It->second;
+
+        // Build the function type:
+        // void (String* sret, i64 capacity, dataArg1Ty, dataArg2Ty, ...)
+        SmallVector<Type *, 8> ParamTys;
+        ParamTys.push_back(Seq.ToStringCall->getArgOperand(0)->getType());
+        ParamTys.push_back(Seq.InitCall->getArgOperand(1)->getType());
+        // data args from each append
+        for (const auto &AI : Seq.Appends) {
+            ParamTys.push_back(AI.DataArg->getType());
+        }
+        auto *FT = FunctionType::get(Type::getVoidTy(C), ParamTys, false);
+
+        std::string FuncName =
+            (StrInterpHelperPrefix + Twine(StrInterpHelperCounter++)).str();
+        Function *Helper =
+            Function::Create(FT, GlobalValue::InternalLinkage, FuncName, &M);
+
+        // Set attributes: not inlined, optimize for size, gc = cangjie.
+        Helper->addFnAttr(Attribute::NoInline);
+        Helper->addFnAttr(Attribute::OptimizeForSize);
+        Helper->addFnAttr(Attribute::MinSize);
+        Helper->setGC("cangjie");
+        if (Caller.hasPersonalityFn())
+            Helper->setPersonalityFn(Caller.getPersonalityFn());
+
+        // Build the body.
+        BasicBlock *Entry = BasicBlock::Create(C, "entry", Helper);
+        IRBuilder<> IRB(Entry);
+
+        auto ArgIt = Helper->arg_begin();
+        Argument *SretResult = &*ArgIt++;
+        SretResult->setName("result");
+        auto *StringStructTy = cast<PointerType>(SretResult->getType())
+                                   ->getNonOpaquePointerElementType();
+        Helper->addParamAttr(0, Attribute::getWithStructRetType(C, StringStructTy));
+        Helper->addParamAttr(0, Attribute::NoAlias);
+
+        Argument *Capacity = &*ArgIt++;
+        Capacity->setName("capacity");
+
+        SmallVector<Argument *, 8> DataArgs;
+        for (unsigned i = 0; i < Seq.Appends.size(); ++i) {
+            Argument *DA = &*ArgIt++;
+            DA->setName("arg" + Twine(i));
+            DataArgs.push_back(DA);
+        }
+
+        GlobalVariable *SBTI = M.getGlobalVariable(StringBuilderTIName);
+        assert(SBTI && "StringBuilder.ti must exist");
+
+        // 1. malloc(StringBuilder.ti, SIZE). The size is a constant (enforced in
+        // collectStringInterpSequence) and folded into the signature key, so it is
+        // safe to bake into this shared helper.
+        auto *MallocSize = cast<ConstantInt>(Seq.MallocCall->getArgOperand(1));
+        Value *MallocTIArg = IRB.CreateBitCast(SBTI, Type::getInt8PtrTy(C));
+        Value *Obj = IRB.CreateCall(Seq.MallocCall->getCalledFunction(),
+                                    {MallocTIArg, MallocSize});
+
+        // 2. StringBuilder.<init>(obj, capacity, ti)
+        IRB.CreateCall(Seq.InitCall->getCalledFunction(), {Obj, Capacity, SBTI});
+
+        // 3. append calls — reuse the same sret alloca for Unit return.
+        auto *UnitStructTy =
+            cast<PointerType>(Seq.Appends[0].CI->getArgOperand(0)->getType())
+                ->getNonOpaquePointerElementType();
+        Value *UnitSret = IRB.CreateAlloca(UnitStructTy);
+        for (unsigned i = 0; i < Seq.Appends.size(); ++i) {
+            IRB.CreateCall(Seq.Appends[i].AppendFn,
+                           {UnitSret, Obj, DataArgs[i], SBTI});
+        }
+
+        // 4. memset result + toString(sret result, obj, ti)
+        IRB.CreateCall(
+            Intrinsic::getDeclaration(&M, Intrinsic::cj_memset,
+                                      {Type::getInt8PtrTy(C)}),
+            {IRB.CreateBitCast(SretResult, Type::getInt8PtrTy(C)), IRB.getInt8(0),
+             IRB.getInt64(M.getDataLayout().getTypeAllocSize(StringStructTy)),
+             IRB.getInt1(false)});
+        IRB.CreateCall(Seq.ToStringCall->getCalledFunction(),
+                       {SretResult, Obj, SBTI});
+        IRB.CreateRetVoid();
+
+        StrInterpHelperCache[Key] = Helper;
+        return Helper;
+    }
+
+  /// Replace a matched string interpolation sequence with a call to a
+  /// shared helper function.
+    bool replaceStringInterpWithHelper(StringInterpSequence &Seq, Function &Caller)
+    {
+        std::string Key = buildSignatureKey(Seq);
+        Function *Helper = getOrCreateStrInterpHelper(Seq, Key, Caller);
+
+        // Build call arguments: (sret result, capacity, dataArg1, dataArg2, ...)
+        SmallVector<Value *, 8> Args;
+        Args.push_back(Seq.ToStringCall->getArgOperand(0)); // sret result
+        Args.push_back(Seq.InitCall->getArgOperand(1));     // capacity
+        for (const auto &AI : Seq.Appends) {
+            Args.push_back(AI.DataArg);
+        }
+
+        // Insert the helper call just before the toString call position.
+        IRBuilder<> IRB(Seq.ToStringCall);
+        auto *HelperCall = IRB.CreateCall(Helper, Args);
+        HelperCall->setDebugLoc(Seq.ToStringCall->getDebugLoc());
+
+        // Collect potential dead roots (e.g. sret allocas for Unit) before erasing
+        // calls. Appends commonly share a single sret alloca, so de-duplicate:
+        // deleting the same instruction twice below would be a use-after-free.
+        SmallPtrSet<Instruction *, 8> SeenRoots;
+        SmallVector<Instruction *, 8> DeadInstRoots;
+        for (const auto &AI : Seq.Appends) {
+            if (auto *Inst = dyn_cast<Instruction>(AI.CI->getArgOperand(0)))
+                if (SeenRoots.insert(Inst).second)
+                    DeadInstRoots.push_back(Inst);
+        }
+
+        // Erase old instructions in reverse order.
+        Seq.ToStringCall->eraseFromParent();
+        if (Seq.MemsetInst)
+            Seq.MemsetInst->eraseFromParent();
+        for (auto it = Seq.Appends.rbegin(); it != Seq.Appends.rend(); ++it)
+            it->CI->eraseFromParent();
+        Seq.InitCall->eraseFromParent();
+        if (Seq.MallocCall->use_empty())
+            Seq.MallocCall->eraseFromParent();
+
+        // Clean up trivially dead instructions like the unused Unit allocas.
+        for (Instruction *Inst : DeadInstRoots)
+            RecursivelyDeleteTriviallyDeadInstructions(Inst);
+
+        return true;
+    }
 
   StringRef getRuntimeFuncName(CallBase *CI) const {
     Intrinsic::ID IID = CI->getIntrinsicID();
@@ -1233,6 +1666,11 @@ static void declareRuntimeFunc(Module &M) {
 
 static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
   bool Changed = false;
+
+  // Extract string interpolation sequences BEFORE intrinsic lowering,
+  // because we need to match llvm.cj.malloc.object intrinsic calls.
+  Changed |= Lowering.extractStringInterpSequences(F);
+
   EscapeScope ES(F);
 
   for (auto I = inst_begin(F); I != inst_end(F);) {
