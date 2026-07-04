@@ -175,8 +175,11 @@ void CJMetadataInfo::recordGlobalVariable(const GlobalVariable *GV) {
     if (GV->isCJStaticGenericTI()) {
       assert(GV->hasInitializer() && "StaticGenericTI has no Initializer!");
       const Constant *C = GV->getInitializer();
-      for (unsigned Idx = 0; Idx < C->getNumOperands(); Idx++)
-        StaticGenericTI.push_back(cast<GlobalValue>(C->getOperand(Idx)));
+      for (unsigned Idx = 0; Idx < C->getNumOperands(); Idx++) {
+        Value *Op = C->getOperand(Idx)->stripPointerCasts();
+        if (auto *RefGV = dyn_cast<GlobalValue>(Op))
+          StaticGenericTI.push_back(RefGV);
+      }
       return;
     }
 
