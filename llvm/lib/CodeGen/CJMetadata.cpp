@@ -175,8 +175,11 @@ void CJMetadataInfo::recordGlobalVariable(const GlobalVariable *GV) {
     if (GV->isCJStaticGenericTI()) {
       assert(GV->hasInitializer() && "StaticGenericTI has no Initializer!");
       const Constant *C = GV->getInitializer();
-      for (unsigned Idx = 0; Idx < C->getNumOperands(); Idx++)
-        StaticGenericTI.push_back(cast<GlobalValue>(C->getOperand(Idx)));
+      for (unsigned Idx = 0; Idx < C->getNumOperands(); Idx++) {
+        Value *Op = C->getOperand(Idx)->stripPointerCasts();
+        if (auto *RefGV = dyn_cast<GlobalValue>(Op))
+          StaticGenericTI.push_back(RefGV);
+      }
       return;
     }
 
@@ -683,7 +686,7 @@ void CJMetadataInfo::emitSubExpr(StringRef Label, const GlobalValue *GV) {
     Offset = MCBinaryExpr::createSub(CurRefSym, GVRefSym, Context);
   } else {
     // Emit generic typeinfo offset: long xxx - generic_ti
-    Offset = MCBinaryExpr::createSub(GVRefSym, CurRefSym, Context);
+    Offset = MCBinaryExpr::createSub(GVRefSym, CurRefSym, Context); 
   }
   OS.emitValue(Offset, 4);
 }
