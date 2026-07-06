@@ -48,6 +48,7 @@
 #include "llvm/Transforms/Scalar/CJRuntimeLowering.h"
 #include "llvm/Transforms/Scalar/CJSimpleOpt.h"
 #include "llvm/Transforms/Scalar/CJSpecificOpt.h"
+#include "llvm/Transforms/Scalar/CJStringPoolMerge.h"
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Scalar/PlaceSafepoints.h"
 #include "llvm/Transforms/Utils/FunctionImportUtils.h"
@@ -356,6 +357,8 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   auto addCangjiePasses = [&]() {
     if (CJPipeline) {
       MPM.addPass(CJSpecificOpt(OptLevel));
+      // CJStringPoolMerge moved to run BEFORE buildLTODefaultPipeline (see
+      // below) so cjstring literal wrappers are still intact.
       MPM.addPass(PlaceSafepoints());
       MPM.addPass(CJBarrierOpt());
       MPM.addPass(CJRewriteStatepoint(OptLevel));
@@ -380,6 +383,16 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
     OL = OptimizationLevel::O3;
     break;
   }
+
+  // Run CJStringPoolMerge BEFORE the default LTO opt pipeline so that
+  // cjstring literal wrappers (the {poolPtr, offset, length} indirection)
+  // are still intact. After SROA/InstCombine inlines the wrappers, direct
+  // GEP users appear that the byte-pool path cannot repoint, forcing those
+  // buffers into the struct-nesting path (per-field ti => extra .rela.dyn
+  // relocations). Running pre-opt lets every buffer merge into one byte
+  // pool sharing a single ti, matching the legacy CodeGen pool layout.
+  if (CJPipeline && !IsThinLTO)
+    MPM.addPass(CJStringPoolMerge());
 
   // Parse a custom pipeline if asked to.
   if (!Conf.OptPipeline.empty()) {
