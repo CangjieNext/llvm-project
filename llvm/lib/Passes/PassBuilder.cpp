@@ -170,6 +170,7 @@
 #include "llvm/Transforms/Scalar/CJAllocationSizeCheck.h"
 #include "llvm/Transforms/Scalar/CJIRVerifier.h"
 #include "llvm/Transforms/Scalar/CJSpecificOpt.h"
+#include "llvm/Transforms/Scalar/CJStringPoolMerge.h"
 #include "llvm/Transforms/Scalar/ConstantHoisting.h"
 #include "llvm/Transforms/Scalar/ConstraintElimination.h"
 #include "llvm/Transforms/Scalar/CorrelatedValuePropagation.h"
@@ -1260,6 +1261,10 @@ Error PassBuilder::parseModulePass(ModulePassManager &MPM,
       }
       if (CJPipeline && !CangjieLTOPreOpt) {
         MPM.addPass(CJSpecificOpt(L.getSpeedupLevel()));
+        // Only in the full-LTO alias; the real full-LTO backend runs it via
+        // LTOBackend.cpp. Skipping `default<O*>` keeps non-LTO builds as-is.
+        if (Matches.size() > 1 && Matches[1] == "lto")
+          MPM.addPass(CJStringPoolMerge());
         MPM.addPass(PlaceSafepoints());
         MPM.addPass(CJBarrierOpt());
         MPM.addPass(CJRewriteStatepoint(L.getSpeedupLevel()));
