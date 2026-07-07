@@ -17,7 +17,9 @@
 
 #include "llvm/Transforms/Scalar/CJGCInstrReplace.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Constant.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -103,9 +105,76 @@ void addGCInstrMetadata(Instruction *Inst, CallBase *SourceGCInstr) {
   }
 }
 
+/// Return true if \p V (the result of a cj_gcread_ref) is used, directly or
+/// through pointer-transparent instructions (GEP / bitcast / addrspacecast /
+/// PHI / select / ConstantExpr), as the *pointer operand* of a LoadInst or
+/// StoreInst.
+///
+/// When this is the case, rewriting the gcread into a plain load would let
+/// DSE/GVN treat the loaded pointer as PointerUnknown and mis-reason about
+/// stores that are only reachable through that pointer (the MM0002
+/// mis-optimization: the GC write barrier on the referenced object's field
+/// gets deleted as a "dead store"). Keeping such gcreads as the opaque
+/// intrinsic preserves the conservative MemoryDef that DSE cannot see through.
+///
+/// Uses that consume the gcread result as a plain value (storing it into a
+/// field, passing it to a call, comparing it, ...) do not hit this rule and
+/// are still rewritten to a plain load so that CSE/GVN can fold
+/// `gcwrite a to b; c = gcread from b` into `c = a`.
+static bool isGcreadResultUsedAsAddrBase(Value *V,
+                                         SmallPtrSetImpl<Value *> &Visited) {
+  if (!Visited.insert(V).second)
+    return false; // already on the stack, avoid infinite recursion
+
+  for (User *U : V->users()) {
+    // Pointer-transparent producers: keep walking their uses.
+    if (isa<GetElementPtrInst>(U) || isa<BitCastInst>(U) ||
+        isa<AddrSpaceCastInst>(U) || isa<PHINode>(U) || isa<SelectInst>(U)) {
+      if (isGcreadResultUsedAsAddrBase(U, Visited))
+        return true;
+      continue;
+    }
+    if (auto *LI = dyn_cast<LoadInst>(U)) {
+      if (LI->getPointerOperand() == V)
+        return true;
+      continue;
+    }
+    if (auto *SI = dyn_cast<StoreInst>(U)) {
+      // Pointer operand (operand 1) -> address-base use: hit.
+      // Value operand (operand 0) -> the gcread result is stored as a value,
+      // which is safe and is exactly the CSE-foldable site we want to keep.
+      if (SI->getPointerOperand() == V)
+        return true;
+      continue;
+    }
+    if (auto *CE = dyn_cast<ConstantExpr>(U)) {
+      // Only pointer-typed ConstantExprs can propagate the address.
+      if (CE->getType()->isPointerTy() &&
+          isGcreadResultUsedAsAddrBase(CE, Visited))
+        return true;
+      continue;
+    }
+    // Any other use (call/invoke argument, arithmetic, comparison, ...)
+    // consumes the value rather than using it as an address base, so it is
+    // safe to rewrite.
+  }
+  return false;
+}
+
 bool changeGCReadRef(SmallVector<CallBase *, 4> *GCInstrs) {
   bool Changed = false;
+  SmallVector<CallBase *, 4> ToRewrite;
   for (auto *GCReadRef : *GCInstrs) {
+    // Selective rewrite (Path A): only lower a gcread to a plain load when
+    // its result is NOT used as a load/store pointer base. When the result
+    // flows into an address, keep the intrinsic so DSE/GVN cannot see through
+    // the loaded pointer and delete live barriers (MM0002).
+    SmallPtrSet<Value *, 16> Visited;
+    if (isGcreadResultUsedAsAddrBase(GCReadRef, Visited))
+      continue;
+    ToRewrite.push_back(GCReadRef);
+  }
+  for (auto *GCReadRef : ToRewrite) {
     Changed = true;
     IRBuilder<> IRB(GCReadRef);
     auto *AddedLoadInstr = IRB.CreateLoad(
@@ -113,7 +182,7 @@ bool changeGCReadRef(SmallVector<CallBase *, 4> *GCInstrs) {
     addGCInstrMetadata(AddedLoadInstr, GCReadRef);
     GCReadRef->replaceAllUsesWith(AddedLoadInstr);
   }
-  for (auto *GCReadRef : *GCInstrs) {
+  for (auto *GCReadRef : ToRewrite) {
     GCReadRef->eraseFromParent();
   }
   return Changed;
