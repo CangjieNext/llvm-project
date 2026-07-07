@@ -11,10 +11,18 @@
 // CJStringPoolMerge: backend pass that repacks per-literal cjstring byte
 // buffers into shared pools with substring sharing.
 //
-// After CodeGen emits per-literal content-addressed byte buffers and LTO
-// GlobalDCE has removed dead literals + their buffers, this pass greedily
+// CodeGen (under full LTO) emits one content-addressed byte buffer per
+// cjstring literal; dead literals and their private buffers are dropped
+// during LTO linking (well before this pass runs). This pass greedily
 // packs the surviving buffers (longest-first, like the legacy CodeGen pool)
 // and repoints each surviving cjstring literal to its offset in the new pool.
+//
+// Pipeline placement: run inside runNewPMPasses (LTOBackend.cpp) BEFORE
+// buildLTODefaultPipeline, so cjstring literal wrappers (the
+// {poolPtr, offset, length} indirection) are still intact -- after
+// SROA/InstCombine inlines the wrappers, direct GEP users appear that the
+// byte-pool path cannot repoint. By pre-opt, dead buffers are already gone
+// (dropped at link/internalize time), so this pass only sees live ones.
 //
 // Two merge paths:
 //   1. Byte-pool path: buffers reached only via the literal's
@@ -27,7 +35,8 @@
 //      the corresponding struct field. AcquireRawData(ptr) returns ptr +
 //      sizeof(MArray)=16 (it does NOT read the header), so most direct
 //      handles (cast chains, [0,2,off] GEPs) ARE byte-pool-repointable and
-//      only go to path 1; path 2 is a rare fallback.
+//      only go to path 1; path 2 is the fallback for the rest (and does
+//      fire on stdlib exception-message buffers in cross-package LTO).
 //
 // See requirement/ir_analysis/scenario2_stringpool_trim_design.md section 12
 // and cangjie-const-pool-pass-design skill.
@@ -519,8 +528,10 @@ static void repointDirectHandlesToPool(GlobalVariable *pool, BufInfo &b,
     handle->replaceAllUsesWith(newH);
   }
 }
-// of its direct handles can be repointed (mixed-eligibility buffers, where
-// some handles can't be repointed, are skipped whole to avoid duplicates).
+// Merge buffers whose direct handles are not byte-pool-repointable but are
+// all nested-repointable, into one nested-struct pool. A buffer with any
+// un-repointable handle is skipped whole (a partial rewrite would leave the
+// old buffer referenced -> duplicate).
 static void mergeDirectUserBuffers(Module &M, std::vector<BufInfo> &bufs,
                                    unsigned &counter) {
   // Eligible: buffers whose direct handles are all repointable by the
@@ -553,16 +564,16 @@ static void mergeDirectUserBuffers(Module &M, std::vector<BufInfo> &bufs,
   SmallVector<unsigned, 8> fieldIdx;
   GlobalVariable *nested =
       buildNestedStructPool(M, eligibleBufs, counter++, fieldIdx);
-  // Path 2 (struct-nesting) is a fallback for buffers whose direct handles
-  // are not byte-pool-repointable (e.g. ConstGepOther). As of the
-  // cross-package substring test it never produced a surviving nested pool
-  // ("nested.* pools are fully eliminated"), so this path has no known
-  // triggering IR shape in the test suite. Log loudly so a CI/regression
-  // run that hits it is not silently trusted -- the repointed handles must
-  // be manually verified the first time this fires.
+  // Path 2 (struct-nesting): fallback for buffers whose direct handles are
+  // not byte-pool-repointable (e.g. ConstGepOther). This path DOES trigger
+  // in practice -- a full-LTO build of stdlib + user program produces a
+  // surviving $const_cjstring_data.nested.<n> pool (e.g. stdlib exception
+  // message buffers reached via non-[0,2,off] constant GEPs). Log loudly so
+  // a CI/regression run that hits it is not silently trusted -- the
+  // repointed handles should be manually verified when this fires on new IR.
   errs() << "CJStringPoolMerge: path 2 (struct-nesting) merged "
          << eligible.size() << " buffers into " << nested->getName()
-         << " (untested fallback path -- verify the repointed handles)\n";
+         << " (fallback path -- verify the repointed handles)\n";
   // Repoint every handle, then erase the old buffers.
   for (unsigned i = 0; i < eligible.size(); ++i) {
     BufInfo *b = eligible[i];
