@@ -482,14 +482,21 @@ static Constant *repointHandleToNested(const HandleShape &shape,
 //                       legacy AcquireRawData(pool)+add offset pattern, but
 //                       relies on the +16 convention instead of inserting an
 //                       add).
-//   ConstGepIntoData -> gep(pool, 0, 2, baseOffset+dataOff) [+ outer casts]:
-//                       data->data, constant offset folded.
+//   ConstGepIntoData -> rebuild gep(bufTy, baseCasts(buf-at-baseOffset),
+//                       originalIndices) [+ outer casts]: a bufTy-typed base
+//                       into the pool is cast up via baseCasts (matching the
+//                       original GEP base's addrspace), then the GEP is
+//                       rebuilt with the original indices (baseOffset folded
+//                       via the base, dataOff via the original index). See
+//                       the in-body comment for why the base must be
+//                       bufTy-typed and baseCasts replayed (a direct GEP on
+//                       pool would land in addrspace 0, mismatching the
+//                       original GEP result type).
 static Constant *repointHandleToBytePool(const HandleShape &shape,
                                          GlobalVariable *pool,
                                          uint64_t baseOffset) {
   auto &ctx = pool->getContext();
   auto *i8Ty = Type::getInt8Ty(ctx);
-  auto *i32Ty = Type::getInt32Ty(ctx);
   auto *i64Ty = Type::getInt64Ty(ctx);
   Constant *newBase;
   if (shape.kind == HandleShape::CastChain) {
@@ -501,14 +508,33 @@ static Constant *repointHandleToBytePool(const HandleShape &shape,
     newBase = ConstantExpr::getGetElementPtr(
         i8Ty, poolI8, ConstantInt::get(i64Ty, baseOffset), true);
   } else {
-    // ConstGepIntoData: index the pool's data array (field 2) at the folded
-    // offset.
-    newBase = ConstantExpr::getGetElementPtr(
-        pool->getValueType(), pool,
-        ArrayRef<Constant *>{
-            ConstantInt::get(i32Ty, 0), ConstantInt::get(i32Ty, 2),
-            ConstantInt::get(i64Ty, baseOffset + shape.dataOff)},
-        true);
+    // ConstGepIntoData. The original handle is
+    //   outerCasts(gep(bufTy, baseCasts(buf), 0, 2, dataOff, ...))
+    // so the GEP result has the type/addrspace of baseCasts(buf) (typically
+    // addrspace 1 -- e.g. stdlib memcpy handles are gep(bufTy,
+    // addrspacecast(buf), 0, 2, off) with baseCasts=[addrspacecast]).
+    // Building the GEP directly on pool (addrspace 0) would yield addrspace
+    // 0 and break the using instruction's operand type. Mirror the nested
+    // path: build a bufTy-typed base pointing at this buffer's offset within
+    // the pool, replay baseCasts on it, then rebuild the GEP with the
+    // original indices (baseOffset is folded via the base, dataOff via the
+    // original index). The base is bitcast(gep(i8, bitcast(pool), baseOffset)
+    // to bufTy*) -- a type pun safe because the original GEP only indexes
+    // field 2 (data), and pool's data field sits at the same
+    // +sizeof(MArray)=16 offset as buf's (enforced by buildSharedPool).
+    Type *bufTy = shape.gep->getSourceElementType();
+    Constant *poolI8 = ConstantExpr::getBitCast(pool, i8Ty->getPointerTo(0));
+    Constant *bufAt = ConstantExpr::getGetElementPtr(
+        i8Ty, poolI8, ConstantInt::get(i64Ty, baseOffset), true);
+    newBase = ConstantExpr::getBitCast(bufAt, bufTy->getPointerTo(0));
+    // Replay base casts (innermost first) so newBase matches the original
+    // GEP base operand's type/addrspace.
+    newBase = replayCasts(shape.baseCasts, newBase);
+    // Rebuild the GEP with the original indices on the cast-adjusted base.
+    SmallVector<Constant *, 4> idx;
+    for (Value *idxV : shape.gep->indices())
+      idx.push_back(cast<Constant>(idxV));
+    newBase = ConstantExpr::getGetElementPtr(bufTy, newBase, idx, true);
   }
   return replayCasts(shape.outerCasts, newBase);
 }
