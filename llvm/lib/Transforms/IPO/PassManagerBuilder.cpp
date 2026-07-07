@@ -56,7 +56,7 @@ cl::opt<bool> EnableCJGenericIntrinsicOpt(
     "enable-cj-generic-intrinsic-opt", cl::init(true), cl::Hidden,
     cl::desc("Enable cangjie generic intrinsics optimization"));
 cl::opt<bool> EnableCJGCInstrTransform("enable-cj-gcinstr-transform",
-                                       cl::Hidden, cl::init(false));
+                                       cl::Hidden, cl::init(true));
 static cl::opt<bool>
 UseGVNAfterVectorization("use-gvn-after-vectorization",
   cl::init(false), cl::Hidden,
