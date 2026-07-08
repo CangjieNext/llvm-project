@@ -64,7 +64,7 @@ static bool isGCPointerOrGlobalBase(const Value *V,
   if (isa<Argument>(V))
     return isGCPointerType(V->getType());
   if (auto *LI = dyn_cast<LoadInst>(V))
-    return isGCPointerOrGlobalBase(LI->getPointerOperand(), --MaxLookup);
+    return false;
   if (auto *II = dyn_cast<IntrinsicInst>(V)) {
     switch (II->getIntrinsicID()) {
     case Intrinsic::cj_gcread_ref:
