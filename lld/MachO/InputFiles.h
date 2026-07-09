@@ -304,6 +304,11 @@ public:
 
   std::unique_ptr<llvm::lto::InputFile> obj;
   bool forceHidden;
+  // Mirrors ELF's BitcodeFile::ExportSymbols: when false, symbols of this
+  // bitcode (that are not explicitly kept via llvm.used) are made hidden
+  // (privateExtern). Defaults to true (all visible); the driver's
+  // --visible-pkgs handling overrides it per bitcode after creation.
+  bool ExportSymbols = true;
 
 private:
   void parseLazy();
