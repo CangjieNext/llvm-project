@@ -298,12 +298,16 @@ class BitcodeFile final : public InputFile {
 public:
   explicit BitcodeFile(MemoryBufferRef mb, StringRef archiveName,
                        uint64_t offsetInArchive, bool lazy = false,
-                       bool forceHidden = false);
+                       bool forceHidden = false, bool exportSymbols = true);
   static bool classof(const InputFile *f) { return f->kind() == BitcodeKind; }
   void parse();
 
   std::unique_ptr<llvm::lto::InputFile> obj;
   bool forceHidden;
+  // Mirrors ELF's BitcodeFile::ExportSymbols: when false, symbols of this
+  // bitcode (that are not explicitly kept via llvm.used) are made hidden
+  // (privateExtern). Set by --visible-pkgs handling in the driver.
+  bool ExportSymbols;
 
 private:
   void parseLazy();

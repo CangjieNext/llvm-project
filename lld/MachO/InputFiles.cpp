@@ -2278,7 +2278,8 @@ static macho::Symbol *createBitcodeSymbol(const lto::InputFile::Symbol &objSym,
     break;
   }
   isPrivateExtern = isPrivateExtern || objSym.canBeOmittedFromSymbolTable() ||
-                    file.forceHidden;
+                    file.forceHidden ||
+                    (!file.ExportSymbols && !objSym.isUsed());
 
   if (objSym.isCommon())
     return symtab->addCommon(name, &file, objSym.getCommonSize(),
@@ -2293,8 +2294,10 @@ static macho::Symbol *createBitcodeSymbol(const lto::InputFile::Symbol &objSym,
 }
 
 BitcodeFile::BitcodeFile(MemoryBufferRef mb, StringRef archiveName,
-                         uint64_t offsetInArchive, bool lazy, bool forceHidden)
-    : InputFile(BitcodeKind, mb, lazy), forceHidden(forceHidden) {
+                         uint64_t offsetInArchive, bool lazy, bool forceHidden,
+                         bool exportSymbols)
+    : InputFile(BitcodeKind, mb, lazy), forceHidden(forceHidden),
+      ExportSymbols(exportSymbols) {
   this->archiveName = std::string(archiveName);
   std::string path = mb.getBufferIdentifier().str();
   // ThinLTO assumes that all MemoryBufferRefs given to it have a unique
