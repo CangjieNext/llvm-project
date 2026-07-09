@@ -247,11 +247,12 @@ static llvm::CachePruningPolicy getLTOCachePolicy(InputArgList &args) {
   return CHECK(parseCachePruningPolicy(ltoPolicy), "invalid LTO cache policy");
 }
 
-static bool collectVisiblePkgs(InputArgList &args) {
+static bool collectVisiblePkgs(InputArgList &args, StringSet<> &visiblePkgs,
+                               bool &hideAllVisiblePkgs) {
   for (const Arg *arg : args.filtered(OPT_visible_pkgs_eq)) {
     StringRef rawValue = arg->getValue();
     if (rawValue.empty()) {
-      config->hideAllVisiblePkgs = true;
+      hideAllVisiblePkgs = true;
       continue;
     }
 
@@ -263,7 +264,7 @@ static bool collectVisiblePkgs(InputArgList &args) {
         error("empty package name in --visible-pkgs");
         return false;
       }
-      config->visiblePkgs.insert(pkg);
+      visiblePkgs.insert(pkg);
     }
   }
   return true;
@@ -283,10 +284,15 @@ static Optional<StringRef> getBitcodePackageName(const BitcodeFile &file) {
   return pkgName;
 }
 
-static bool validateVisiblePkgModules() {
-  if (!config->hideAllVisiblePkgs && config->visiblePkgs.empty())
+static bool validateVisiblePkgModules(const StringSet<> &visiblePkgs,
+                                      bool hideAllVisiblePkgs) {
+  // No --visible-pkgs values and not hiding all: leave BitcodeFile's
+  // ExportSymbols at its construction default (true), i.e. all packages
+  // visible. Mirrors ELF's "no --visible-pkgs -> all true" branch.
+  if (!hideAllVisiblePkgs && visiblePkgs.empty())
     return true;
 
+  bool hasMatch = false;
   for (InputFile *file : inputFiles) {
     auto *bitcodeFile = dyn_cast<BitcodeFile>(file);
     if (!bitcodeFile)
@@ -298,16 +304,18 @@ static bool validateVisiblePkgModules() {
             "' for --visible-pkgs, expected <split-index>-<package-name>");
       return false;
     }
-    if (config->visiblePkgs.count(*pkgName) != 0) {
-      config->hasMatchedVisiblePkg = true;
-    }
+    bool isVisible = visiblePkgs.count(*pkgName) != 0;
+    bitcodeFile->ExportSymbols = isVisible;
+    hasMatch |= isVisible;
   }
-  return true;
-}
-
-static bool parseVisiblePkgs(InputArgList &args) {
-  if (!collectVisiblePkgs(args))
-    return false;
+  // Fallback: if the user listed packages but none matched any input bitcode,
+  // treat all as visible (same as ELF). --visible-pkgs= (empty/hideAll) does
+  // not trigger this fallback.
+  if (!hideAllVisiblePkgs && !hasMatch) {
+    for (InputFile *file : inputFiles)
+      if (auto *bitcodeFile = dyn_cast<BitcodeFile>(file))
+        bitcodeFile->ExportSymbols = true;
+  }
   return true;
 }
 
@@ -1395,8 +1403,6 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
   config->applicationExtension = args.hasFlag(
       OPT_application_extension, OPT_no_application_extension, false);
   config->exportDynamic = args.hasArg(OPT_export_dynamic);
-  if (!parseVisiblePkgs(args))
-    return false;
   config->forceLoadObjC = args.hasArg(OPT_ObjC);
   config->forceLoadSwift = args.hasArg(OPT_force_load_swift_libs);
   config->deadStripDylibs = args.hasArg(OPT_dead_strip_dylibs);
@@ -1626,7 +1632,15 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
 
     initLLVM(); // must be run before any call to addFile()
     createFiles(args);
-    if (!validateVisiblePkgModules())
+
+    // --visible-pkgs parsing + per-bitcode ExportSymbols resolution, in one
+    // place so visiblePkgs/hideAll are locals (mirrors ELF Driver.cpp).
+    bool hideAllVisiblePkgs = false;
+    StringSet<> visiblePkgs;
+    if (args.hasArg(OPT_visible_pkgs_eq) &&
+        !collectVisiblePkgs(args, visiblePkgs, hideAllVisiblePkgs))
+      return false;
+    if (!validateVisiblePkgModules(visiblePkgs, hideAllVisiblePkgs))
       return false;
 
     config->isPic = config->outputType == MH_DYLIB ||
