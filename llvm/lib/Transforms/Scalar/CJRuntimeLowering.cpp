@@ -873,14 +873,17 @@ private:
       if (TT.isARM())
         ElemTypes.push_back(IRB.getInt32Ty());
       ElemTypes.push_back(ST);
-      AI = IRB.CreateAlloca(StructType::get(C, ElemTypes));
+      StructType *AllocaTy = StructType::get(C, ElemTypes);
+      AI = IRB.CreateAlloca(AllocaTy);
       Value *BC = IRB.CreateBitCast(AI, IRB.getInt8PtrTy()->getPointerTo());
       Value *GVExpr = ConstantExpr::getBitCast(GV, IRB.getInt8PtrTy());
       IRB.CreateStore(GVExpr, BC);
-      uint64_t MemSize = DL.getStructLayout(ST)->getSizeInBytes();
-      // %x.payload = getelementptr i8*, %x.i, i32 1
-      // call @memset(%x.payload, 0, size)
-      Value *Data = IRB.CreateGEP(IRB.getInt8PtrTy(), BC, {IRB.getInt32(1)});
+      const StructLayout *AllocaSL = DL.getStructLayout(AllocaTy);
+      uint64_t HeaderSize = DL.getTypeAllocSize(TIType->getPointerTo()).getFixedSize();
+      uint64_t MemSize = AllocaSL->getSizeInBytes() - HeaderSize;
+      // %x.payload = getelementptr i8, %x.i, HeaderSize
+      // call @memset(%x.payload, 0, MemSize)
+      Value *Data = IRB.CreateGEP(IRB.getInt8Ty(), BC, {IRB.getInt32(HeaderSize)});
       IRB.SetInsertPoint(CI);
       IRB.CreateMemSet(Data, IRB.getInt8(0), MemSize, Align(8));
     }
