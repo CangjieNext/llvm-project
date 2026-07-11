@@ -2172,9 +2172,28 @@ void AArch64AsmPrinter::emitCJNewArrayFastPath(const MachineInstr &MI,
   MCSymbol *LFinish = OutContext.createTempSymbol("NewArrayFin", true);
   const MCSymbolRefExpr *FinExpr = MCSymbolRefExpr::create(LFinish, OutContext);
   MCInst BranchToFin = MCInstBuilder(B).addExpr(FinExpr);
-  MCOperand CallSlowPath;
-  MCInstLowering.lowerOperand(MOSym, CallSlowPath);
-  MCInst CallNewArraySlowPath = MCInstBuilder(BL).addOperand(CallSlowPath);
+  MCOperand CallSlowPathMCOp;
+  unsigned SlowCallOpcode;
+  switch (MOSym.getType()) {
+  case MachineOperand::MO_GlobalAddress:
+  case MachineOperand::MO_ExternalSymbol:
+    SlowCallOpcode = BL;
+    MCInstLowering.lowerOperand(MOSym, CallSlowPathMCOp);
+    break;
+  case MachineOperand::MO_Immediate:
+    CallSlowPathMCOp = MCOperand::createImm(MOSym.getImm());
+    SlowCallOpcode = BL;
+    break;
+  case MachineOperand::MO_Register:
+    CallSlowPathMCOp = MCOperand::createReg(MOSym.getReg());
+    SlowCallOpcode = BLR;
+    break;
+  default:
+    llvm_unreachable("Unsupported operand type in NewArrayFast call target");
+    break;
+  }
+  MCInst CallNewArraySlowPath =
+      MCInstBuilder(SlowCallOpcode).addOperand(CallSlowPathMCOp);
   OutStreamer->emitLabel(LFast);
   EmitToStreamer(*OutStreamer, GetAllocBuffer);
   EmitToStreamer(*OutStreamer, GetRegionPtr);
