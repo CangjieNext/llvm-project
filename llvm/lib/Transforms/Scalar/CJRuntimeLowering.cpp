@@ -26,6 +26,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/SafepointIRVerifier.h"
+#include "llvm/IR/ValueHandle.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Alignment.h"
@@ -812,6 +813,20 @@ private:
   // map intrinsic to runtime API function type.
   DenseMap<StringRef, Function *> RTFuncMap;
 
+  /// An exception constructor's trailing operand is only a type info when it
+  /// really has that type. Constructors such as `Ex(obj, msg)` take a String
+  /// there instead, and treating it as a type info builds a helper with the
+  /// wrong ABI.
+  bool isTypeInfoPtr(Type *Ty) const {
+    auto *PtrTy = dyn_cast<PointerType>(Ty);
+    if (!PtrTy)
+      return false;
+    auto *StructTy =
+        dyn_cast<StructType>(PtrTy->getNonOpaquePointerElementType());
+    return StructTy != nullptr && StructTy->hasName() &&
+           StructTy->getName().equals("TypeInfo");
+  }
+
   bool isStdCoreStringPtr(Type *Ty) const {
     auto *PtrTy = dyn_cast<PointerType>(Ty);
     if (!PtrTy)
@@ -941,6 +956,10 @@ private:
                               getExceptionTailHelperName(Kind), &M);
       initializeExceptionTailHelper(*Func, Caller);
       buildExceptionTailHelperBody(*Func, Kind, TypeInfoTy, MsgTy);
+    } else if (Func->getFunctionType() != FT) {
+      // One helper is shared per kind, so a call site whose types disagree with
+      // the helper already built cannot use it. Leave that tail alone.
+      return nullptr;
     }
     return Func;
   }
@@ -980,7 +999,16 @@ private:
     }
     if (CtorCall == nullptr || CtorCall->arg_empty() ||
         CtorCall->getArgOperand(0)->stripPointerCasts() != NewObjCall)
-      return false;
+           return false;
+
+    // The trailing TypeInfo operand of an exception constructor call is only
+    // meaningful when the frontend really passed the object's type info. Calls
+    // such as `Ex(obj, poison)` occur when the constructor never inspects it,
+    // and outlining that tail would hand the shared helper a poison value that
+    // it dereferences to read the allocation size.
+    auto IsConcreteTypeInfo = [](Value *V) {
+      return !isa<PoisonValue>(V) && !isa<UndefValue>(V);
+    };
 
     if (NewObjCall->getParent() != CtorCall->getParent() ||
         CtorCall->getParent() != ThrowCI->getParent())
@@ -992,7 +1020,9 @@ private:
     IRBuilder<> IRB(ThrowCI);
     Value *CtorPtr = CtorCall->getCalledOperand();
 
-    if (CtorCall->arg_size() == 2) {
+    if (CtorCall->arg_size() == 2 &&
+                isTypeInfoPtr(CtorCall->getArgOperand(1)->getType()) &&
+        IsConcreteTypeInfo(CtorCall->getArgOperand(1))) {
       TypeInfo = CtorCall->getArgOperand(1);
       Helper = getOrInsertExceptionTailFunc(
           ExceptionTailHelperKind::Ctor0,
@@ -1000,7 +1030,9 @@ private:
           *ThrowCI->getFunction());
       HelperArgs = {TypeInfo, CtorPtr};
     } else if (CtorCall->arg_size() == 3 &&
-               isStdCoreStringPtr(CtorCall->getArgOperand(1)->getType())) {
+               isStdCoreStringPtr(CtorCall->getArgOperand(1)->getType()) &&
+                              isTypeInfoPtr(CtorCall->getArgOperand(2)->getType()) &&
+               IsConcreteTypeInfo(CtorCall->getArgOperand(2))) {
       TypeInfo = CtorCall->getArgOperand(2);
       Helper = getOrInsertExceptionTailFunc(
           ExceptionTailHelperKind::CtorString,
@@ -1010,6 +1042,8 @@ private:
     } else {
       return false;
     }
+    if (Helper == nullptr)
+      return false;
 
     auto *HelperCall = IRB.CreateCall(Helper, HelperArgs);
     HelperCall->setDebugLoc(ThrowCI->getDebugLoc());
@@ -1017,7 +1051,11 @@ private:
 
     Instruction *ThrownArgInst =
         dyn_cast<Instruction>(ThrowCI->getArgOperand(0));
-    SmallVector<Instruction *, 4> DeadInstRoots;
+    // Track the roots weakly: the same instruction can feed several arguments,
+    // and deleting one root may recursively delete another. Raw pointers would
+    // dangle in both cases. The roots are only candidates, so the cleanup below
+    // must use the permissive variant that skips still-live entries.
+    SmallVector<WeakTrackingVH, 4> DeadInstRoots;
     for (Value *Arg : NewObjCall->args()) {
       if (auto *Inst = dyn_cast<Instruction>(Arg))
         DeadInstRoots.push_back(Inst);
@@ -1025,13 +1063,13 @@ private:
     ThrowCI->eraseFromParent();
     CtorCall->eraseFromParent();
     // Delete a now-dead throw-side cast chain before checking whether the
-    // allocation itself can be dropped as well.
+    // allocation itself can be dropped as well. This must stay ahead of the
+    // use_empty() test below, otherwise the cast keeps NewObjCall alive.
     if (ThrownArgInst != nullptr && ThrownArgInst != NewObjCall)
       RecursivelyDeleteTriviallyDeadInstructions(ThrownArgInst);
     if (NewObjCall->use_empty())
       NewObjCall->eraseFromParent();
-    for (Instruction *Inst : DeadInstRoots)
-      RecursivelyDeleteTriviallyDeadInstructions(Inst);
+    RecursivelyDeleteTriviallyDeadInstructionsPermissive(DeadInstRoots);
     return true;
   }
 
@@ -1242,6 +1280,7 @@ static void declareRuntimeFunc(Module &M) {
 
 static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
   bool Changed = false;
+
   EscapeScope ES(F);
 
   for (auto I = inst_begin(F); I != inst_end(F);) {
@@ -1368,7 +1407,8 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
     }
   }
   Lowering.finishAll();
-  Changed |= Lowering.extractExceptionTails(F);
+  // Throw-tail extraction deliberately does not run here. It happens after
+  // inlining, in CJExceptionTailOutline.
   return Changed;
 }
 
@@ -1401,6 +1441,24 @@ PreservedAnalyses CJRuntimeLowering::run(Module &M,
       Changed |= runtimeLoweringFunc(F, CJLowering);
     }
   }
+
+  if (!Changed)
+    return PreservedAnalyses::all();
+
+  PreservedAnalyses PA;
+  PA.preserve<TargetLibraryAnalysis>();
+  return PA;
+}
+
+PreservedAnalyses CJExceptionTailOutline::run(Module &M,
+                                              ModuleAnalysisManager &AM) const {
+  if (CJLTOOpt)
+    return PreservedAnalyses::all();
+
+  CJIntrinsicLowering Lowering(M);
+  bool Changed = false;
+  for (Function &F : M)
+    Changed |= Lowering.extractExceptionTails(F);
 
   if (!Changed)
     return PreservedAnalyses::all();
