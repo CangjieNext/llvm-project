@@ -26,6 +26,19 @@ class Module;
 struct CJRuntimeLowering : public PassInfoMixin<CJRuntimeLowering> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) const;
 };
+
+/// Shares the cold tail of a throw sequence between call sites.
+///
+/// This runs on its own, after inlining, rather than as part of
+/// CJRuntimeLowering. Shrinking a throw tail also shrinks the enclosing
+/// function body, and CJRuntimeLowering runs before the inliner, so doing the
+/// extraction there feeds the inliner a smaller cost estimate and makes it
+/// inline far more aggressively. On macro-heavy modules that cost more than the
+/// extraction saved. Running after inlining keeps the saving without disturbing
+/// the cost model, and sees the throw tails duplicated by inlining as well.
+struct CJExceptionTailOutline : public PassInfoMixin<CJExceptionTailOutline> {
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) const;
+};
 } // namespace llvm
 
 enum ClassType : unsigned {
