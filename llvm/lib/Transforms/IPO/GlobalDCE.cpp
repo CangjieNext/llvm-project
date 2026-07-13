@@ -512,65 +512,99 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
   return PreservedAnalyses::all();
 }
 
-CangjieDCE::GenericFuncInfo *
-CangjieDCE::insertInstance(const SmallVectorImpl<GlobalVariable *> &Path,
-                           GlobalVariable *FT = nullptr) {
-  GenericFuncInfo *CurRoot = this->Root;
-  for (GlobalVariable *GV : Path) {
-    auto It = CurRoot->Next.find(GV);
-    if (It != CurRoot->Next.end()) {
-      CurRoot = It->second;
-      continue;
+bool CangjieDCE::resolveVFEMetaTree(Metadata *MD, Module &M, VFETypeNode *&Out) {
+  Out = nullptr;
+  auto *N = dyn_cast_or_null<MDNode>(MD);
+  if (!N || N->getNumOperands() == 0)
+    return false;
+  auto *RootStr = dyn_cast<MDString>(N->getOperand(0).get());
+  if (!RootStr)
+    return false;
+  GlobalVariable *Root = M.getNamedGlobal(RootStr->getString());
+  if (!Root)
+    return false;
+
+  // Decode the generic instantiation metadata into a tree.
+  //
+  // Each MDNode encodes one instantiated type:
+  //   !{!"T.tt", arg0, arg1, ..., argN-1}
+  // operand(0) is the label of this node (a TypeTemplate ".tt" or a concrete
+  // TypeInfo ".ti" global name); operand(1..N) are the type arguments, each of
+  // which is an MDString (concrete leaf), the "$g" wildcard sentinel, or a
+  // nested MDNode (another instantiation, decoded recursively as a child).
+  // A label that cannot be resolved to a global in this module ("$g", or a
+  // name in another package) yields a WILDCARD node (GV == null, no children).
+  // Arity-0 !{!"A.ti"} and arity-1 !{!"A.tt", arg0} nodes decode the same way.
+  std::function<VFETypeNode *(Metadata *)> Walk = [&](Metadata *Cur)
+      -> VFETypeNode * {
+    NodeArena.emplace_back(std::make_unique<VFETypeNode>());
+    VFETypeNode *Node = NodeArena.back().get();
+    auto *ArgN = dyn_cast_or_null<MDNode>(Cur);
+    if (ArgN && ArgN->getNumOperands() > 0) {
+      if (auto *S = dyn_cast<MDString>(ArgN->getOperand(0).get())) {
+        if (S->getString() != "$g")
+          Node->GV = M.getNamedGlobal(S->getString());
+      }
+      for (unsigned I = 1, E = ArgN->getNumOperands(); I != E; ++I)
+        Node->Children.push_back(Walk(ArgN->getOperand(I).get()));
+      return Node;
     }
-    auto *GFI = new GenericFuncInfo;
-#ifndef NDEBUG
-    GFI->Ty = GV;
-#endif
-    GFI->Prev = CurRoot;
-    CurRoot->Next[GV] = GFI;
-    CurRoot = GFI;
-  }
-  CurRoot->IsValid = true;
-  if (FT)
-    CurRoot->FuncTables.insert(FT);
-  return CurRoot;
+    // A bare MDString argument (a concrete leaf) or an unexpected node:
+    // resolve what is resolvable, everything else stays a wildcard.
+    if (auto *S = dyn_cast_or_null<MDString>(Cur))
+      if (S->getString() != "$g")
+        Node->GV = M.getNamedGlobal(S->getString());
+    return Node;
+  };
+
+  NodeArena.emplace_back(std::make_unique<VFETypeNode>());
+  VFETypeNode *RootNode = NodeArena.back().get();
+  RootNode->GV = Root;
+  for (unsigned I = 1, E = N->getNumOperands(); I != E; ++I)
+    RootNode->Children.push_back(Walk(N->getOperand(I).get()));
+  Out = RootNode;
+  return true;
 }
 
-CangjieDCE::GenericFuncInfo *
-CangjieDCE::findTargetInstance(const SmallVectorImpl<GlobalVariable *> &Path) {
-  GenericFuncInfo *Root = this->Root;
-  for (GlobalVariable *GV : Path) {
-    auto It = Root->Next.find(GV);
-    if (It == Root->Next.end())
-      return nullptr;
-    Root = It->second;
-  }
-  return Root->IsValid ? Root : nullptr;
+bool CangjieDCE::matchVFETree(const VFETypeNode &P, const VFETypeNode &C) {
+  // A wildcard on either side absorbs the other side's entire subtree.
+  if (!P.GV || !C.GV)
+    return true;
+  if (P.GV != C.GV)
+    return false;
+  // Children unify pairwise over their common prefix; trailing extras are
+  // ignored, which covers bitcode whose trailing arguments were omitted.
+  unsigned N = std::min(P.Children.size(), C.Children.size());
+  for (unsigned I = 0; I != N; ++I)
+    if (!matchVFETree(*P.Children[I], *C.Children[I]))
+      return false;
+  return true;
 }
 
-CangjieDCE::GenericFuncInfo *CangjieDCE::resolveVFEMeta(Metadata *MD,
-                                                        Module &M) {
-  SmallVector<GlobalVariable *, 4> Path;
-  MDNode *N;
-  while ((N = dyn_cast_or_null<MDNode>(MD))) {
-    auto *GV = M.getNamedGlobal(
-        dyn_cast<MDString>(N->getOperand(0).get())->getString());
-    // Some vcall may encounter situations where the target types does not appear
-    // in the current module. In such cases, it can be ensured that the virtual
-    // function being called is definitely not defined in the current module.
-    if (!GV)
-      return nullptr;
-    Path.push_back(GV);
-    // Layout of MD:
-    //  {1.tt, [offset]}
-    //  {1.tt, 2.ti, [offset]}
-    //  {1.tt, !2, [offset]}, !2 = new MD
-    MD = N->getNumOperands() >= 2 ? N->getOperand(1)
-                                  : static_cast<Metadata *>(nullptr);
+void CangjieDCE::markFuncTableEntry(Function *Caller, const VFEPattern &P,
+                                    uint64_t Offset) {
+  Constant *C = P.FT->getInitializer();
+  unsigned N = C->getNumOperands();
+  if (P.HasCompilerInfo) {
+    assert(N % 2 == 0 && "front end generate error functable.");
+    N /= 2;
   }
-  if (auto *MDS = dyn_cast_or_null<MDString>(MD))
-    Path.push_back(M.getNamedGlobal(MDS->getString()));
-  return insertInstance(Path);
+  if (N <= Offset)
+    return;
+  if (auto *Callee = dyn_cast_or_null<Function>(
+          C->getOperand(Offset)->stripPointerCasts()))
+    DCE.GVDependencies[Caller].insert(Callee);
+  if (!P.HasCompilerInfo)
+    return;
+  assert(C->getNumOperands() > Offset + N &&
+         "front end generate error functable.");
+  // The pair slot holds the GetOuterTiFn companion of the entry at Offset.
+  // Anchor it on the FuncTable rather than the caller: pinning it on the
+  // caller would let any wildcard call site resurrect the companion's whole
+  // type chain, while the FT anchor ties it to the chain's own reachability.
+  if (auto *Pair = dyn_cast_or_null<GlobalValue>(
+          C->getOperand(Offset + N)->stripPointerCasts()))
+    DCE.GVDependencies[P.FT].insert(Pair);
 }
 
 // Obtain the function table FT that achieves P from C, return {C, P, FT}.
@@ -584,66 +618,14 @@ CangjieDCE::scanVTable(GlobalVariable &GV) {
       C->getOperand(ExtensionDefFieldType::ET_FUNC_TABLE)->stripPointerCasts());
   if (!FT)
     return {nullptr, nullptr, nullptr};
-  GlobalVariable *TI =
+  GlobalVariable *TIC =
       cast<GlobalVariable>(C->getOperand(ExtensionDefFieldType::ET_TARGET_TYPE)
                                ->stripPointerCasts());
   assert(GV.hasMetadata("inheritedType"));
-  GlobalVariable *IF = GV.getParent()->getNamedGlobal(
+  GlobalVariable *TIP = GV.getParent()->getNamedGlobal(
       dyn_cast<MDString>(GV.getMetadata("inheritedType")->getOperand(0))
           ->getString());
-  return {TI, IF, FT};
-}
-
-void CangjieDCE::updateDependencies(
-    Function *Caller,
-    DenseMap<GenericFuncInfo *, SmallSet<uint64_t, 4>> &Relation) {
-  auto Mark = [Caller, this](SmallPtrSetImpl<GlobalVariable *> &FTs,
-                             DenseMap<GlobalVariable *, bool> &HasCompilerInfo,
-                             uint64_t Offset) {
-    for (auto *FT : FTs) {
-      auto *C = FT->getInitializer();
-      unsigned N = C->getNumOperands();
-      if (HasCompilerInfo[FT]) {
-        assert(N % 2 == 0 && "front end generate error functable.");
-        N /= 2;
-      }
-      if (N <= Offset)
-        continue;
-      Function *Callee = dyn_cast_or_null<Function>(
-          C->getOperand(Offset)->stripPointerCasts());
-      if (!Callee)
-        continue;
-      assert(Callee != nullptr);
-      this->DCE.GVDependencies[Caller].insert(Callee);
-      if (!HasCompilerInfo[FT])
-        continue;
-      assert(C->getNumOperands() > Offset + N &&
-             "front end generate error functable.");
-      if (auto *Pair = dyn_cast_or_null<GlobalVariable>(
-              C->getOperand(Offset + N)->stripPointerCasts()))
-        this->DCE.GVDependencies[Caller].insert(Pair);
-    }
-  };
-  for (auto &[GFI, Offsets] : Relation) {
-    for (auto I : Offsets) {
-      auto *CurGFI = GFI;
-      // 1. Mark all child nodes.
-      SmallVector<GenericFuncInfo *, 8> Worklist = {CurGFI};
-      while (!Worklist.empty()) {
-        auto *Child = Worklist.pop_back_val();
-        for (auto [_, N] : Child->Next) {
-          Mark(N->FuncTables, N->HasCompilerInfo, I);
-          Worklist.push_back(N);
-        }
-      }
-      // 2. Recursively mark all parent nodes.
-      while (CurGFI != Root) {
-        auto &FTs = CurGFI->FuncTables;
-        CurGFI = CurGFI->Prev;
-        Mark(FTs, CurGFI->HasCompilerInfo, I);
-      }
-    }
-  }
+  return {TIC, TIP, FT};
 }
 
 void CangjieDCE::addCangjieVirtualFunctionDependencies(Module &M) {
@@ -656,33 +638,41 @@ void CangjieDCE::addCangjieVirtualFunctionDependencies(Module &M) {
   // Therefore, for VFE, it is only necessary to be concerned with the
   // visibility of the implemented type. As long as I is internal, optimization
   // can be performed.
+  // Phase A: register every VFE-safe ExtensionDef as a pattern under its
+  // interface root global.
   for (auto &GV : M.globals()) {
-    // If typeArgs >= 2, skip it.
+    // Only defs carrying VFE metadata participate.
     if (!GV.isCJMTable() || !GV.hasMetadata("inheritedType"))
       continue;
     if (!GV.hasInitializer())
       report_fatal_error("ExtensionDef must be initialized.");
-    auto [TIC, TII, FT] = scanVTable(GV);
-    if (!TIC || !TII || !FT)
+    auto [TIC, TIP, FT] = scanVTable(GV);
+    if (!TIC || !TIP || !FT)
       continue;
-    if (GlobalValue::isLocalLinkage(TII->getLinkage())) {
-      auto *GFI = resolveVFEMeta(GV.getMetadata("inheritedType"), M);
-      assert(GFI);
-      GFI->FuncTables.insert(FT);
-      GFI->HasCompilerInfo[FT] =
-          cast<ConstantInt>(
-              GV.getInitializer()->getOperand(ExtensionDefFieldType::ET_FLAG))
-              ->getZExtValue() != 0;
-      DCE.VFESafeVTables.insert(FT);
-    }
+    if (!GlobalValue::isLocalLinkage(TIP->getLinkage()))
+      continue;
+    VFETypeNode *Tree = nullptr;
+    bool Resolved = resolveVFEMetaTree(GV.getMetadata("inheritedType"), M, Tree);
+    (void)Resolved;
+    assert(Resolved && Tree && Tree->GV == TIP &&
+           "inheritedType root must match scanVTable's interface global.");
+    VFEPattern P;
+    P.Tree = Tree;
+    P.FT = FT;
+    P.HasCompilerInfo =
+        cast<ConstantInt>(
+            GV.getInitializer()->getOperand(ExtensionDefFieldType::ET_FLAG))
+            ->getZExtValue() != 0;
+    Patterns[TIP].push_back(std::move(P));
+    DCE.VFESafeVTables.insert(FT);
   }
 
+  // Phase B: match every llvm.cj.vfe.info call site against the patterns
+  // registered under its interface root, and mark the reachable function
+  // table entries as dependencies of the calling function.
   for (Function &F : M) {
-    // Value: offsets
-    DenseMap<GenericFuncInfo *, SmallSet<uint64_t, 4>> RelatedGV;
     for (auto &I : instructions(F)) {
-      // Look for @llvm.cj.vfe.info calls which carry VFE metadata as explicit
-      // intrinsic arguments (objType as metadata arg, offset as i64 arg).
+      // llvm.cj.vfe.info: arg 1 = objType metadata, arg 2 = FuncTable offset.
       auto *CI = dyn_cast<CallInst>(&I);
       if (!CI)
         continue;
@@ -694,32 +684,29 @@ void CangjieDCE::addCangjieVirtualFunctionDependencies(Module &M) {
       if (!MAV)
         report_fatal_error("objType is missing in llvm.cj.vfe.info");
       Metadata *TypeMD = MAV->getMetadata();
-      // Arg 2: i64 FuncTable offset.
       auto *OffsetCI = dyn_cast<ConstantInt>(CI->getArgOperand(2));
       if (!OffsetCI)
         report_fatal_error("FuncTable offset is missing in llvm.cj.vfe.info");
 
-      auto *GFI = resolveVFEMeta(TypeMD, M);
-      if (!GFI)
-        continue;
       uint64_t Offset = OffsetCI->getZExtValue();
-      RelatedGV[GFI].insert(Offset);
+      VFETypeNode *CallTree = nullptr;
+      if (!resolveVFEMetaTree(TypeMD, M, CallTree)) {
+        // The interface root names no global in this module (e.g. it is
+        // defined in another package): the interface dimension is undecidable
+        // here, so mark every registered pattern.
+        for (auto &RootEntry : Patterns)
+          for (const VFEPattern &P : RootEntry.second)
+            markFuncTableEntry(&F, P, Offset);
+        continue;
+      }
+      auto It = Patterns.find(CallTree->GV);
+      if (It == Patterns.end())
+        continue;
+      for (const VFEPattern &P : It->second)
+        if (matchVFETree(*P.Tree, *CallTree))
+          markFuncTableEntry(&F, P, Offset);
     }
-    updateDependencies(&F, RelatedGV);
   }
-}
-
-CangjieDCE::~CangjieDCE() {
-  SmallVector<GenericFuncInfo *> Worklist = {Root};
-  SmallVector<GenericFuncInfo *> Stack;
-  while (!Worklist.empty()) {
-    auto *GFI = Worklist.pop_back_val();
-    Stack.push_back(GFI);
-    for (auto [_, N] : GFI->Next)
-      Worklist.push_back(N);
-  }
-  while (!Stack.empty())
-    delete Stack.pop_back_val();
 }
 
 bool CangjieDCE::maybeFakeLiveOfTypeMeta(GlobalVariable *GVU,
