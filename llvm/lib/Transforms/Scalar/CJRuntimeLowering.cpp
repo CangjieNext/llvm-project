@@ -26,6 +26,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/SafepointIRVerifier.h"
+#include "llvm/IR/ValueHandle.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Alignment.h"
@@ -55,6 +56,9 @@ cl::opt<bool> EnableCJNewArrayFast("enable-cangjie-new-array-fastpath",
 cl::opt<bool> EnableCJExceptionTailExtract(
     "enable-cangjie-exception-tail-extract", cl::init(true),
     cl::ReallyHidden);
+cl::opt<bool> EnableCJStrInterpExtract(
+    "enable-cangjie-strinterp-extract", cl::init(true),
+    cl::ReallyHidden);
 } // namespace llvm
 
 namespace {
@@ -65,6 +69,13 @@ const static StringRef ExceptionCtor0MangleStr =
     "__cj_exception_tail_helper0";
 const static StringRef ExceptionCtorStringMangleStr =
     "__cj_exception_tail_helper_string";
+// StringBuilder string interpolation extraction constants.
+const static StringRef StringBuilderTIName = "std.core:StringBuilder.ti";
+const static StringRef StringBuilderInitPrefix = "_CNat13StringBuilder6<init>";
+const static StringRef StringBuilderAppendPrefix = "_CNat13StringBuilder6append";
+const static StringRef StringBuilderToStringName =
+    "_CNat13StringBuilder8toStringHv";
+const static StringRef StrInterpHelperPrefix = "__cj_si_";
 const static StringRef C2NStubStr = "CJ_MCC_C2NStub";
 const static StringRef N2CStubStr = "CJ_MCC_N2CStub";
 const static StringRef FinalizerStr = "CJ_MCC_OnFinalizerCreated";
@@ -715,6 +726,10 @@ public:
     return Changed;
   }
 
+  bool extractStringInterpSequences(Function &F) {
+    return extractStringInterpTails(F);
+  }
+
   bool loweringGCDiv(CallBase *CI) {
     IRBuilder<> Builder(CI);
     Type *TypeOfOperand = CI->getOperand(1)->getType();
@@ -1017,7 +1032,11 @@ private:
 
     Instruction *ThrownArgInst =
         dyn_cast<Instruction>(ThrowCI->getArgOperand(0));
-    SmallVector<Instruction *, 4> DeadInstRoots;
+    // Track the roots weakly: the same instruction can feed several arguments,
+    // and deleting one root may recursively delete another. Raw pointers would
+    // dangle in both cases. The roots are only candidates, so the cleanup below
+    // must use the permissive variant that skips still-live entries.
+    SmallVector<WeakTrackingVH, 4> DeadInstRoots;
     for (Value *Arg : NewObjCall->args()) {
       if (auto *Inst = dyn_cast<Instruction>(Arg))
         DeadInstRoots.push_back(Inst);
@@ -1025,14 +1044,407 @@ private:
     ThrowCI->eraseFromParent();
     CtorCall->eraseFromParent();
     // Delete a now-dead throw-side cast chain before checking whether the
-    // allocation itself can be dropped as well.
+    // allocation itself can be dropped as well. This must stay ahead of the
+    // use_empty() test below, otherwise the cast keeps NewObjCall alive.
     if (ThrownArgInst != nullptr && ThrownArgInst != NewObjCall)
       RecursivelyDeleteTriviallyDeadInstructions(ThrownArgInst);
     if (NewObjCall->use_empty())
       NewObjCall->eraseFromParent();
-    for (Instruction *Inst : DeadInstRoots)
-      RecursivelyDeleteTriviallyDeadInstructions(Inst);
+    RecursivelyDeleteTriviallyDeadInstructionsPermissive(DeadInstRoots);
     return true;
+  }
+
+  // ================================================================
+  // StringBuilder String Interpolation Extraction
+  // ================================================================
+  //
+  // Identifies the pattern:
+  //   %obj = call @llvm.cj.malloc.object(@"std.core:StringBuilder.ti", SIZE)
+  //   call @StringBuilder.<init>(%obj, CAPACITY, @StringBuilder.ti)
+  //   call @StringBuilder.appendXXX(sret, %obj, arg1, @StringBuilder.ti)
+  //   call @StringBuilder.appendYYY(sret, %obj, arg2, @StringBuilder.ti)
+  //   ...
+  //   call @StringBuilder.toString(sret_result, %obj, @StringBuilder.ti)
+  //
+  // And extracts the entire sequence into a shared helper function keyed
+  // by the ordered list of append function signatures. Multiple call sites
+  // with the same append signature sequence share the same helper.
+
+  /// Describes a single StringBuilder append call within a string
+  /// interpolation sequence.
+  struct AppendInfo {
+    CallInst *CI;        // The append CallInst
+    Function *AppendFn;  // The resolved append function
+    Value *DataArg;      // The "real" argument (string literal, i64, etc.)
+    Type *DataArgTy;     // Type of DataArg
+  };
+
+  /// Describes a complete StringBuilder interpolation sequence.
+  struct StringInterpSequence {
+    CallInst *MallocCall;
+    CallInst *InitCall;
+    SmallVector<AppendInfo, 6> Appends;
+    CallInst *ToStringCall;
+    Instruction *MemsetInst; // optional memset before toString
+  };
+
+  /// Try to collect a full interpolation sequence starting from a malloc call.
+  bool collectStringInterpSequence(CallInst *MallocCI,
+                                   StringInterpSequence &Seq) {
+    Seq.MallocCall = MallocCI;
+    Value *Obj = MallocCI; // the i8 addrspace(1)* StringBuilder object
+
+    // Quick early exit: if any user is outside this block, obj escapes.
+    for (User *U : Obj->users()) {
+      auto *I = dyn_cast<Instruction>(U);
+      if (!I || I->getParent() != MallocCI->getParent())
+        return false;
+    }
+
+    // Walk instructions forward from MallocCI to find the sequence in order.
+    Seq.InitCall = nullptr;
+    Seq.ToStringCall = nullptr;
+    Seq.MemsetInst = nullptr;
+    Seq.Appends.clear();
+
+    for (Instruction *I = MallocCI->getNextNode(); I != nullptr;
+         I = I->getNextNode()) {
+      // Skip debug intrinsics.
+      if (isa<DbgInfoIntrinsic>(I))
+        continue;
+
+      // Skip memset (compiler inserts memset before toString for sret).
+      if (auto *II = dyn_cast<IntrinsicInst>(I)) {
+        if (II->getIntrinsicID() == Intrinsic::cj_memset) {
+          Seq.MemsetInst = I;
+          continue;
+        }
+      }
+
+      // Skip non-call instructions (bitcast, alloca, store, etc.)
+      // that don't use Obj. 
+      auto *CI = dyn_cast<CallInst>(I);
+      if (!CI) {
+        // Check if this non-call instruction uses Obj directly.
+        bool usesObj = false;
+        for (unsigned i = 0; i < I->getNumOperands(); ++i) {
+          if (I->getOperand(i)->stripPointerCasts() == Obj) {
+            usesObj = true;
+            break;
+          }
+        }
+        if (usesObj)
+          return false; // Obj escapes through non-call instruction
+        continue; // safe to skip (bitcast, alloca, etc.)
+      }
+
+      Function *Callee = CI->getCalledFunction();
+      if (!Callee) {
+        // Indirect call — check if it uses Obj.
+        bool usesObj = false;
+        for (unsigned i = 0; i < CI->arg_size(); ++i) {
+          if (CI->getArgOperand(i)->stripPointerCasts() == Obj) {
+            usesObj = true;
+            break;
+          }
+        }
+        if (usesObj)
+          return false;
+        continue; // indirect call not involving Obj, skip
+      }
+
+      StringRef Name = Callee->getName();
+
+      // Check: is this a StringBuilder.<init> call?
+      if (Name.startswith(StringBuilderInitPrefix)) {
+        if (Seq.InitCall != nullptr)
+          return false; // duplicate init
+        // Verify Obj is arg 0.
+        if (CI->getArgOperand(0)->stripPointerCasts() != Obj)
+          return false;
+        Seq.InitCall = CI;
+        continue;
+      }
+
+      // Check: is this a StringBuilder.append* call?
+      if (Name.startswith(StringBuilderAppendPrefix)) {
+        if (Seq.InitCall == nullptr)
+          return false; // append before init
+        // append signature: (sret %Unit, obj, dataArg, ti)
+        // Obj is arg 1 (arg 0 is sret).
+        if (CI->arg_size() < 3)
+          return false;
+        if (CI->getArgOperand(1)->stripPointerCasts() != Obj)
+          return false;
+        AppendInfo AI;
+        AI.CI = CI;
+        AI.AppendFn = Callee;
+        AI.DataArg = CI->getArgOperand(2);
+        AI.DataArgTy = AI.DataArg->getType();
+        Seq.Appends.push_back(AI);
+        continue;
+      }
+
+      // Check: is this StringBuilder.toString?
+      if (Name.equals(StringBuilderToStringName)) {
+        if (Seq.InitCall == nullptr || Seq.Appends.empty())
+          return false;
+        // toString signature: (sret %String, obj, ti)
+        if (CI->getArgOperand(1)->stripPointerCasts() != Obj)
+          return false;
+        Seq.ToStringCall = CI;
+        break; // sequence is complete
+      }
+
+      // Any other call — check if it uses Obj at all.
+      bool usesObj = false;
+      for (unsigned i = 0; i < CI->arg_size(); ++i) {
+        if (CI->getArgOperand(i)->stripPointerCasts() == Obj) {
+          usesObj = true;
+          break;
+        }
+      }
+      if (usesObj)
+        return false; // unknown call using Obj
+    
+      continue;
+    }
+
+    // Validate: must have init + at least 1 append + toString.
+    if (!Seq.InitCall || Seq.Appends.empty() || !Seq.ToStringCall)
+      return false;
+    // Simple interpolation with only 1 append (e.g. "${x}") doesn't save size
+    // when accounting for the function abstracting overhead.
+    if (Seq.Appends.size() < 2)
+      return false;
+    
+    size_t ExpectedUses = 1 + Seq.Appends.size() + 1;
+    size_t ActualUses = 0;
+    for (User *U : Obj->users()) {
+      if (!isa<DbgInfoIntrinsic>(U))
+        ++ActualUses;
+    }
+    return ActualUses == ExpectedUses;
+  }
+
+  /// Build a unique key for this append signature sequence so that
+  /// call sites with the same pattern share the same helper function.
+  std::string buildSignatureKey(const StringInterpSequence &Seq) {
+    std::string Key;
+    raw_string_ostream OS(Key);
+    OS << "strinterp_" << Seq.Appends.size();
+    for (const auto &AI : Seq.Appends) {
+      OS << "_" << AI.AppendFn->getName();
+    }
+    OS.flush();
+    return Key;
+  }
+
+  /// Cache of generated helper functions keyed by signature.
+  DenseMap<StringRef, Function *> StrInterpHelperCache;
+  /// Owns the key strings for the cache.
+  SmallVector<std::string, 8> StrInterpKeyStorage;
+  /// Counter for generating short unique helper names.
+  unsigned StrInterpHelperCounter = 0;
+
+  /// Get or create a helper function for the given interpolation signature.
+  ///
+  /// The helper function has the signature:
+  ///   void __cj_si_N(sret %String* result, i64 capacity, arg1, arg2, ..., argN)
+  /// and its body does:
+  ///   %obj = malloc(StringBuilder.ti, 32)
+  ///   StringBuilder.<init>(obj, capacity, ti)
+  ///   StringBuilder.append*(sret, obj, arg1, ti)
+  ///   StringBuilder.append*(sret, obj, arg2, ti)
+  ///   ...
+  ///   StringBuilder.toString(sret result, obj, ti)
+  Function *getOrCreateStrInterpHelper(const StringInterpSequence &Seq,
+                                       const std::string &Key,
+                                       Function &Caller) {
+    StringRef KeyRef(Key);
+    auto It = StrInterpHelperCache.find(KeyRef);
+    if (It != StrInterpHelperCache.end())
+      return It->second;
+
+    // Build the function type:
+    // void (String* sret, i64 capacity, dataArg1Ty, dataArg2Ty, ...)
+    SmallVector<Type *, 8> ParamTys;
+    ParamTys.push_back(Seq.ToStringCall->getArgOperand(0)->getType());
+    ParamTys.push_back(Seq.InitCall->getArgOperand(1)->getType());
+    // data args from each append
+    for (const auto &AI : Seq.Appends) {
+      ParamTys.push_back(AI.DataArgTy);
+    }
+    auto *FT = FunctionType::get(Type::getVoidTy(C), ParamTys, false);
+
+    std::string FuncName =
+        (StrInterpHelperPrefix + Twine(StrInterpHelperCounter++)).str();
+    Function *Helper =
+        Function::Create(FT, GlobalValue::InternalLinkage, FuncName, &M);
+
+    // Set attributes: not inlined, optimize for size, gc = cangjie.
+    Helper->addFnAttr(Attribute::NoInline);
+    Helper->addFnAttr(Attribute::OptimizeForSize);
+    Helper->addFnAttr(Attribute::MinSize);
+    Helper->setGC("cangjie");
+    if (Caller.hasPersonalityFn())
+      Helper->setPersonalityFn(Caller.getPersonalityFn());
+
+    // Build the body.
+    BasicBlock *Entry = BasicBlock::Create(C, "entry", Helper);
+    IRBuilder<> IRB(Entry);
+
+    auto ArgIt = Helper->arg_begin();
+    Argument *SretResult = &*ArgIt++;
+    SretResult->setName("result");
+    auto *StringStructTy = cast<PointerType>(SretResult->getType())
+                               ->getNonOpaquePointerElementType();
+    Helper->addParamAttr(0, Attribute::getWithStructRetType(C, StringStructTy));
+    Helper->addParamAttr(0, Attribute::NoAlias);
+
+    Argument *Capacity = &*ArgIt++;
+    Capacity->setName("capacity");
+
+    SmallVector<Argument *, 8> DataArgs;
+    for (unsigned i = 0; i < Seq.Appends.size(); ++i) {
+      Argument *DA = &*ArgIt++;
+      DA->setName("arg" + Twine(i));
+      DataArgs.push_back(DA);
+    }
+
+    GlobalVariable *SBTI = M.getGlobalVariable(StringBuilderTIName);
+    assert(SBTI && "StringBuilder.ti must exist");
+
+    // 1. malloc(StringBuilder.ti, 32)
+    Value *MallocTIArg =
+        IRB.CreateBitCast(SBTI, Type::getInt8PtrTy(C));
+    Value *Obj = IRB.CreateCall(
+        Seq.MallocCall->getCalledFunction(),
+        {MallocTIArg, Seq.MallocCall->getArgOperand(1)});
+
+    // 2. StringBuilder.<init>(obj, capacity, ti)
+    IRB.CreateCall(Seq.InitCall->getCalledFunction(),
+                   {Obj, Capacity, SBTI});
+
+    // 3. append calls — reuse the same sret alloca for Unit return.
+    auto *UnitStructTy = cast<PointerType>(
+                             Seq.Appends[0].CI->getArgOperand(0)->getType())
+                             ->getNonOpaquePointerElementType();
+    Value *UnitSret = IRB.CreateAlloca(UnitStructTy);
+    for (unsigned i = 0; i < Seq.Appends.size(); ++i) {
+      IRB.CreateCall(Seq.Appends[i].AppendFn,
+                     {UnitSret, Obj, DataArgs[i], SBTI});
+    }
+
+    // 4. memset result + toString(sret result, obj, ti)
+    IRB.CreateCall(
+        Intrinsic::getDeclaration(&M, Intrinsic::cj_memset,
+                                  {Type::getInt8PtrTy(C)}),
+        {IRB.CreateBitCast(SretResult, Type::getInt8PtrTy(C)),
+         IRB.getInt8(0),
+         IRB.getInt64(M.getDataLayout().getTypeAllocSize(StringStructTy)),
+         IRB.getInt1(false)});
+    IRB.CreateCall(Seq.ToStringCall->getCalledFunction(),
+                   {SretResult, Obj, SBTI});
+    IRB.CreateRetVoid();
+
+    // Store in cache with absolutely stable memory address for the StringRef key
+    StrInterpKeyStorage.push_back(Key);
+    StrInterpHelperCache[StrInterpKeyStorage.back()] = Helper;
+
+    return Helper;
+  }
+
+  /// Replace a matched string interpolation sequence with a call to a
+  /// shared helper function.
+  bool replaceStringInterpWithHelper(StringInterpSequence &Seq,
+                                     Function &Caller) {
+    std::string Key = buildSignatureKey(Seq);
+    Function *Helper = getOrCreateStrInterpHelper(Seq, Key, Caller);
+
+    // Build call arguments: (sret result, capacity, dataArg1, dataArg2, ...)
+    SmallVector<Value *, 8> Args;
+    Args.push_back(Seq.ToStringCall->getArgOperand(0)); // sret result
+    Args.push_back(Seq.InitCall->getArgOperand(1));     // capacity
+    for (const auto &AI : Seq.Appends) {
+      Args.push_back(AI.DataArg);
+    }
+
+    // Insert the helper call just before the toString call position.
+    IRBuilder<> IRB(Seq.ToStringCall);
+    auto *HelperCall = IRB.CreateCall(Helper, Args);
+    HelperCall->setDebugLoc(Seq.ToStringCall->getDebugLoc());
+
+    // Collect potential dead roots (e.g. sret allocas for Unit) before erasing
+    // calls. Several appends usually share one sret alloca, so the roots must
+    // be tracked weakly: a duplicate entry, or a root deleted as a side effect
+    // of clearing another one, would leave a dangling raw pointer behind. The
+    // roots are only candidates, so the cleanup below must use the permissive
+    // variant that skips still-live entries.
+    SmallVector<WeakTrackingVH, 8> DeadInstRoots;
+    for (const auto &AI : Seq.Appends) {
+      if (auto *Inst = dyn_cast<Instruction>(AI.CI->getArgOperand(0)))
+        DeadInstRoots.push_back(Inst);
+    }
+
+    // Erase old instructions in reverse order.
+    Seq.ToStringCall->eraseFromParent();
+    if (Seq.MemsetInst)
+      Seq.MemsetInst->eraseFromParent();
+    for (auto it = Seq.Appends.rbegin(); it != Seq.Appends.rend(); ++it)
+      it->CI->eraseFromParent();
+    Seq.InitCall->eraseFromParent();
+    if (Seq.MallocCall->use_empty())
+      Seq.MallocCall->eraseFromParent();
+
+    // Clean up trivially dead instructions like the unused Unit allocas.
+    RecursivelyDeleteTriviallyDeadInstructionsPermissive(DeadInstRoots);
+
+    return true;
+  }
+
+  /// Main entry point: scan a function for StringBuilder interpolation
+  /// sequences and extract them into shared helpers.
+  bool extractStringInterpTails(Function &F) {
+    if (!EnableCJStrInterpExtract ||
+        Triple(F.getParent()->getTargetTriple()).isOSWindows() ||
+        isLTOCompileMode())
+      return false;
+
+    GlobalVariable *SBTI = M.getGlobalVariable(StringBuilderTIName);
+    if (!SBTI)
+      return false;
+
+    // Don't transform our own generated helpers.
+    if (F.getName().startswith(StrInterpHelperPrefix))
+      return false;
+
+    // Find all malloc.object calls that create StringBuilders.
+    SmallVector<CallInst *, 8> MallocCalls;
+    for (Instruction &I : instructions(F)) {
+      auto *CI = dyn_cast<CallInst>(&I);
+      if (!CI)
+        continue;
+      Function *Callee = CI->getCalledFunction();
+      if (!Callee)
+        continue;
+      if (CI->getIntrinsicID() != Intrinsic::cj_malloc_object)
+        continue;
+      if (CI->getArgOperand(0)->stripPointerCasts() != SBTI)
+        continue;
+      MallocCalls.push_back(CI);
+    }
+
+    bool Changed = false;
+    for (CallInst *MallocCI : MallocCalls) {
+      if (MallocCI->getParent() == nullptr)
+        continue; // already erased
+      StringInterpSequence Seq;
+      if (collectStringInterpSequence(MallocCI, Seq)) {
+        Changed |= replaceStringInterpWithHelper(Seq, F);
+      }
+    }
+    return Changed;
   }
 
   StringRef getRuntimeFuncName(CallBase *CI) const {
@@ -1242,6 +1654,11 @@ static void declareRuntimeFunc(Module &M) {
 
 static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
   bool Changed = false;
+
+  // Extract string interpolation sequences BEFORE intrinsic lowering,
+  // because we need to match llvm.cj.malloc.object intrinsic calls.
+  Changed |= Lowering.extractStringInterpSequences(F);
+
   EscapeScope ES(F);
 
   for (auto I = inst_begin(F); I != inst_end(F);) {
