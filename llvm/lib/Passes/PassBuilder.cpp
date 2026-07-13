@@ -1272,6 +1272,12 @@ Error PassBuilder::parseModulePass(ModulePassManager &MPM,
       }
     }
     auto addCangjiePasses = [&]() {
+      // Runs here rather than next to CJRuntimeLowering: extraction shrinks
+      // function bodies, and doing it before the inliner skews the inlining
+      // cost model. By this point inlining is done, and the throw tails it
+      // duplicated are visible too.
+      if (CJPipeline && !CangjieLTOPreOpt && L.getSpeedupLevel() > 0)
+        MPM.addPass(CJExceptionTailOutline());
       if (CJPipeline && L.getSpeedupLevel() == 2 && EnableCJGCInstrTransform) {
         MPM.addPass(createModuleToFunctionPassAdaptor(CJGCInstrRestore()));
       }
