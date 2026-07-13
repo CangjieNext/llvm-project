@@ -551,25 +551,46 @@ CangjieDCE::findTargetInstance(const SmallVectorImpl<GlobalVariable *> &Path) {
 CangjieDCE::GenericFuncInfo *CangjieDCE::resolveVFEMeta(Metadata *MD,
                                                         Module &M) {
   SmallVector<GlobalVariable *, 4> Path;
-  MDNode *N;
-  while ((N = dyn_cast_or_null<MDNode>(MD))) {
-    auto *GV = M.getNamedGlobal(
-        dyn_cast<MDString>(N->getOperand(0).get())->getString());
-    // Some vcall may encounter situations where the target types does not appear
-    // in the current module. In such cases, it can be ensured that the virtual
-    // function being called is definitely not defined in the current module.
-    if (!GV)
-      return nullptr;
-    Path.push_back(GV);
-    // Layout of MD:
-    //  {1.tt, [offset]}
-    //  {1.tt, 2.ti, [offset]}
-    //  {1.tt, !2, [offset]}, !2 = new MD
-    MD = N->getNumOperands() >= 2 ? N->getOperand(1)
-                                  : static_cast<Metadata *>(nullptr);
-  }
-  if (auto *MDS = dyn_cast_or_null<MDString>(MD))
-    Path.push_back(M.getNamedGlobal(MDS->getString()));
+
+  // DFS-flatten the generic instantiation metadata into a trie Path.
+  //
+  // Each MDNode encodes one instantiated type:
+  //   !{!"T.tt", arg0, arg1, ..., argN-1}
+  // operand(0) is the label of this node (a TypeTemplate ".tt" or a concrete
+  // TypeInfo ".ti" global name); operand(1..N) are the type arguments, each
+  // of which is itself either an MDString (concrete leaf) or a nested MDNode
+  // (another instantiation). The metadata is flattened depth-first so that a
+  // child instantiation's Path is a strict prefix-extension of its parent's,
+  // which is what the trie's up/down closure in updateDependencies relies on.
+  //
+  // A label that names no global in this module (including the "$g" sentinel
+  // used for an uninstantiated generic type parameter) contributes nothing to
+  // the Path: the call site is resolved at the nearest enclosing instantiated
+  // type, and the downward closure conservatively covers all specializations of
+  // that dimension. This only over-approximates (never under-approximates), so
+  // VFE stays correct.
+  //
+  // This decoder is a strict superset of the legacy right-leaning-list format:
+  //   arity-0 !{!"A.ti"}        -> Path = [A_TI]
+  //   arity-1 !{!"A.tt", arg0}  -> Path = [A_TT, <arg0>]
+  // are produced identically, so old frontend metadata still works unchanged.
+  std::function<void(Metadata *)> Walk = [&](Metadata *Cur) {
+    if (auto *N = dyn_cast_or_null<MDNode>(Cur)) {
+      if (auto *S = dyn_cast<MDString>(N->getOperand(0).get())) {
+        // Some vcall may encounter situations where the target type does not
+        // appear in the current module. In such cases it is guaranteed that
+        // the virtual function being called is not defined in this module.
+        if (auto *GV = M.getNamedGlobal(S->getString()))
+          Path.push_back(GV);
+      }
+      for (unsigned I = 1, E = N->getNumOperands(); I != E; ++I)
+        Walk(N->getOperand(I).get());
+    } else if (auto *S = dyn_cast_or_null<MDString>(Cur)) {
+      if (auto *GV = M.getNamedGlobal(S->getString()))
+        Path.push_back(GV);
+    }
+  };
+  Walk(MD);
   return insertInstance(Path);
 }
 
@@ -657,7 +678,9 @@ void CangjieDCE::addCangjieVirtualFunctionDependencies(Module &M) {
   // visibility of the implemented type. As long as I is internal, optimization
   // can be performed.
   for (auto &GV : M.globals()) {
-    // If typeArgs >= 2, skip it.
+    // Skip ExtensionDefs that do not carry VFE metadata. The frontend attaches
+    // "inheritedType" metadata for any arity (including arity >= 2 after the
+    // arity-lift change), so this only skips metadata-less / external defs.
     if (!GV.isCJMTable() || !GV.hasMetadata("inheritedType"))
       continue;
     if (!GV.hasInitializer())
