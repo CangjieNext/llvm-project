@@ -104,6 +104,19 @@ Defined *SymbolTable::addDefined(StringRef name, InputFile *file,
     // of a name conflict, we fall through to the replaceSymbol() call below.
   }
 
+  // Post-LTO: if we are replacing an Undefined that came from a BitcodeFile
+  // whose ExportSymbols is false, force the new Defined to be privateExtern.
+  // The privateExtern flag set in createBitcodeSymbol was lost during
+  // replaceSymbol<Undefined> in BitcodeCompiler::add(), so we recover it here.
+  if (!isPrivateExtern && !wasInserted) {
+    if (auto *undef = dyn_cast<Undefined>(s)) {
+      if (auto *bf = dyn_cast_or_null<BitcodeFile>(undef->getFile())) {
+        if (!bf->ExportSymbols)
+          isPrivateExtern = true;
+      }
+    }
+  }
+
   // With -flat_namespace, all extern symbols in dylibs are interposable.
   // FIXME: Add support for `-interposable` (PR53680).
   bool interposable = config->namespaceKind == NamespaceKind::flat &&

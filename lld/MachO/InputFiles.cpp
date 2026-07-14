@@ -2278,7 +2278,8 @@ static macho::Symbol *createBitcodeSymbol(const lto::InputFile::Symbol &objSym,
     break;
   }
   isPrivateExtern = isPrivateExtern || objSym.canBeOmittedFromSymbolTable() ||
-                    file.forceHidden;
+                    file.forceHidden ||
+                    (!file.ExportSymbols && !objSym.isUsed());
 
   if (objSym.isCommon())
     return symtab->addCommon(name, &file, objSym.getCommonSize(),
