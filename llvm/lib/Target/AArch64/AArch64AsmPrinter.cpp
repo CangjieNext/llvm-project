@@ -41,6 +41,7 @@
 #include "llvm/CodeGen/MachineModuleInfoImpls.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/StackMaps.h"
+#include "llvm/Support/CodeGen.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugInfoMetadata.h"
@@ -265,6 +266,7 @@ private:
   int emitCJSafepointInlineCall(unsigned Index) override;
   void emitGcStateCheck() override;
   void emitGetCJTLSData(int64_t Offset);
+  void emitCangjieRuntimeCall(MCSymbol *Sym);
 };
 
 } // end anonymous namespace
@@ -1249,6 +1251,26 @@ void AArch64AsmPrinter::emitCJStackCheck(const MachineInstr &MI) {
   OutStreamer->emitLabel(EndSym);
 }
 
+void AArch64AsmPrinter::emitCangjieRuntimeCall(MCSymbol *Sym) {
+  using namespace AArch64;
+  if (TM.getCodeModel() == CodeModel::Large &&
+      getSubtargetInfo().getTargetTriple().isOSBinFormatMachO()) {
+    EmitToStreamer(*OutStreamer, MCInstBuilder(ADRP).addReg(X16).addExpr(
+        MCSymbolRefExpr::create(Sym, MCSymbolRefExpr::VK_GOTPAGE, OutContext)));
+    EmitToStreamer(*OutStreamer,
+                   MCInstBuilder(LDRXui)
+                       .addReg(X16)
+                       .addReg(X16)
+                       .addExpr(MCSymbolRefExpr::create(
+                           Sym, MCSymbolRefExpr::VK_GOTPAGEOFF, OutContext))
+                       .addImm(0));
+    EmitToStreamer(*OutStreamer, MCInstBuilder(BLR).addReg(X16));
+  } else {
+    EmitToStreamer(*OutStreamer, MCInstBuilder(BL).addExpr(
+        MCSymbolRefExpr::create(Sym, OutContext)));
+  }
+}
+
 // Note: emit specific inst should update inst size info in
 // AArch64InstrInfo::getInstSizeInBytes for AArch64 at the same time
 // >>>>>>>>>>>>>>>>>>>>>>> disable stackgrow
@@ -1278,18 +1300,14 @@ int AArch64AsmPrinter::emitStackOverflowCall(const MachineInstr &MI) {
     } else {
       Sym = Ctx.getOrCreateSymbol("CJ_MCC_ThrowStackOverflowError");
     }
-    MCInst BLToSOFE = MCInstBuilder(BL).addExpr(
-        MCSymbolRefExpr::create(Sym, MCSymbolRefExpr::VK_None, Ctx));
     EmitToStreamer(*OutStreamer, Mov);
-    EmitToStreamer(*OutStreamer, BLToSOFE);
+    emitCangjieRuntimeCall(Sym);
     return 3; // 3: instruction nums.
   } else {    // stack grow
     MCInst MovX9 = MCInstBuilder(MOVZXi).addReg(X9).addImm(LeftSize).addImm(0);
     MCSymbol *Sym = Ctx.getOrCreateSymbol("CJ_MCC_StackGrowStub");
-    MCInst BLToCall = MCInstBuilder(BL).addExpr(
-        MCSymbolRefExpr::create(Sym, MCSymbolRefExpr::VK_None, Ctx));
     EmitToStreamer(*OutStreamer, MovX9);
-    EmitToStreamer(*OutStreamer, BLToCall);
+    emitCangjieRuntimeCall(Sym);
     SM.recordCJStackMap(MI, true);
 
     // revert sp
@@ -2172,9 +2190,11 @@ void AArch64AsmPrinter::emitCJNewArrayFastPath(const MachineInstr &MI,
   MCSymbol *LFinish = OutContext.createTempSymbol("NewArrayFin", true);
   const MCSymbolRefExpr *FinExpr = MCSymbolRefExpr::create(LFinish, OutContext);
   MCInst BranchToFin = MCInstBuilder(B).addExpr(FinExpr);
-  MCOperand CallSlowPath;
-  MCInstLowering.lowerOperand(MOSym, CallSlowPath);
-  MCInst CallNewArraySlowPath = MCInstBuilder(BL).addOperand(CallSlowPath);
+  MCOperand CallSlowPathMCOp;
+  MCInstLowering.lowerOperand(MOSym, CallSlowPathMCOp);
+  unsigned SlowCallOpcode = MOSym.isReg() ? BLR : BL;
+  MCInst CallNewArraySlowPath =
+      MCInstBuilder(SlowCallOpcode).addOperand(CallSlowPathMCOp);
   OutStreamer->emitLabel(LFast);
   EmitToStreamer(*OutStreamer, GetAllocBuffer);
   EmitToStreamer(*OutStreamer, GetRegionPtr);
@@ -2283,9 +2303,7 @@ void AArch64AsmPrinter::emitMetadataAddress() {
     EmitToStreamer(*OutStreamer, Ldr2);
     MCSymbol *FuncSym =
         OutContext.getOrCreateSymbol("_CJ_MRT_PreInitializePackage");
-    MCInst BLToCall = MCInstBuilder(AArch64::BL)
-                          .addExpr(MCSymbolRefExpr::create(FuncSym, Ctx));
-    EmitToStreamer(*OutStreamer, BLToCall);
+    emitCangjieRuntimeCall(FuncSym);
   }
 }
 

@@ -101,6 +101,18 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
   if (Callee == nullptr) {
     return 0;
   }
+  // Under large code model on MachO, emitCangjieRuntimeCall emits ADRP+LDR+BLR
+  // (12B) instead of BL (4B) for runtime calls embedded in the inline lowering
+  // of some cangjie sentinels (e.g. CJStackCheck -> emitStackOverflowCall).
+  // Add the +8B delta under large MachO so jump-table offset computation
+  // (AArch64CompressJumpTables) stays conservative: over-estimate is safe,
+  // under-estimate risks picking too-narrow jump-table entry width.
+  const TargetMachine &TM = MI.getMF()->getTarget();
+  const unsigned GotExtra =
+      (TM.getCodeModel() == CodeModel::Large &&
+       TM.getTargetTriple().isOSBinFormatMachO())
+          ? 8
+          : 0;
   if (Callee->isCangjieSafePoint()) {
     // If Jmp size beyond the 19bit, emitting safepoint on following inst
     // instead of emit it at the end of the function.
@@ -112,7 +124,9 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
     }
   }
   if (Callee->getName().isCJStackCheck()) {
-    return 12; // 12: 12 bytes(3 insts) for safepoint call
+    // emitCJStackCheck -> emitStackOverflowCall uses emitCangjieRuntimeCall,
+    // which under large MachO expands BL to ADRP+LDR+BLR (+8B).
+    return 12 + GotExtra; // 12B base + GOT-call expansion under large MachO
   }
   if (Callee->getName().isGetGCPhase()) {
     return 4; // 4: 4 bytes(1 insts) for GetGCPhase call

@@ -6880,7 +6880,12 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
         Subtarget->classifyGlobalFunctionReference(GV, getTargetMachine());
     // safepoint stub is local, and safepoint call will still be got load.
     if (CalleeFunc->isCangjieSafepointStub() ||
-        CalleeFunc->isCangjieSafePoint())
+        CalleeFunc->isCangjieSafePoint() ||
+        CalleeFunc->isCangjieStackCheck() ||
+        CalleeFunc->getName().isGetGCPhase() ||
+        CalleeFunc->isGetCJThreadId() ||
+        CalleeFunc->getName().isSetDebugLocation() ||
+        CalleeFunc->getName().equals("CJ_MRT_PreInitializePackage"))
       OpFlags = AArch64II::MO_NO_FLAG;
     if (OpFlags & AArch64II::MO_GOT) {
       Callee = DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, OpFlags);
