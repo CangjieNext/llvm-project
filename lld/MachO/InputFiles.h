@@ -304,6 +304,7 @@ public:
 
   std::unique_ptr<llvm::lto::InputFile> obj;
   bool forceHidden;
+  bool ExportSymbols = true;
 
 private:
   void parseLazy();

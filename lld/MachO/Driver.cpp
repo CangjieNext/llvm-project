@@ -247,11 +247,13 @@ static llvm::CachePruningPolicy getLTOCachePolicy(InputArgList &args) {
   return CHECK(parseCachePruningPolicy(ltoPolicy), "invalid LTO cache policy");
 }
 
-static bool collectVisiblePkgs(InputArgList &args) {
+static bool collectVisiblePkgs(InputArgList &args,
+                               llvm::StringSet<> &visiblePkgs,
+                               bool &hideAllVisiblePkgs) {
   for (const Arg *arg : args.filtered(OPT_visible_pkgs_eq)) {
     StringRef rawValue = arg->getValue();
     if (rawValue.empty()) {
-      config->hideAllVisiblePkgs = true;
+      hideAllVisiblePkgs = true;
       continue;
     }
 
@@ -263,7 +265,7 @@ static bool collectVisiblePkgs(InputArgList &args) {
         error("empty package name in --visible-pkgs");
         return false;
       }
-      config->visiblePkgs.insert(pkg);
+      visiblePkgs.insert(pkg);
     }
   }
   return true;
@@ -283,33 +285,38 @@ static Optional<StringRef> getBitcodePackageName(const BitcodeFile &file) {
   return pkgName;
 }
 
-static bool validateVisiblePkgModules() {
-  if (!config->hideAllVisiblePkgs && config->visiblePkgs.empty())
+static bool validateVisiblePkgModules(const llvm::StringSet<> &visiblePkgs,
+                                       bool hideAllVisiblePkgs) {
+  if (!hideAllVisiblePkgs && visiblePkgs.empty())
     return true;
 
+  bool hasVisiblePkgMatch = false;
   for (InputFile *file : inputFiles) {
-    auto *bitcodeFile = dyn_cast<BitcodeFile>(file);
-    if (!bitcodeFile)
+    auto *bf = dyn_cast<BitcodeFile>(file);
+    if (!bf)
       continue;
-    Optional<StringRef> pkgName = getBitcodePackageName(*bitcodeFile);
+    Optional<StringRef> pkgName = getBitcodePackageName(*bf);
     if (!pkgName) {
       error("invalid Cangjie bitcode module identifier '" +
-            bitcodeFile->obj->getSourceFileName() +
+            bf->obj->getSourceFileName() +
             "' for --visible-pkgs, expected <split-index>-<package-name>");
       return false;
     }
-    if (config->visiblePkgs.count(*pkgName) != 0) {
-      config->hasMatchedVisiblePkg = true;
-    }
+    bool isVisible = visiblePkgs.count(*pkgName) != 0;
+    bf->ExportSymbols = isVisible;
+    hasVisiblePkgMatch |= isVisible;
+  }
+
+  // Fallback: specified --visible-pkgs but no package matched and not hideAll
+  // → all visible.
+  if (!hideAllVisiblePkgs && !hasVisiblePkgMatch) {
+    for (InputFile *file : inputFiles)
+      if (auto *bf = dyn_cast<BitcodeFile>(file))
+        bf->ExportSymbols = true;
   }
   return true;
 }
 
-static bool parseVisiblePkgs(InputArgList &args) {
-  if (!collectVisiblePkgs(args))
-    return false;
-  return true;
-}
 
 // What caused a given library to be loaded. Only relevant for archives.
 // Note that this does not tell us *how* we should load the library, i.e.
@@ -590,13 +597,23 @@ static void initLLVM() {
   InitializeAllAsmParsers();
 }
 
-static void compileBitcodeFiles() {
+static void compileBitcodeFiles(const llvm::StringSet<> &visiblePkgs,
+                                 bool hideAllVisiblePkgs) {
   TimeTraceScope timeScope("LTO");
   auto *lto = make<BitcodeCompiler>();
-  for (InputFile *file : inputFiles)
-    if (auto *bitcodeFile = dyn_cast<BitcodeFile>(file))
-      if (!file->lazy)
-        lto->add(*bitcodeFile);
+  for (InputFile *file : inputFiles) {
+    if (auto *bf = dyn_cast<BitcodeFile>(file)) {
+      if (file->lazy)
+        continue;
+      // Recompute ExportSymbols here because archive members may have been
+      // extracted after validateVisiblePkgModules() ran.
+      if (!hideAllVisiblePkgs && !visiblePkgs.empty()) {
+        if (auto pkgName = getBitcodePackageName(*bf))
+          bf->ExportSymbols = visiblePkgs.count(*pkgName) != 0;
+      }
+      lto->add(*bf);
+    }
+  }
 
   for (ObjFile *file : lto->compile())
     inputFiles.insert(file);
@@ -1395,7 +1412,9 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
   config->applicationExtension = args.hasFlag(
       OPT_application_extension, OPT_no_application_extension, false);
   config->exportDynamic = args.hasArg(OPT_export_dynamic);
-  if (!parseVisiblePkgs(args))
+  llvm::StringSet<> visiblePkgs;
+  bool hideAllVisiblePkgs = false;
+  if (!collectVisiblePkgs(args, visiblePkgs, hideAllVisiblePkgs))
     return false;
   config->forceLoadObjC = args.hasArg(OPT_ObjC);
   config->forceLoadSwift = args.hasArg(OPT_force_load_swift_libs);
@@ -1626,7 +1645,7 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
 
     initLLVM(); // must be run before any call to addFile()
     createFiles(args);
-    if (!validateVisiblePkgModules())
+    if (!validateVisiblePkgModules(visiblePkgs, hideAllVisiblePkgs))
       return false;
 
     config->isPic = config->outputType == MH_DYLIB ||
@@ -1664,7 +1683,7 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     for (const Arg *arg : args.filtered(OPT_mllvm))
       parseClangOption(arg->getValue(), arg->getSpelling());
 
-    compileBitcodeFiles();
+    compileBitcodeFiles(visiblePkgs, hideAllVisiblePkgs);
     if (config->ltoEmitObjOnly)
       return !errorCount();
     replaceCommonSymbols();

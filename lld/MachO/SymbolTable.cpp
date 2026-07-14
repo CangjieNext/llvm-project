@@ -104,6 +104,28 @@ Defined *SymbolTable::addDefined(StringRef name, InputFile *file,
     // of a name conflict, we fall through to the replaceSymbol() call below.
   }
 
+  // Post-LTO: if we are replacing an Undefined that came from a BitcodeFile
+  // whose ExportSymbols is false, force the new Defined to be privateExtern.
+  // The privateExtern flag set in createBitcodeSymbol was lost during
+  // replaceSymbol<Undefined> in BitcodeCompiler::add(), so we recover it here.
+  if (!isPrivateExtern && !wasInserted) {
+    if (auto *undef = dyn_cast<Undefined>(s)) {
+      if (auto *bf = dyn_cast_or_null<BitcodeFile>(undef->getFile())) {
+        message("addDefined: symbol=" + name + " old=Undefined bf->ExportSymbols=" +
+                Twine(bf->ExportSymbols));
+        if (!bf->ExportSymbols)
+          isPrivateExtern = true;
+      } else {
+        message("addDefined: symbol=" + name + " old=Undefined but file is not BitcodeFile");
+      }
+    } else {
+      message("addDefined: symbol=" + name + " old is not Undefined, kind=" +
+              Twine(s->kind()));
+    }
+  } else if (wasInserted) {
+    message("addDefined: symbol=" + name + " wasInserted=true (first time)");
+  }
+
   // With -flat_namespace, all extern symbols in dylibs are interposable.
   // FIXME: Add support for `-interposable` (PR53680).
   bool interposable = config->namespaceKind == NamespaceKind::flat &&
@@ -114,6 +136,9 @@ Defined *SymbolTable::addDefined(StringRef name, InputFile *file,
       isPrivateExtern, /*includeInSymtab=*/true, isThumb,
       isReferencedDynamically, noDeadStrip, overridesWeakDef,
       isWeakDefCanBeHidden, interposable);
+  message("addDefined: symbol=" + name + " final privateExtern=" +
+          (defined->privateExtern ? "true" : "false") +
+          " isExternal=" + (defined->isExternal() ? "true" : "false"));
   return defined;
 }
 
