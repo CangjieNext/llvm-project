@@ -4169,7 +4169,9 @@ bool AsmPrinter::tryEmitCangjieSpecificCallByMOSym(const MachineInstr *MI,
     return true;
   }
   if ((FuncName.equals("CJ_MCC_NewObject") ||
-       FuncName.equals("CJ_MCC_NewFinalizer")) &&
+       FuncName.equals("CJ_MCC_NewObjectFast") ||
+       FuncName.equals("CJ_MCC_NewFinalizer") ||
+       FuncName.equals("CJ_MCC_NewFinalizerFast")) &&
       EnableCJNewObjFast) {
     emitMccNewObjectFastPath(MI, MOSym, Opcode);
     return true;

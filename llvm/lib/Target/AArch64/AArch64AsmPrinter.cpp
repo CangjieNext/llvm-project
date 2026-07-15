@@ -2104,7 +2104,13 @@ void AArch64AsmPrinter::emitMccNewObjectForCopyGC(
   }
   EmitToStreamer(*OutStreamer, BranchToFin);
   OutStreamer->emitLabel(LSlow);
-  EmitToStreamer(*OutStreamer, Param.CallNewObjSlowPath);
+  if (TM.getCodeModel() == CodeModel::Large &&
+      getSubtargetInfo().getTargetTriple().isOSBinFormatMachO()) {
+    MCSymbol *SlowSym = getSymbol(Param.MOSym.getGlobal());
+    emitCangjieRuntimeCall(SlowSym);
+  } else {
+    EmitToStreamer(*OutStreamer, Param.CallNewObjSlowPath);
+  }
   OutStreamer->emitLabel(Param.LFin);
 }
 
