@@ -245,6 +245,11 @@ protected:
                                       const MachineOperand &) {};
   virtual void emitCJThrowException(const MachineInstr *MI,
                                     const MachineOperand &, unsigned) {};
+  /// emitCangjieRuntimeCall - emit a call to a cangjie runtime symbol. Under
+  /// large code model + MachO it is an indirect ADRP+LDR+BLR (no ±128MB bl
+  /// range limit); otherwise a direct BL. Used for cangjie runtime calls that
+  /// must stay reachable in huge binaries.
+  virtual void emitCangjieRuntimeCall(MCSymbol *Sym) {}
   const Function *tryGetCangjieStubCallNativeFunc(const MachineInstr *MI,
                                                   const Function *Callee) const;
   virtual void emitCangjieCallStubInstImpl(const MachineInstr *MI,

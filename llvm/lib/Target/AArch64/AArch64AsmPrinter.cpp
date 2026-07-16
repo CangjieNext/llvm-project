@@ -266,7 +266,7 @@ private:
   int emitCJSafepointInlineCall(unsigned Index) override;
   void emitGcStateCheck() override;
   void emitGetCJTLSData(int64_t Offset);
-  void emitCangjieRuntimeCall(MCSymbol *Sym);
+  void emitCangjieRuntimeCall(MCSymbol *Sym) override;
 };
 
 } // end anonymous namespace
