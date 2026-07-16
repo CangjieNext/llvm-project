@@ -78,6 +78,11 @@ AArch64InstrInfo::AArch64InstrInfo(const AArch64Subtarget &STI)
 /// 0 means MI is not a Cangjie Specific Call.
 unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
     const MachineInstr &MI) const {
+  // Feeds BranchRelaxation (via getInstSizeInBytes -> computeBlockSize). Sizes
+  // here MUST match what AsmPrinter/MC actually emit, otherwise
+  // BranchRelaxation under-sizes the function, misses out-of-range TBZ/TBNZ,
+  // and the MC layer fails with "fixup value out of range" (TBZ/TBNZ are
+  // imm14, ±32KB).
   if (!MI.isCall()) {
     return 0;
   }
@@ -123,6 +128,13 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
     // emitCJStackCheck -> emitStackOverflowCall uses emitCangjieRuntimeCall,
     // which under large MachO expands BL to ADRP+LDR+BLR (+8B).
     return 12 + GotExtra; // 12B base + GOT-call expansion under large MachO
+  }
+  if (Callee->getName() == "CJ_MCC_NewObjectFast" ||
+      Callee->getName() == "CJ_MCC_NewFinalizerFast") {
+    // tryEmitCangjieSpecificCallByMOSym emits these via emitCangjieRuntimeCall:
+    // plain BL (4B) / ADRP+LDR+BLR (12B) under Large+MachO. 4+GotExtra matches
+    // so BranchRelaxation sizes the function correctly (no tbz overflow).
+    return 4 + GotExtra;
   }
   if (Callee->getName().isGetGCPhase()) {
     return 4; // 4: 4 bytes(1 insts) for GetGCPhase call

@@ -4168,6 +4168,15 @@ bool AsmPrinter::tryEmitCangjieSpecificCallByMOSym(const MachineInstr *MI,
     emitCJThrowException(MI, MOSym, Opcode);
     return true;
   }
+  if (FuncName.equals("CJ_MCC_NewObjectFast") ||
+      FuncName.equals("CJ_MCC_NewFinalizerFast")) {
+    // bl -> blr (ADRP+LDR+BLR via GOT, no ±128MB bl range limit) under
+    // Large+MachO, plain BL otherwise. No inline fast path. Sized as
+    // 4+GotExtra in getCangjieSpecificCallInstSizeInBytes so BranchRelaxation
+    // sizes the function correctly (mirrors the CJStackCheck handling).
+    emitCangjieRuntimeCall(getSymbol(Callee));
+    return true;
+  }
   if ((FuncName.equals("CJ_MCC_NewObject") ||
        FuncName.equals("CJ_MCC_NewFinalizer")) &&
       EnableCJNewObjFast) {
