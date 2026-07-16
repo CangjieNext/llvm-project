@@ -1099,10 +1099,36 @@ void StructLiveAnalysis::visitMemoryStore(StoreInst *SI,
 
   Type *ValType = SI->getValueOperand()->getType();
   if (ValType->isPointerTy() || ValType->isIntegerTy(64)) { // 64bit
-    FieldInfo *Field = getFieldInfoByValue(Ptr);
-    Value *Base = Field->V;
-    if (isa<AllocaInst>(Base) || isa<Argument>(Base))
-      AllocaDefs.insert(Field);
+    // On 32-bit targets an i64/pointer store may span multiple struct fields
+    // (e.g. arm32 {TypeInfo* @0, i32 @4, GC* @8} stores `i64 0` through a
+    // pointer to the i32 field @4, writing 8 bytes that cover the GC field
+    // @8). Kill every GC field in [offset, offset+size) rather than only the
+    // single field the pointer nominally points to; otherwise the GC field is
+    // never killed, liveness back-propagates it as live to an earlier
+    // safepoint where the slot is still uninitialized, and the GC scans stale
+    // data (SIGSEGV on a null gctib). On 64-bit targets the pointer-sized
+    // store aligns to a single field, so the range and single-field cases
+    // coincide and we keep the original behavior unchanged.
+    if (DL.getPointerSizeInBits() == 32) {
+      APInt Offsets(DL.getIndexSizeInBits(0), 0);
+      Value *PtrBase =
+          Ptr->stripAndAccumulateConstantOffsets(DL, Offsets, false);
+      if (isa<AllocaInst>(PtrBase)) {
+        uint64_t Size = DL.getTypeStoreSize(ValType).getFixedValue();
+        addGCFields(PtrBase, AllocaDefs, Offsets.getZExtValue(),
+                    Offsets.getZExtValue() + Size);
+      } else {
+        FieldInfo *Field = getFieldInfoByValue(Ptr);
+        Value *Base = Field->V;
+        if (isa<AllocaInst>(Base) || isa<Argument>(Base))
+          AllocaDefs.insert(Field);
+      }
+    } else {
+      FieldInfo *Field = getFieldInfoByValue(Ptr);
+      Value *Base = Field->V;
+      if (isa<AllocaInst>(Base) || isa<Argument>(Base))
+        AllocaDefs.insert(Field);
+    }
   } else {
     Value *BasePtr = findMemoryBasePointer(Ptr);
     // Only if the PointerType and ValueType of Store Inst are equal,
