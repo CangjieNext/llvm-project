@@ -54,6 +54,21 @@ bool CJAAResult::invalidate(Function &Fn, const PreservedAnalyses &PA,
   return DT && Inv.invalidate<DominatorTreeAnalysis>(Fn, PA);
 }
 
+// An alloca produced by PEA stackification carries the "ea_val" metadata (set
+// by CJPartialEscapeAnalysis::setEscapeMeta). Its body may hold GC pointers,
+// and gcwrite may store an as1-cast of such an alloca into a heap object's
+// field; a later load from that field then returns a value whose type is
+// addrspace(1) but that points back to the stack alloca at run time. The
+// stack-vs-heap NoAlias rule below would misclassify that pair as NoAlias.
+// Treat any side whose underlying object is a PEA-degraded alloca as
+// MayAlias so the NoAlias fast path is not taken.
+static bool isPEADegradedAlloca(const Value *V) {
+  const Value *O = getUnderlyingObject(V, MaxLookupSearchDepth);
+  if (const auto *AI = dyn_cast<AllocaInst>(O))
+    return AI->getMetadata("ea_val") != nullptr;
+  return false;
+}
+
 static bool isGCPointerOrGlobalBase(const Value *V,
                                     unsigned MaxLookup = MaxLookupSearchDepth) {
   V = getUnderlyingObject(V, 0);
@@ -61,11 +76,8 @@ static bool isGCPointerOrGlobalBase(const Value *V,
     return false;
   if (isa<GlobalValue>(V))
     return true;
-  if (isa<Argument>(V))
+  if (isa<Argument>(V) || isa<LoadInst>(V))
     return isGCPointerType(V->getType());
-  if (auto *LI = dyn_cast<LoadInst>(V)) {
-    return false;
-  }
   if (auto *II = dyn_cast<IntrinsicInst>(V)) {
     switch (II->getIntrinsicID()) {
     case Intrinsic::cj_gcread_ref:
@@ -113,6 +125,12 @@ AliasResult CJAAResult::alias(const MemoryLocation &LocA,
                        (isa<Argument>(O1) && !isGCPointerType(O1->getType()));
   bool IsStackValue2 = isa<AllocaInst>(O2) ||
                        (isa<Argument>(O2) && !isGCPointerType(O2->getType()));
+  // A PEA-degraded alloca can be read back through a heap field (gcwrite stores
+  // an as1-cast of it, a later load returns a value typed as1 but pointing to
+  // the stack). Do not apply the stack-vs-heap NoAlias rule when either side
+  // is such an alloca; fall back to the default (MayAlias) instead.
+  if (isPEADegradedAlloca(LocA.Ptr) || isPEADegradedAlloca(LocB.Ptr))
+    return AAResultBase::alias(LocA, LocB, AAQI);
   if ((IsStackValue1 && isGCPointerOrGlobalBase(O2)) ||
       (IsStackValue2 && isGCPointerOrGlobalBase(O1)))
     return AliasResult::NoAlias;
