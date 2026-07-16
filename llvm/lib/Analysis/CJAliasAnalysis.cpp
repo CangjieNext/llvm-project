@@ -54,6 +54,23 @@ bool CJAAResult::invalidate(Function &Fn, const PreservedAnalyses &PA,
   return DT && Inv.invalidate<DominatorTreeAnalysis>(Fn, PA);
 }
 
+// An alloca produced by PEA stackification carries the "ea_val" metadata (set
+// by CJPartialEscapeAnalysis::setEscapeMeta). Its body may hold GC pointers,
+// and gcwrite may store an as1-cast of such an alloca into a heap object's
+// field; a later load from that field then returns a value whose type is
+// addrspace(1) but that points back to the stack alloca at run time. The
+// stack-vs-heap NoAlias rule below would misclassify that pair as NoAlias.
+// Treat any side whose underlying object is a PEA-degraded alloca as
+// MayAlias so the NoAlias fast path is not taken.
+//
+// The caller must pass an already-resolved underlying object (i.e. the
+// result of getUnderlyingObject); this helper does not re-resolve.
+static bool isPEADegradedAlloca(const Value *O) {
+  if (const auto *AI = dyn_cast<AllocaInst>(O))
+    return AI->getMetadata("ea_val") != nullptr;
+  return false;
+}
+
 static bool isGCPointerOrGlobalBase(const Value *V,
                                     unsigned MaxLookup = MaxLookupSearchDepth) {
   V = getUnderlyingObject(V, 0);
@@ -61,11 +78,8 @@ static bool isGCPointerOrGlobalBase(const Value *V,
     return false;
   if (isa<GlobalValue>(V))
     return true;
-  if (isa<Argument>(V))
+  if (isa<Argument>(V) || isa<LoadInst>(V))
     return isGCPointerType(V->getType());
-  if (auto *LI = dyn_cast<LoadInst>(V)) {
-    return false;
-  }
   if (auto *II = dyn_cast<IntrinsicInst>(V)) {
     switch (II->getIntrinsicID()) {
     case Intrinsic::cj_gcread_ref:
@@ -107,6 +121,15 @@ AliasResult CJAAResult::alias(const MemoryLocation &LocA,
                               const MemoryLocation &LocB, AAQueryInfo &AAQI) {
   const Value *O1 = getUnderlyingObject(LocA.Ptr, MaxLookupSearchDepth);
   const Value *O2 = getUnderlyingObject(LocB.Ptr, MaxLookupSearchDepth);
+  // A PEA-degraded alloca can be read back through a heap field (gcwrite stores
+  // an as1-cast of it, a later load returns a value typed as1 but pointing to
+  // the stack). Do not apply the stack-vs-heap NoAlias rule when either side
+  // is such an alloca; fall back to the default (MayAlias) instead. Check this
+  // on the already-resolved O1/O2 (reuses the getUnderlyingObject results
+  // above) and before computing IsStackValue, so the fast path is skipped
+  // entirely for the affected pair.
+  if (isPEADegradedAlloca(O1) || isPEADegradedAlloca(O2))
+    return AAResultBase::alias(LocA, LocB, AAQI);
   // In cangjie, stack space and heap space has different addrspace, and they
   // can never be aliased.
   bool IsStackValue1 = isa<AllocaInst>(O1) ||
