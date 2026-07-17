@@ -64,8 +64,8 @@ std::unique_ptr<Configuration> macho::config;
 std::unique_ptr<DependencyTracker> macho::depTracker;
 
 static HeaderFileType getOutputType(const InputArgList &args) {
-  // TODO: -r, -dylinker, -preload...
-  Arg *outputArg = args.getLastArg(OPT_bundle, OPT_dylib, OPT_execute);
+  // TODO: -dylinker, -preload...
+  Arg *outputArg = args.getLastArg(OPT_bundle, OPT_dylib, OPT_execute, OPT_r);
   if (outputArg == nullptr)
     return MH_EXECUTE;
 
@@ -76,6 +76,8 @@ static HeaderFileType getOutputType(const InputArgList &args) {
     return MH_DYLIB;
   case OPT_execute:
     return MH_EXECUTE;
+  case OPT_r:
+    return MH_OBJECT;
   default:
     llvm_unreachable("internal error");
   }
@@ -630,9 +632,10 @@ static void replaceCommonSymbols() {
 
     // FIXME: CommonSymbol should store isReferencedDynamically, noDeadStrip
     // and pass them on here.
+    bool commonPrivateExtern = common->privateExtern;
     replaceSymbol<Defined>(
         sym, sym->getName(), common->getFile(), isec, /*value=*/0, /*size=*/0,
-        /*isWeakDef=*/false, /*isExternal=*/true, common->privateExtern,
+        /*isWeakDef=*/false, /*isExternal=*/true, commonPrivateExtern,
         /*includeInSymtab=*/true, /*isThumb=*/false,
         /*isReferencedDynamically=*/false, /*noDeadStrip=*/false);
   }
@@ -1383,7 +1386,6 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     config->umbrella = arg->getValue();
   }
   config->ltoObjPath = args.getLastArgValue(OPT_object_path_lto);
-  config->ltoEmitObjOnly = args.hasArg(OPT_lto_emit_obj_only);
   config->ltoo = args::getInteger(args, OPT_lto_O, 2);
   if (config->ltoo > 3)
     error("--lto-O: invalid optimization level: " + Twine(config->ltoo));
@@ -1665,8 +1667,6 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
       parseClangOption(arg->getValue(), arg->getSpelling());
 
     compileBitcodeFiles();
-    if (config->ltoEmitObjOnly)
-      return !errorCount();
     replaceCommonSymbols();
 
     StringRef orderFile = args.getLastArgValue(OPT_order_file);
