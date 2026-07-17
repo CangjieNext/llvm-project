@@ -1271,6 +1271,7 @@ void AArch64AsmPrinter::emitCangjieRuntimeCall(MCSymbol *Sym, bool IsTailCall) {
                    MCInstBuilder(IsTailCall ? B : BL).addExpr(
                        MCSymbolRefExpr::create(Sym, OutContext)));
   }
+  return true;
 }
 
 // Note: emit specific inst should update inst size info in
