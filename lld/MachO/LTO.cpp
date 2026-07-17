@@ -119,6 +119,15 @@ void BitcodeCompiler::add(BitcodeFile &f) {
     r.VisibleToRegularObj =
         sym->isUsedInRegularObj || (r.Prevailing && r.ExportDynamic);
 
+    // For symbols from non-visible packages, set privateExtern so that
+    // Writer will mark them as N_PEXT (hidden from external consumers).
+    // This must happen before replaceSymbol<Undefined> below, which
+    // preserves privateExtern across the type change (see replaceSymbol).
+    if (r.Prevailing && !exportForPkg && !objSym.isUsed()) {
+      if (auto *defined = dyn_cast<Defined>(sym))
+        defined->privateExtern = true;
+    }
+
     // Un-define the symbol so that we don't get duplicate symbol errors when we
     // load the ObjFile emitted by LTO compilation.
     if (r.Prevailing)
