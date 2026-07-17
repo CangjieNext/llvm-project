@@ -47,12 +47,13 @@ Defined::Defined(StringRefZ name, InputFile *file, InputSection *isec,
                  bool canOverrideWeakDef, bool isWeakDefCanBeHidden,
                  bool interposable)
     : Symbol(DefinedKind, name, file), overridesWeakDef(canOverrideWeakDef),
-      privateExtern(isPrivateExtern), includeInSymtab(includeInSymtab),
+      includeInSymtab(includeInSymtab),
       wasIdenticalCodeFolded(false), thumb(isThumb),
       referencedDynamically(isReferencedDynamically), noDeadStrip(noDeadStrip),
       interposable(interposable), weakDefCanBeHidden(isWeakDefCanBeHidden),
       weakDef(isWeakDef), external(isExternal), isec(isec), value(value),
       size(size) {
+  privateExtern = isPrivateExtern;
   if (isec) {
     isec->symbols.push_back(this);
     // Maintain sorted order.

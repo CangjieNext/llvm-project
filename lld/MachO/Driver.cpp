@@ -64,8 +64,8 @@ std::unique_ptr<Configuration> macho::config;
 std::unique_ptr<DependencyTracker> macho::depTracker;
 
 static HeaderFileType getOutputType(const InputArgList &args) {
-  // TODO: -r, -dylinker, -preload...
-  Arg *outputArg = args.getLastArg(OPT_bundle, OPT_dylib, OPT_execute);
+  // TODO: -dylinker, -preload...
+  Arg *outputArg = args.getLastArg(OPT_bundle, OPT_dylib, OPT_execute, OPT_r);
   if (outputArg == nullptr)
     return MH_EXECUTE;
 
@@ -76,6 +76,8 @@ static HeaderFileType getOutputType(const InputArgList &args) {
     return MH_DYLIB;
   case OPT_execute:
     return MH_EXECUTE;
+  case OPT_r:
+    return MH_OBJECT;
   default:
     llvm_unreachable("internal error");
   }

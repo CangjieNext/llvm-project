@@ -111,6 +111,11 @@ public:
 
   // True if this symbol is used from a live section.
   bool used : 1;
+
+  // Whether this symbol should appear in the output binary's export trie.
+  // Placed on the base class so that replaceSymbol() can preserve it across
+  // type changes (e.g. Defined -> Undefined -> Defined during LTO).
+  bool privateExtern : 1;
 };
 
 class Defined : public Symbol {
@@ -143,8 +148,7 @@ public:
   // Place the bitfields first so that they can get placed in the tail padding
   // of the parent class, on platforms which support it.
   bool overridesWeakDef : 1;
-  // Whether this symbol should appear in the output binary's export trie.
-  bool privateExtern : 1;
+  // (privateExtern is now on the Symbol base class)
   // Whether this symbol should appear in the output symbol table.
   bool includeInSymtab : 1;
   // Whether this symbol was folded into a different symbol during ICF.
@@ -230,8 +234,8 @@ public:
   CommonSymbol(StringRefZ name, InputFile *file, uint64_t size, uint32_t align,
                bool isPrivateExtern)
       : Symbol(CommonKind, name, file), size(size),
-        align(align != 1 ? align : llvm::PowerOf2Ceil(size)),
-        privateExtern(isPrivateExtern) {
+        align(align != 1 ? align : llvm::PowerOf2Ceil(size)) {
+    privateExtern = isPrivateExtern;
     // TODO: cap maximum alignment
   }
 
@@ -239,7 +243,6 @@ public:
 
   const uint64_t size;
   const uint32_t align;
-  const bool privateExtern;
 };
 
 class DylibSymbol : public Symbol {
@@ -340,9 +343,11 @@ T *replaceSymbol(Symbol *s, ArgT &&...arg) {
 
   bool isUsedInRegularObj = s->isUsedInRegularObj;
   bool used = s->used;
+  bool privateExtern = s->privateExtern;
   T *sym = new (s) T(std::forward<ArgT>(arg)...);
   sym->isUsedInRegularObj |= isUsedInRegularObj;
   sym->used |= used;
+  sym->privateExtern = privateExtern;
   return sym;
 }
 
