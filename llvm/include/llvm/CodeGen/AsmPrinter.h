@@ -245,6 +245,14 @@ protected:
                                       const MachineOperand &) {};
   virtual void emitCJThrowException(const MachineInstr *MI,
                                     const MachineOperand &, unsigned) {};
+  /// emitCangjieRuntimeCall - emit a call to a cangjie runtime symbol. Returns
+  /// true if the target emitted the call (handled); false to let the caller
+  /// fall through to the default call lowering. AArch64: under large code
+  /// model + MachO an indirect ADRP+LDR+BLR (no ±128MB bl range limit),
+  /// otherwise a direct BL. The base default returns false, so targets
+  /// without an override (e.g. X86, whose call range is large enough) fall
+  /// through to a plain direct call.
+  virtual bool emitCangjieRuntimeCall(MCSymbol *Sym) { return false; }
   const Function *tryGetCangjieStubCallNativeFunc(const MachineInstr *MI,
                                                   const Function *Callee) const;
   virtual void emitCangjieCallStubInstImpl(const MachineInstr *MI,
