@@ -266,7 +266,7 @@ private:
   int emitCJSafepointInlineCall(unsigned Index) override;
   void emitGcStateCheck() override;
   void emitGetCJTLSData(int64_t Offset);
-  void emitCangjieRuntimeCall(MCSymbol *Sym);
+  bool emitCangjieRuntimeCall(MCSymbol *Sym) override;
 };
 
 } // end anonymous namespace
@@ -1251,7 +1251,7 @@ void AArch64AsmPrinter::emitCJStackCheck(const MachineInstr &MI) {
   OutStreamer->emitLabel(EndSym);
 }
 
-void AArch64AsmPrinter::emitCangjieRuntimeCall(MCSymbol *Sym) {
+bool AArch64AsmPrinter::emitCangjieRuntimeCall(MCSymbol *Sym) {
   using namespace AArch64;
   if (TM.getCodeModel() == CodeModel::Large &&
       getSubtargetInfo().getTargetTriple().isOSBinFormatMachO()) {
@@ -1269,6 +1269,7 @@ void AArch64AsmPrinter::emitCangjieRuntimeCall(MCSymbol *Sym) {
     EmitToStreamer(*OutStreamer, MCInstBuilder(BL).addExpr(
         MCSymbolRefExpr::create(Sym, OutContext)));
   }
+  return true;
 }
 
 // Note: emit specific inst should update inst size info in
