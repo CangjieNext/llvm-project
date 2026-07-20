@@ -3139,7 +3139,10 @@ bool AArch64FastISel::fastLowerCall(CallLoweringInfo &CLI) {
   // intercepts it (CJStubGV + N2CStub).
   if (TM.getCodeModel() == CodeModel::Large && Subtarget->isTargetMachO())
     if (auto *F = dyn_cast<Function>(Callee))
-      if (F->isCangjieNativeStub(MF->getFunction()) || F->isCangjieSafePoint())
+      if (F->isCangjieNativeStub(MF->getFunction()) ||
+          F->isCangjieSafePoint() ||
+          F->getName().startswith("CJ_MCC_NewObject") ||
+          F->getName().startswith("CJ_MCC_NewFinalizer"))
         return false;
 
   // Allow SelectionDAG isel to handle calls to functions like setjmp that need

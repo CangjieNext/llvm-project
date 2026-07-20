@@ -98,6 +98,14 @@ using namespace llvm::PatternMatch;
 
 #define DEBUG_TYPE "aarch64-lower"
 
+// Defined in AsmPrinter.cpp; gates whether AsmPrinter intercepts
+// CJ_MCC_NewObject / CJ_MCC_NewFinalizer for the inline bump-pointer fast
+// path. When off, the call is not intercepted and falls through to the
+// default lowering here -- under Large+MachO that must keep using GOT
+// (classifyGlobalFunctionReference returns MO_GOT), so the MO_NO_FLAG
+// exemption below is gated on the flag too.
+extern cl::opt<bool> EnableCJNewObjFast;
+
 STATISTIC(NumTailCalls, "Number of tail calls");
 STATISTIC(NumShiftInserts, "Number of vector shift inserts");
 STATISTIC(NumOptimizedImms, "Number of times immediates were optimized");
@@ -6880,6 +6888,13 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
     unsigned OpFlags =
         Subtarget->classifyGlobalFunctionReference(GV, getTargetMachine());
     // safepoint stub is local, and safepoint call will still be got load.
+    // CJ_MCC_NewObject / CJ_MCC_NewFinalizer only get MO_NO_FLAG (direct BL)
+    // when AsmPrinter will intercept them for the inline fast path
+    // (EnableCJNewObjFast=true, default). When the flag is off they are not
+    // intercepted and must keep the GOT path under Large+MachO (otherwise a
+    // direct branch26 BL would be emitted for a cross-dylib call, the exact
+    // hazard MachO large model uses GOT to avoid -- see
+    // AArch64Subtarget::classifyGlobalFunctionReference).
     if (CalleeFunc->isCangjieSafepointStub() ||
         CalleeFunc->isCangjieSafePoint() ||
         CalleeFunc->isCangjieStackCheck() ||
@@ -6888,6 +6903,9 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
         CalleeFunc->isGetCJThreadId() ||
         CalleeFunc->getName().isSetDebugLocation() ||
         CalleeFunc->getName().equals("CJ_MRT_PreInitializePackage") ||
+        (EnableCJNewObjFast &&
+         (CalleeFunc->getName().equals("CJ_MCC_NewObject") ||
+          CalleeFunc->getName().equals("CJ_MCC_NewFinalizer"))) ||
         CalleeFunc->isCangjieNativeStub(MF.getFunction()))
       OpFlags = AArch64II::MO_NO_FLAG;
     if (OpFlags & AArch64II::MO_GOT) {
