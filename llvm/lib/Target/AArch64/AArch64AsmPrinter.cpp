@@ -240,6 +240,10 @@ private:
     ~ParamForEmitNewObj() = default;
     const MachineInstr *MI;
     const MachineOperand &MOSym;
+    // Opcode / CallNewObjSlowPath are no longer read by
+    // emitMccNewObjectForCopyGC since the slow path and OnFinalizerCreated
+    // sub-call were switched to emitCangjieRuntimeCall (GOT-BLR). Kept for
+    // minimal-change; safe to remove in a follow-up cleanup.
     unsigned int Opcode;
     MCSymbol *LFin;
     const MCSymbolRefExpr *FinExpr;
@@ -1271,7 +1275,6 @@ void AArch64AsmPrinter::emitCangjieRuntimeCall(MCSymbol *Sym, bool IsTailCall) {
                    MCInstBuilder(IsTailCall ? B : BL).addExpr(
                        MCSymbolRefExpr::create(Sym, OutContext)));
   }
-  return true;
 }
 
 // Note: emit specific inst should update inst size info in
@@ -2091,15 +2094,17 @@ void AArch64AsmPrinter::emitMccNewObjectForCopyGC(
   EmitToStreamer(*OutStreamer, StoreNewAllocPtr);
   EmitToStreamer(*OutStreamer, CopyAllocPtrToX0);
   if (Param.FastFuncName.equals("CJ_MCC_NewFinalizerFast")) {
-    MCOperand FinalizerMC = setGAAndLower(
-        Param.MOSym, Param.MI->getMF()->getFunction().getParent()->getFunction(
-                         "CJ_MCC_OnFinalizerCreated"));
-    EmitToStreamer(*OutStreamer,
-                   MCInstBuilder(Param.Opcode).addOperand(FinalizerMC));
+    const Function *OnFinalizerFn =
+        Param.MI->getMF()->getFunction().getParent()->getFunction(
+            "CJ_MCC_OnFinalizerCreated");
+    assert(OnFinalizerFn && "Has no CJ_MCC_OnFinalizerCreated");
+    emitCangjieRuntimeCall(getSymbol(OnFinalizerFn));
   }
   EmitToStreamer(*OutStreamer, BranchToFin);
   OutStreamer->emitLabel(LSlow);
-  EmitToStreamer(*OutStreamer, Param.CallNewObjSlowPath);
+  // Slow path: call the original runtime allocator (CJ_MCC_NewObject /
+  // CJ_MCC_NewFinalizer).
+  emitCangjieRuntimeCall(getSymbol(Param.MOSym.getGlobal()));
   OutStreamer->emitLabel(Param.LFin);
 }
 
@@ -2113,6 +2118,9 @@ void AArch64AsmPrinter::emitMccNewObjectFastPath(const MachineInstr *MI,
 
   MCSymbol *LFinish = OutContext.createTempSymbol("NewObjFin", true);
   const MCSymbolRefExpr *FinExpr = MCSymbolRefExpr::create(LFinish, OutContext);
+  // CallSlowPath is constructed but no longer read by emitMccNewObjectForCopyGC
+  // (slow path now uses emitCangjieRuntimeCall for Large+MachO cross-dylib
+  // GOT-BLR). Kept to minimize struct change; safe to drop in a follow-up.
   MCOperand CallSlowPath;
   MCInstLowering.lowerOperand(MOSym, CallSlowPath);
   MCInst CallNewObjSlowPath = MCInstBuilder(Opcode).addOperand(CallSlowPath);
