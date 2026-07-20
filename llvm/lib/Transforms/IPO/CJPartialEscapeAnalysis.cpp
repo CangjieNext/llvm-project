@@ -49,6 +49,12 @@ static cl::opt<unsigned> CJMaxNonMoveArraySize("cj-max-nonmove-array-size",
 namespace llvm {
 cl::opt<bool> CJDisablePEA("cj-disable-partial-ea",
                                   cl::Hidden, cl::init(false));
+cl::opt<unsigned> CJPEAMaxGCNew(
+    "cj-pea-max-gcnew", cl::Hidden, cl::init(50), // Choose 50 as default value to avoid minutes-long hangs.
+    cl::desc("Max GC-new count per SCC for PEA propagation; above this PEA "
+             "bails out (keep all on heap). The default 50 keeps PEA on "
+             "typical functions while avoiding non-deterministic, "
+             "minutes-long hangs seen on large SCCs after CJGCInstrReplace."));
 
 GlobalVariable *getNewKlass(CallBase *I) {
   GlobalVariable *Klass =
@@ -2573,7 +2579,13 @@ public:
 
   bool run() {
     bool Changed = false;
-    if (GCNew.empty()) {
+    // Bail out when there is nothing to rewrite, or when the SCC is large
+    // enough that PEA's offset-path propagation can blow up into massive,
+    // non-deterministic re-traversal (hangs for minutes on some runs). Keep
+    // every GCNew on the heap (conservative, correct) and skip propagation
+    // and rewriting. GCNew.size() is a compile-time IR property, so the
+    // decision is deterministic.
+    if (GCNew.empty() || GCNew.size() > CJPEAMaxGCNew) {
       cleanupAnalysisState();
       return Changed;
     }
