@@ -1247,16 +1247,33 @@ void StackMaps::emitCangjieCompressedStackMaps(MCStreamer &OS) {
   bool IsWindows = TT.isOSWindows();
   OffsetStepSize = TT.isARM() ? 4 : 8;
   FuncPtrSize = TT.isARM() ? 4 : 8;
+  std::unordered_map<std::string, MCSymbol *> SharedHeaders;
   for (auto const &FR : FnInfos) {
     MCSymbol *StackmapFunction =
         OutContext.getOrCreateSymbol(".Lstack_map." + FR.first->getName());
-    OS.emitLabel(StackmapFunction);
     CSIdxEnd = CSIdxStart + FR.second.RecordCount;
     CompressedInfo Data(
         (IsWindows && isX86_64()) ? X86WinCalleeSavedReg
-            : isX86_64() ? X86CalleeSavedReg 
+            : isX86_64() ? X86CalleeSavedReg
             : isAArch64() ? AArch64CalleeSavedReg : ARMCalleeSavedReg);
     prepareCompressedData(Data, FR.second, CSIdxStart, CSIdxEnd);
+    if (FR.second.RecordCount == 0) {
+      std::string Fp;
+      raw_string_ostream FpOS(Fp);
+      FpOS << Data.StackSize << '|' << Data.CalleeSavedReg << '|';
+      for (unsigned Offset : Data.CalleeSavedOffsets)
+        FpOS << Offset << ',';
+      FpOS.flush();
+      auto It = SharedHeaders.find(Fp);
+      if (It != SharedHeaders.end()) {
+        OS.emitAssignment(StackmapFunction,
+                          MCSymbolRefExpr::create(It->second, OutContext));
+        CSIdxStart = CSIdxEnd;
+        continue;
+      }
+      SharedHeaders[Fp] = StackmapFunction;
+    }
+    OS.emitLabel(StackmapFunction);
     emitCangjieCompressedData(OS, Data);
     CSIdxStart = CSIdxEnd;
   }
