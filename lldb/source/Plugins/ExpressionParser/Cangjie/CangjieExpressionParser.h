@@ -21,10 +21,6 @@
 #include <string>
 #include <vector>
 
-namespace llvm {
-class LLVMContext;
-}
-
 namespace lldb_private {
 
 class IRExecutionUnit;
@@ -62,14 +58,8 @@ public:
   /// True if it was parsed when exe_ctx was in a non-static method.
   bool m_in_member_method = false;
 private:
-  /// The context to use for IR generation.
-  std::unique_ptr<llvm::LLVMContext> m_llvm_context;
   /// The module to build IR into.
   std::unique_ptr<llvm::Module> m_module;
-  /// The container for the IR, to be JIT-compiled or interpreted.
-  lldb::IRExecutionUnitSP m_execution_unit_sp;
-  /// The AST context to build the expression into.
-  std::unique_ptr<TypeSystemClang> m_ast_context;
 
   lldb_private::Materializer *m_materializer = nullptr;   ///< If non-NULL, the materializer
                                           ///to use when reporting used
@@ -81,7 +71,6 @@ private:
   lldb_private::Materializer::PersistentVariableDelegate
       *m_error_result_delegate = nullptr; ///< If non-NULL, used to report expression results to
                           ///ClangUserExpression.
-  std::vector<std::string> m_include_directories;
   std::string m_result_type_name;
   CompilerType m_expr_result_type;
   unsigned int m_file_id = 0;

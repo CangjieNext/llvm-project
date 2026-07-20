@@ -10,10 +10,8 @@
 
 #include "CangjieASTUtils.h"
 #include "cangjie/AST/Create.h"
-#include "cangjie/Utils/CastingTemplate.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
-#include "lldb/Core/ValueObject.h"
 
 using namespace lldb_private;
 using namespace Cangjie;
@@ -560,7 +558,6 @@ void CangjieASTBuiler::CreateFuncDeclGeneric(Ptr<AST::FuncDecl> decl, CompilerTy
   decl->EnableAttr(Attribute::GENERIC);
   decl->funcBody->generic = MakeOwned<Generic>();
   // default::Pair<$G_T,$G_U> => Pair<$G_T,$G_U> => T, U
-  std::vector<std::string> params;
   SetGenericByName(decl->funcBody->generic.get(), typeName, decl);
 }
 
@@ -587,7 +584,6 @@ void CangjieASTBuiler::CreateDeclGeneric(Ptr<AST::Decl> decl, std::string& typeN
   decl->EnableAttr(Attribute::GENERIC);
   decl->generic = MakeOwned<Generic>();
   // default::Pair<$G_T,$G_U> => Pair<$G_T,$G_U> => T, U
-  std::vector<std::string> params;
   auto subname = GetSubNameWithoutPkgname(typeName, decl->fullPackageName);
   SetGenericByName(decl->generic.get(), subname, decl);
 }

@@ -44,8 +44,6 @@ public:
 
   std::unique_ptr<CangjieExpressionSourceCode> m_source_code;
 
-  bool AddVarToArgs(ExecutionContext &exe_ctx);
-
 private:
   void ScanContext(ExecutionContext &exe_ctx,
                    lldb_private::Status &err) override;
@@ -82,14 +80,8 @@ private:
   /// True if it was parsed when exe_ctx was in a static method of class.
   bool m_in_static_method = false;
 
-  ConstString m_func_name;
-
   CangjiePersistentVariableDelegate m_result_delegate;
   CangjiePersistentVariableDelegate m_error_result_delegate;
-
-  /// True if "this" or "self" must be looked up and passed in.  False if the
-  /// expression doesn't really use them and they can be NULL.
-  bool m_needs_object_ptr = false;
 
   std::unique_ptr<CangjieExpressionParser> m_parser;
 };

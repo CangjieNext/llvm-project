@@ -93,7 +93,6 @@ public:
     CompilerType GetDynamicClassType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
     CompilerType GetDynamicFuncType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
     CompilerType GetDynamicStructType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
-    CompilerType GetDynamicInterfaceType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
     CompilerType GetDynamicTupleType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
     CompilerType GetDynamicEnumType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
     CompilerType GetEnumType(Ptr<AST::Ty> ty, std::string typeName, CompilerType& genericType);
@@ -198,7 +197,6 @@ private:
     CompilerType CreateOrGetGenericType(const CompilerType& type);
     void CollectGenericTypeOfVariable(const CompilerType& type);
     void CollectOptionValType(CompilerType& type);
-    void AddFieldToRecordType(const CompilerType& genericType, CompilerType& instancedType, std::string& name);
     std::set<ConstString> m_local_func;
 };
 
