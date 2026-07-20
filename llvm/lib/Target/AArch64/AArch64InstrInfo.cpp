@@ -78,17 +78,11 @@ AArch64InstrInfo::AArch64InstrInfo(const AArch64Subtarget &STI)
 /// 0 means MI is not a Cangjie Specific Call.
 unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
     const MachineInstr &MI) const {
-  // Feeds BranchRelaxation (via getInstSizeInBytes -> computeBlockSize). Sizes
-  // here MUST match what AsmPrinter/MC actually emit, otherwise
-  // BranchRelaxation under-sizes the function, misses out-of-range TBZ/TBNZ,
-  // and the MC layer fails with "fixup value out of range" (TBZ/TBNZ are
-  // imm14, ±32KB). NewObject*Fast calls (CJBarrierLowering renames
-  // CJ_MCC_NewObject -> *Fast, an InternalLinkage wrapper) are NOT inlined --
-  // the AsmPrinter fast-path condition only matches the non-Fast names -- so
-  // tryEmitCangjieSpecificCallByMOSym emits them via emitCangjieRuntimeCall:
-  // plain BL (4B) / ADRP+LDR+BLR (12B, Large+MachO). The *Fast case below
-  // returns 4+GotExtra to match (the call target stays a global, so the
-  // isGlobal() check passes and the case is reached).
+  // Feeds BranchRelaxation (via getInstSizeInBytes -> computeBlockSize) and
+  // AArch64CompressJumpTables. Sizes here MUST match what AsmPrinter/MC
+  // actually emit, otherwise BranchRelaxation under-sizes the function,
+  // misses out-of-range TBZ/TBNZ, and the MC layer fails with "fixup value
+  // out of range" (TBZ/TBNZ are imm14, ±32KB).
   if (!MI.isCall()) {
     return 0;
   }
@@ -112,14 +106,19 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
   if (Callee == nullptr) {
     return 0;
   }
-  // Under large code model on MachO, emitCangjieRuntimeCall emits ADRP+LDR+BLR
-  // (12B) instead of BL (4B) for runtime calls embedded in the inline lowering
-  // of some cangjie sentinels (e.g. CJStackCheck -> emitStackOverflowCall).
-  // Add the +8B delta under large MachO so jump-table offset computation
-  // (AArch64CompressJumpTables) stays conservative: over-estimate is safe,
-  // under-estimate risks picking too-narrow jump-table entry width.
+  // Under Large+MachO, emitCangjieRuntimeCall emits ADRP+LDR+BLR (12B) instead
+  // of BL (4B) for runtime calls embedded in the inline lowering of cangjie
+  // sentinels (CJStackCheck -> emitStackOverflowCall, NewObject inline bump
+  // fast path slow path / OnFinalizerCreated sub-call). Add the +8B delta
+  // under Large+MachO so BranchRelaxation and AArch64CompressJumpTables stay
+  // conservative: over-estimate is safe, under-estimate risks picking too-
+  // narrow jump-table entry width or missing out-of-range TBZ/TBNZ.
+  // Note: emitCangjieRuntimeCall only emits GOT-BLR under Large+MachO, on
+  // Large+ELF it falls back to plain BL (4B), so GotExtra must be gated on
+  // MachO too.
   const TargetMachine &TM = MI.getMF()->getTarget();
-  const unsigned GotExtra = (TM.getCodeModel() == CodeModel::Large) ? 8 : 0;
+  const unsigned GotExtra =
+      (TM.getCodeModel() == CodeModel::Large) ? 8 : 0;
   if (Callee->isCangjieSafePoint()) {
     // If Jmp size beyond the 19bit, emitting safepoint on following inst
     // instead of emit it at the end of the function.
@@ -135,12 +134,25 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
     // which under large MachO expands BL to ADRP+LDR+BLR (+8B).
     return 12 + GotExtra; // 12B base + GOT-call expansion under large MachO
   }
-  if (Callee->getName() == "CJ_MCC_NewObjectFast" ||
-      Callee->getName() == "CJ_MCC_NewFinalizerFast") {
-    // tryEmitCangjieSpecificCallByMOSym emits these via emitCangjieRuntimeCall:
-    // plain BL (4B) / ADRP+LDR+BLR (12B) under Large+MachO. 4+GotExtra matches
-    // so BranchRelaxation sizes the function correctly (no tbz overflow).
-    return 4 + GotExtra;
+  // CJ_MCC_NewObject / CJ_MCC_NewFinalizer: AsmPrinter intercepts the BL via
+  // tryEmitCangjieSpecificCallByMOSym -> emitMccNewObjectFastPath ->
+  // emitMccNewObjectForCopyGC, which inlines the bump-pointer fast path:
+  //   ldr x2,[x28,#N] ; ldr x2,[x2] ; ldr x3,[x2] ; ldr x4,[x2,#8]
+  //   add x5,x3,x1   ; cmp x5,x4    ; b.gt .LSlow ; str x0,[x3]
+  //   str x5,[x2]    ; mov x0,x3    ; (bl/blr OnFinalizerCreated if NewFinalizer)
+  //   b   .LFin
+  // .LSlow:
+  //   bl/blr @CJ_MCC_NewObject(NewFinalizer)    ; slow path = emitCangjieRuntimeCall
+  // .LFin:
+  // NewObject: 11 base insts (fast) + 1 BL slow = 48B; under Large+MachO the
+  //   slow path becomes ADRP+LDR+BLR = +8B -> 56B.
+  // NewFinalizer: 11 base insts + 1 BL OnFinalizerCreated + 1 BL slow = 52B;
+  //   under Large+MachO both calls become ADRP+LDR+BLR = +16B -> 68B.
+  if (Callee->getName() == "CJ_MCC_NewObject") {
+    return 48 + GotExtra; // small=48, Large+MachO=56
+  }
+  if (Callee->getName() == "CJ_MCC_NewFinalizer") {
+    return 52 + GotExtra * 2; // small=52, Large+MachO=68
   }
   if (Callee->getName().isGetGCPhase()) {
     return 4; // 4: 4 bytes(1 insts) for GetGCPhase call
