@@ -6878,6 +6878,12 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
     auto GV = G->getGlobal();
     unsigned OpFlags =
         Subtarget->classifyGlobalFunctionReference(GV, getTargetMachine());
+    // CJ_MCC_NewObjectFast / CJ_MCC_NewFinalizerFast are InternalLinkage
+    // wrappers.
+    if (CalleeFunc->getName() == "CJ_MCC_NewObjectFast" ||
+        CalleeFunc->getName() == "CJ_MCC_NewFinalizerFast") {
+      OpFlags = AArch64II::MO_GOT;
+    }
     // safepoint stub is local, and safepoint call will still be got load.
     if (CalleeFunc->isCangjieSafepointStub() ||
         CalleeFunc->isCangjieSafePoint() ||
@@ -6885,7 +6891,9 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
         CalleeFunc->getName().isGetGCPhase() ||
         CalleeFunc->isGetCJThreadId() ||
         CalleeFunc->getName().isSetDebugLocation() ||
-        CalleeFunc->getName().equals("CJ_MRT_PreInitializePackage"))
+        CalleeFunc->getName().equals("CJ_MRT_PreInitializePackage") ||
+        CalleeFunc->getName().equals("CJ_MCC_NewObject") ||
+        CalleeFunc->getName().equals("CJ_MCC_NewFinalizer"))
       OpFlags = AArch64II::MO_NO_FLAG;
     if (OpFlags & AArch64II::MO_GOT) {
       Callee = DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, OpFlags);
