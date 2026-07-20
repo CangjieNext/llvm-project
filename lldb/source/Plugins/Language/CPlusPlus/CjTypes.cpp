@@ -179,7 +179,6 @@ static void DumpWithoutPrefix(lldb::ValueObjectSP valueSP, Stream &stream)
   if (start != std::string::npos && end != std::string::npos) {
     stream.Printf("%s", value.substr(start + prefix.size(), end - start - prefix.size()).c_str());
   }
-  return;
 }
 
 bool lldb_private::formatters::RangeSummaryProvider(
@@ -457,7 +456,6 @@ public:
           m_negsign(negSign) { }
     std::string ToString() {
       int64_t digits = 9;
-      uint64_t anyBase = 1000000000;
       // Get str Arr size
       int64_t strArrSize = (32 * (m_len + 2) / int64_t(29) + 1);
       std::vector<uint64_t> stringArr;
@@ -486,7 +484,6 @@ public:
     int64_t ToBaseString(std::vector<uint8_t>& stringUtf8Arr, int64_t index, uint64_t int1) {
       const uint8_t DIGIT_DIFF = 0x30;
       const uint8_t LETTER_UPPER_DIFF = 0x41 - 0x0A;
-      const uint8_t LETTER_LOWER_DIFF = 0x61 - 0x0A;
       uint64_t base = 10;
       int64_t i = index;
       uint64_t quo = int1;
@@ -583,11 +580,9 @@ std::string lldb_private::formatters::GetBigIntvalue(ValueObject &value) {
   if (!rawptr || !m_start) {
     return "0";
   }
-  auto start = m_start->GetValueAsSigned(INT64_MAX);
 
   auto m_elements = rawptr->GetChildMemberWithName(ConstString("elements"), true);
   CompilerType element_type = m_elements->GetCompilerType();
-  llvm::Optional<uint64_t> size = element_type.GetByteSize(nullptr);
   uint64_t element_size = 4; // UInt32's size is 4.
 
   std::vector<uint32_t> big_intArr;
@@ -904,7 +899,6 @@ bool lldb_private::formatters::DateTimeSummaryProvider(
   if (!zoneId) {
     return false;
   }
-  auto str_zoneId = zoneId->GetSummaryAsCString();
   CangjieDateTime date = CangjieDateTime(secVal, 0);
   if (date.Year() > 999 || date.Year() < -999) { // 999, -999 year
     stream.Printf("%d-%02d-%02dT%02d:%02d:%02dZ", date.Year(),

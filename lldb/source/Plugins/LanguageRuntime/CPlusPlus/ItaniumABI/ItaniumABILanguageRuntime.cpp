@@ -302,26 +302,6 @@ ConstString GetTypeName(Process& process, TypeInfo& typeInfo) {
     return ConstString(temp_name.c_str());
 }
 
-CompilerType LookupDynamicType(Process& process, UGTypeKind typekind, ConstString& type_name) {
-  if (typekind == UGTypeKind::UG_CLASS || typekind == UGTypeKind::UG_INTERFACE ||
-    typekind == UGTypeKind::UG_COMMON_ENUM) {
-    return CompilerType();
-  }
-  TypeList types;
-  llvm::DenseSet<SymbolFile *> searched_symbol_files;
-  auto& target = process.GetTarget();
-  target.GetImages().FindTypes(nullptr, type_name, true, 1, searched_symbol_files, types);
-  size_t num_types = types.GetSize();
-  for (size_t ti = 0; ti < num_types; ++ti) {
-    auto type_sp = types.GetTypeAtIndex(ti);
-    auto type = type_sp->GetFullCompilerType();
-    if (type.IsValid()) {
-      return type;
-    }
-  }
-  return CompilerType();
-}
-
 bool IsRefType(int8_t type) {
     if (type < 0) {
         return true;
@@ -481,12 +461,6 @@ CompilerType ItaniumABILanguageRuntime::GetDynamicRawArrayType(
     }
     ast.CompleteTagDeclarationDefinition(dynamic_type);
     return dynamic_type;
-}
-
-bool IsFunctionType(ConstString& type_name) {
-  ConstString compare("(.+::|^)\\(.*\\)( ?)->.+$");
-  RegularExpression regex(compare.GetStringRef());
-  return regex.Execute(type_name.AsCString());
 }
 
 ConstString GetFunctionTypeName(std::string type_name,

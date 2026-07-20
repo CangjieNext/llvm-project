@@ -18,8 +18,6 @@ namespace llvm {
 class BasicBlock;
 class Function;
 class GlobalValue;
-class StoreInst;
-class DataLayout;
 class GlobalVariable;
 class CallInst;
 class Instruction;
@@ -31,8 +29,6 @@ class Value;
 
 namespace lldb_private {
 class CangjieDeclMap;
-class IRExecutionUnit;
-class IRMemoryMap;
 }
 
 class CangjieIRForTarget {

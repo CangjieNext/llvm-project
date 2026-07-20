@@ -180,7 +180,6 @@ private:
   bool m_hasvalue = false;
   ValueObjectSP m_some =  nullptr;
   bool m_children = false;
-  bool m_dynamic = false;
 };
 
 static std::string DeletePrefixOfTypeName(std::string type_name, std::string prefix) {
@@ -247,7 +246,6 @@ bool CjOptionSyntheticFrontEnd::Update() {
   }
   auto dynamic = value->GetDynamicValue(eDynamicDontRunTarget);
   if (dynamic != nullptr) {
-    m_dynamic = true;
     value = dynamic;
   }
 
@@ -503,7 +501,6 @@ CjEnum2SyntheticFrontEnd::CjEnum2SyntheticFrontEnd(ValueObjectSP valobj_sp)
 
 bool CjEnum2SyntheticFrontEnd::Update() {
     std::string field_name;
-    Status err;
     auto enum_type = m_backend.GetCompilerType();
     auto constructor = enum_type.GetFieldAtIndex(0, field_name, nullptr, nullptr, nullptr);
     llvm::APSInt enum_value;
