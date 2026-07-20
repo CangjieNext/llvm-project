@@ -4168,17 +4168,6 @@ bool AsmPrinter::tryEmitCangjieSpecificCallByMOSym(const MachineInstr *MI,
     emitCJThrowException(MI, MOSym, Opcode);
     return true;
   }
-  if (FuncName.equals("CJ_MCC_NewObjectFast") ||
-      FuncName.equals("CJ_MCC_NewFinalizerFast")) {
-    // bl -> blr (ADRP+LDR+BLR via GOT, no ±128MB bl range limit) under
-    // Large+MachO on targets that override emitCangjieRuntimeCall (AArch64).
-    // If the target doesn't override it (e.g. X86, whose call range is large
-    // enough), emitCangjieRuntimeCall returns false and we fall through to the
-    // default direct call lowering. No inline fast path. On AArch64 sized as
-    // 4+GotExtra in getCangjieSpecificCallInstSizeInBytes for BranchRelaxation.
-    if (emitCangjieRuntimeCall(getSymbol(Callee)))
-      return true;
-  }
   if ((FuncName.equals("CJ_MCC_NewObject") ||
        FuncName.equals("CJ_MCC_NewFinalizer")) &&
       EnableCJNewObjFast) {

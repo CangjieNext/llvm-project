@@ -6888,6 +6888,8 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
         CalleeFunc->isGetCJThreadId() ||
         CalleeFunc->getName().isSetDebugLocation() ||
         CalleeFunc->getName().equals("CJ_MRT_PreInitializePackage") ||
+        CalleeFunc->getName().equals("CJ_MCC_NewObject") ||
+        CalleeFunc->getName().equals("CJ_MCC_NewFinalizer") ||
         CalleeFunc->isCangjieNativeStub(MF.getFunction()))
       OpFlags = AArch64II::MO_NO_FLAG;
     if (OpFlags & AArch64II::MO_GOT) {
