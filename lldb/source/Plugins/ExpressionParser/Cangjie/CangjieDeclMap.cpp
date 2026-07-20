@@ -18,7 +18,6 @@
 #include "lldb/Target/Target.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
-#include "clang/Sema/Sema.h"
 #include "Plugins/TypeSystem/Clang/TypeSystemClang.h"
 #include "CangjieDemangle.h"
 using namespace lldb_private;
@@ -268,7 +267,6 @@ CompilerType CangjieDeclMap::LookUptype(lldb::ModuleSP module,
     if (full_type.IsValid()) {
       return full_type;
     }
-    continue;
   }
 
   return CompilerType();
@@ -871,7 +869,6 @@ OwnedPtr<GenericConstraint> CangjieDeclMap::CreateGenericConstraintsDecl(Ptr<AST
     OwnedPtr<AST::Type> ctype = builder.CreateAstType(AstTypeInfo(up), decltmp, m_current_pkgname);
 
     gc->upperBounds.emplace_back(std::move(ctype));
-    std::string superName = SafeAsCString(superType.GetTypeName());
   }
   return gc;
 }
