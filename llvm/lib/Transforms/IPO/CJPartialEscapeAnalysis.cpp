@@ -49,6 +49,15 @@ static cl::opt<unsigned> CJMaxNonMoveArraySize("cj-max-nonmove-array-size",
 namespace llvm {
 cl::opt<bool> CJDisablePEA("cj-disable-partial-ea",
                                   cl::Hidden, cl::init(false));
+// Default bails the confirmed-pathological case.
+constexpr unsigned DefaultCJPEAMaxCycNonzero = 24;
+cl::opt<unsigned> CJPEAMaxCycNonzero(
+    "cj-pea-max-cyc-nonzero", cl::Hidden, cl::init(DefaultCJPEAMaxCycNonzero),
+    cl::desc("Max non-zero-offset edges inside a cyclic SCC of the PEA "
+             "propagation graph for PEA to proceed; above this PEA bails "
+             "out. A cyclic SCC with non-zero offsets makes spreadMemEscape "
+             "cumulative offset-paths diverge; this is a deterministic graph "
+             "property and the direct topology root cause of the blow-up."));
 
 GlobalVariable *getNewKlass(CallBase *I) {
   GlobalVariable *Klass =
@@ -2571,6 +2580,158 @@ public:
     }
   }
 
+  // Compute the maximum number of non-zero-offset edges inside any cyclic
+  // SCC of the propagation graph (built from MP / BaseValue / Alias /
+  // InfoEscapedVec edges). A cyclic SCC carrying non-zero offsets is the
+  // topology root cause of spreadMemEscape blow-up: cumulative offset-paths
+  // diverge, so distinct (node, offset) states grow without bound. This is a
+  // deterministic graph property (independent of ASLR or DenseMap order).
+  unsigned computeMaxCycNonzero() {
+    DenseMap<GCPtr *, SmallVector<GCPtr *>> G;
+    DenseMap<GCPtr *, SmallVector<int>> GOff;
+    for (auto &KV : AllPtrLocInfo) {
+      GCPtr *P = KV.second;
+      for (GCPtr *M : P->MPs) {
+        G[P].push_back(M);
+        GOff[P].push_back(0);
+      }
+      for (auto &V : P->BaseValue) {
+        for (int O : V.second) {
+          G[P].push_back(V.first);
+          GOff[P].push_back(O);
+        }
+      }
+      for (auto &V : P->Alias) {
+        for (int O : V.second) {
+          G[P].push_back(V.first);
+          GOff[P].push_back(O);
+        }
+      }
+      for (GCPtr *V : P->InfoEscapedVec) {
+        G[P].push_back(V);
+        GOff[P].push_back(0);
+      }
+    }
+    return tarjanMaxCycNonzero(G, GOff);
+  }
+
+  // Iterative Tarjan SCC driver. For each unseen node, run a DFS that returns
+  // the max non-zero-offset intra-edge count among cyclic SCCs found in it.
+  unsigned tarjanMaxCycNonzero(DenseMap<GCPtr *, SmallVector<GCPtr *>> &G,
+                              DenseMap<GCPtr *, SmallVector<int>> &GOff) {
+    unsigned Idx = 0;
+    DenseMap<GCPtr *, unsigned> Disc;
+    DenseMap<GCPtr *, unsigned> Low;
+    SmallVector<GCPtr *> Stk;
+    DenseSet<GCPtr *> OnStk;
+    unsigned MaxCycNonzero = 0;
+    for (auto &KV : G) {
+      if (Disc.count(KV.first)) {
+        continue;
+      }
+      MaxCycNonzero = std::max(
+          MaxCycNonzero,
+          tarjanSCCFrom(G, GOff, KV.first, Disc, Low, Stk, OnStk, Idx));
+    }
+    return MaxCycNonzero;
+  }
+
+  // Try to advance one successor of U (at index Pos). If the successor is
+  // unseen, push it and return true so the caller descends into it; otherwise
+  // update Low and return false.
+  bool tarjanVisitSuccessor(DenseMap<GCPtr *, SmallVector<GCPtr *>> &G,
+                            GCPtr *U, unsigned &Pos,
+                            SmallVector<std::pair<GCPtr *, unsigned>> &Dfs,
+                            DenseMap<GCPtr *, unsigned> &Disc,
+                            DenseSet<GCPtr *> &OnStk,
+                            DenseMap<GCPtr *, unsigned> &Low) {
+    if (Pos >= G[U].size()) {
+      return false;
+    }
+    GCPtr *W = G[U][Pos++];
+    if (!Disc.count(W)) {
+      Dfs.push_back({W, 0});
+      return true;
+    }
+    if (OnStk.count(W)) {
+      Low[U] = std::min(Low[U], Disc[W]);
+    }
+    return false;
+  }
+
+  // Pop the SCC rooted at U from the Tarjan stack, return its members.
+  SmallVector<GCPtr *> tarjanPopSCC(SmallVector<GCPtr *> &Stk,
+                                    DenseSet<GCPtr *> &OnStk, GCPtr *U) {
+    SmallVector<GCPtr *> Comp;
+    GCPtr *X = nullptr;
+    do {
+      X = Stk.pop_back_val();
+      OnStk.erase(X);
+      Comp.push_back(X);
+    } while (X != U);
+    return Comp;
+  }
+
+  // Run an iterative Tarjan DFS from Start; return the max non-zero-offset
+  // intra-edge count among cyclic SCCs found in this DFS tree.
+  unsigned tarjanSCCFrom(DenseMap<GCPtr *, SmallVector<GCPtr *>> &G,
+                         DenseMap<GCPtr *, SmallVector<int>> &GOff,
+                         GCPtr *Start, DenseMap<GCPtr *, unsigned> &Disc,
+                         DenseMap<GCPtr *, unsigned> &Low,
+                         SmallVector<GCPtr *> &Stk, DenseSet<GCPtr *> &OnStk,
+                         unsigned &Idx) {
+    SmallVector<std::pair<GCPtr *, unsigned>> Dfs;
+    Dfs.push_back({Start, 0});
+    unsigned MaxCycNonzero = 0;
+    while (!Dfs.empty()) {
+      GCPtr *U = Dfs.back().first;
+      unsigned &Pos = Dfs.back().second;
+      if (Pos == 0) {
+        Disc[U] = Idx;
+        Low[U] = Idx;
+        ++Idx;
+        Stk.push_back(U);
+        OnStk.insert(U);
+      }
+      if (tarjanVisitSuccessor(G, U, Pos, Dfs, Disc, OnStk, Low)) {
+        continue;
+      }
+      // All successors visited: pop U and propagate Low to its parent.
+      Dfs.pop_back();
+      if (!Dfs.empty()) {
+        Low[Dfs.back().first] = std::min(Low[Dfs.back().first], Low[U]);
+      }
+      if (Low[U] != Disc[U]) {
+        continue;
+      }
+      // U roots an SCC; count non-zero intra-edges if the SCC is cyclic.
+      SmallVector<GCPtr *> Comp = tarjanPopSCC(Stk, OnStk, U);
+      if (Comp.size() <= 1) {
+        continue;
+      }
+      DenseSet<GCPtr *> In(Comp.begin(), Comp.end());
+      unsigned Nz = countNonzeroIntraEdges(Comp, G, GOff, In);
+      MaxCycNonzero = std::max(MaxCycNonzero, Nz);
+    }
+    return MaxCycNonzero;
+  }
+
+  // Count edges within a cyclic SCC whose offset is non-zero.
+  unsigned countNonzeroIntraEdges(SmallVectorImpl<GCPtr *> &Comp,
+                                  DenseMap<GCPtr *, SmallVector<GCPtr *>> &G,
+                                  DenseMap<GCPtr *, SmallVector<int>> &GOff,
+                                  DenseSet<GCPtr *> &In) {
+    unsigned Nz = 0;
+    for (GCPtr *N : Comp) {
+      for (unsigned I = 0; I < G[N].size(); ++I) {
+        if (In.count(G[N][I]) && GOff[N][I] != 0) {
+          ++Nz;
+        }
+      }
+    }
+    return Nz;
+  }
+
   bool run() {
     bool Changed = false;
     if (GCNew.empty()) {
@@ -2583,6 +2744,17 @@ public:
     }
     for (auto LoadPtr : LoadValues) {
       processLoadNew(LoadPtr);
+    }
+    // Bail out when the propagation graph has a cyclic SCC with too many
+    // non-zero-offset edges (the direct topology root cause of
+    // spreadMemEscape blow-up: a cycle carrying non-zero offsets makes
+    // cumulative offset-paths diverge into an unbounded number of distinct
+    // (node, offset) states). This is a deterministic compile-time graph
+    // property, so the bail-out decision is order-independent. Keep every
+    // GCNew on the heap (conservative, correct, no stack promotion).
+    if (computeMaxCycNonzero() > CJPEAMaxCycNonzero) {
+      cleanupAnalysisState();
+      return Changed;
     }
     for (Function *Func : SCCFunctions) {
       processFunc(Func);
