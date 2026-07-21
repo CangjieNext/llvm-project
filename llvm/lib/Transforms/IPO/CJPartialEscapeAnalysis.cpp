@@ -49,6 +49,16 @@ static cl::opt<unsigned> CJMaxNonMoveArraySize("cj-max-nonmove-array-size",
 namespace llvm {
 cl::opt<bool> CJDisablePEA("cj-disable-partial-ea",
                                   cl::Hidden, cl::init(false));
+cl::opt<unsigned> CJPEAMaxCycNonzero(
+    "cj-pea-max-cyc-nonzero", cl::Hidden, cl::init(8),
+    // 8 sits in the gap between benign SCCs (maxCycNonzero <= 4, measured)
+    // and the pathological case (30, the RedBlackTree.put rebalancing loop);
+    // keeps normal functions on PEA while bailing the blow-up.
+    cl::desc("Max non-zero-offset edges inside a cyclic SCC of the PEA "
+             "propagation graph for PEA to proceed; above this PEA bails "
+             "out. A cyclic SCC with non-zero offsets makes spreadMemEscape "
+             "cumulative offset-paths diverge; this is a deterministic graph "
+             "property and the direct topology root cause of the blow-up."));
 
 GlobalVariable *getNewKlass(CallBase *I) {
   GlobalVariable *Klass =
@@ -2571,6 +2581,117 @@ public:
     }
   }
 
+  // Compute the maximum number of non-zero-offset edges inside any cyclic
+  // SCC of the propagation graph (built from MP / BaseValue / Alias /
+  // InfoEscapedVec edges). A cyclic SCC carrying non-zero offsets is the
+  // topology root cause of spreadMemEscape blow-up: cumulative offset-paths
+  // diverge, so distinct (node, offset) states grow without bound. This is a
+  // deterministic graph property (independent of ASLR or DenseMap order).
+  unsigned computeMaxCycNonzero() {
+    DenseMap<GCPtr *, SmallVector<GCPtr *, 8>> G;
+    DenseMap<GCPtr *, SmallVector<int, 4>> GOff;
+    for (auto &KV : AllPtrLocInfo) {
+      GCPtr *P = KV.second;
+      for (GCPtr *M : P->MPs) {
+        G[P].push_back(M);
+        GOff[P].push_back(0);
+      }
+      for (auto &V : P->BaseValue) {
+        for (int O : V.second) {
+          G[P].push_back(V.first);
+          GOff[P].push_back(O);
+        }
+      }
+      for (auto &V : P->Alias) {
+        for (int O : V.second) {
+          G[P].push_back(V.first);
+          GOff[P].push_back(O);
+        }
+      }
+      for (GCPtr *V : P->InfoEscapedVec) {
+        G[P].push_back(V);
+        GOff[P].push_back(0);
+      }
+    }
+    return tarjanMaxCycNonzero(G, GOff);
+  }
+
+  // Iterative Tarjan SCC. For every cyclic SCC, count non-zero-offset
+  // intra-SCC edges and return the maximum such count.
+  unsigned tarjanMaxCycNonzero(DenseMap<GCPtr *, SmallVector<GCPtr *, 8>> &G,
+                              DenseMap<GCPtr *, SmallVector<int, 4>> &GOff) {
+    unsigned Idx = 0;
+    DenseMap<GCPtr *, unsigned> Disc, Low;
+    SmallVector<GCPtr *, 32> Stk;
+    DenseSet<GCPtr *> OnStk;
+    unsigned MaxCycNonzero = 0;
+    for (auto &KV : G) {
+      if (Disc.count(KV.first)) {
+        continue;
+      }
+      SmallVector<std::pair<GCPtr *, unsigned>, 32> Dfs;
+      Dfs.push_back({KV.first, 0});
+      while (!Dfs.empty()) {
+        GCPtr *U = Dfs.back().first;
+        unsigned &Pos = Dfs.back().second;
+        if (Pos == 0) {
+          Disc[U] = Low[U] = Idx++;
+          Stk.push_back(U);
+          OnStk.insert(U);
+        }
+        if (Pos < G[U].size()) {
+          GCPtr *W = G[U][Pos++];
+          if (!Disc.count(W)) {
+            Dfs.push_back({W, 0});
+            continue;
+          }
+          if (OnStk.count(W)) {
+            Low[U] = std::min(Low[U], Disc[W]);
+          }
+          continue;
+        }
+        Dfs.pop_back();
+        if (!Dfs.empty()) {
+          Low[Dfs.back().first] = std::min(Low[Dfs.back().first], Low[U]);
+        }
+        if (Low[U] != Disc[U]) {
+          continue;
+        }
+        // U roots an SCC; pop it and, if cyclic, count non-zero intra-edges.
+        SmallVector<GCPtr *, 32> Comp;
+        GCPtr *X;
+        do {
+          X = Stk.pop_back_val();
+          OnStk.erase(X);
+          Comp.push_back(X);
+        } while (X != U);
+        if (Comp.size() <= 1) {
+          continue;
+        }
+        DenseSet<GCPtr *> In(Comp.begin(), Comp.end());
+        unsigned Nz = countNonzeroIntraEdges(Comp, G, GOff, In);
+        MaxCycNonzero = std::max(MaxCycNonzero, Nz);
+      }
+    }
+    return MaxCycNonzero;
+  }
+
+  // Count edges within a cyclic SCC whose offset is non-zero.
+  unsigned countNonzeroIntraEdges(SmallVector<GCPtr *, 32> &Comp,
+                                  DenseMap<GCPtr *, SmallVector<GCPtr *, 8>> &G,
+                                  DenseMap<GCPtr *, SmallVector<int, 4>> &GOff,
+                                  DenseSet<GCPtr *> &In) {
+    unsigned Nz = 0;
+    for (GCPtr *N : Comp) {
+      for (unsigned I = 0; I < G[N].size(); ++I) {
+        if (In.count(G[N][I]) && GOff[N][I] != 0) {
+          ++Nz;
+        }
+      }
+    }
+    return Nz;
+  }
+
   bool run() {
     bool Changed = false;
     if (GCNew.empty()) {
@@ -2583,6 +2704,17 @@ public:
     }
     for (auto LoadPtr : LoadValues) {
       processLoadNew(LoadPtr);
+    }
+    // Bail out when the propagation graph has a cyclic SCC with too many
+    // non-zero-offset edges (the direct topology root cause of
+    // spreadMemEscape blow-up: a cycle carrying non-zero offsets makes
+    // cumulative offset-paths diverge into an unbounded number of distinct
+    // (node, offset) states). This is a deterministic compile-time graph
+    // property, so the bail-out decision is order-independent. Keep every
+    // GCNew on the heap (conservative, correct, no stack promotion).
+    if (computeMaxCycNonzero() > CJPEAMaxCycNonzero) {
+      cleanupAnalysisState();
+      return Changed;
     }
     for (Function *Func : SCCFunctions) {
       processFunc(Func);
