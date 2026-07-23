@@ -293,33 +293,3 @@ CJAAResult CangjieAA::run(Function &F, FunctionAnalysisManager &AM) {
   return CJAAResult(F.getParent()->getDataLayout(), TLI, &DT);
 }
 
-CangjieAAWrapperPass::CangjieAAWrapperPass() : FunctionPass(ID) {
-  initializeCangjieAAWrapperPassPass(*PassRegistry::getPassRegistry());
-}
-
-INITIALIZE_PASS_BEGIN(CangjieAAWrapperPass, "cangjie-aa",
-                      "Cangjie Alias Analysis", true, true)
-INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
-INITIALIZE_PASS_END(CangjieAAWrapperPass, "cangjie-aa",
-                    "Cangjie Alias Analysis", true, true)
-
-char CangjieAAWrapperPass::ID = 0;
-
-FunctionPass *llvm::createCangjieAAWrapperPass() {
-  return new CangjieAAWrapperPass();
-}
-
-bool CangjieAAWrapperPass::runOnFunction(Function &F) {
-  auto &TLIWP = getAnalysis<TargetLibraryInfoWrapperPass>();
-  auto &DTWP = getAnalysis<DominatorTreeWrapperPass>();
-  Result.reset(new CJAAResult(F.getParent()->getDataLayout(), TLIWP.getTLI(F),
-                              &DTWP.getDomTree()));
-  return false;
-}
-
-void CangjieAAWrapperPass::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.setPreservesAll();
-  AU.addRequired<DominatorTreeWrapperPass>();
-  AU.addRequired<TargetLibraryInfoWrapperPass>();
-}

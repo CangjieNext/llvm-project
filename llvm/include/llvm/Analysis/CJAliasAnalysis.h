@@ -59,20 +59,6 @@ public:
   CJAAResult run(Function &F, FunctionAnalysisManager &AM);
 };
 
-class CangjieAAWrapperPass : public FunctionPass {
-  std::unique_ptr<CJAAResult> Result;
-
-public:
-  static char ID;
-  CangjieAAWrapperPass();
-  CJAAResult &getResult() { return *Result; }
-  const CJAAResult &getResult() const { return *Result; }
-  bool runOnFunction(Function &F) override;
-  void getAnalysisUsage(AnalysisUsage &AU) const override;
-};
-
-FunctionPass *createCangjieAAWrapperPass();
-
 } // namespace llvm
 
 #endif

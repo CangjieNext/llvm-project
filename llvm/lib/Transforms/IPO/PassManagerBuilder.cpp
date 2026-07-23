@@ -284,8 +284,6 @@ void PassManagerBuilder::addInitialAliasAnalysisPasses(
   // support "obvious" type-punning idioms.
   PM.add(createTypeBasedAAWrapperPass());
   PM.add(createScopedNoAliasAAWrapperPass());
-  if (CJPipeline)
-    PM.add(createCangjieAAWrapperPass());
 }
 
 void PassManagerBuilder::populateFunctionPassManager(
@@ -345,8 +343,6 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
     MPM.add(createJumpThreadingPass());         // Thread jumps.
     MPM.add(createCorrelatedValuePropagationPass()); // Propagate conditionals
   }
-  if (CJPipeline && OptLevel > 1)
-    MPM.add(createCJSimpleRangeAnalysis());
   MPM.add(
       createCFGSimplificationPass(SimplifyCFGOptions().convertSwitchRangeToICmp(
           true))); // Merge & remove BBs
@@ -407,9 +403,6 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
   MPM.add(createCFGSimplificationPass(
       SimplifyCFGOptions().convertSwitchRangeToICmp(true)));
   MPM.add(createInstructionCombiningPass());
-  if (CJPipeline) {
-    MPM.add(createCJLoopFloatOptLegacyPass());
-  }
   // We resume loop passes creating a second loop pipeline here.
   if (EnableLoopFlatten) {
     MPM.add(createLoopFlattenPass()); // Flatten loops
@@ -614,19 +607,9 @@ void PassManagerBuilder::populateModulePassManager(
     }
     SLPVectorize = true;
 
-    // Fill Klass at the beginning since related structs may be optimized later
-    MPM.add(createCJFillMetadataLegacyPass());
-    MPM.add(createCJRuntimeLoweringLegacyPass());
-    if (EnableCJBarrierSplit)
-      MPM.add(createCJBarrierSplitLegacyPass());
   }
 
   auto addCangjiePasses = [&]() {
-    if (CJPipeline) {
-      MPM.add(createCangjieSpecificOptLegacyPass(OptLevel));
-      MPM.add(createPlaceSafepointsLegacyPass());
-      MPM.add(createCJRewriteStatepointLegacyPass(OptLevel));
-    }
   };
   MPM.add(createAnnotation2MetadataLegacyPass());
 
@@ -707,11 +690,6 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(Inliner);
     Inliner = nullptr;
     RunInliner = true;
-  }
-
-  if (CJPipeline && OptLevel > 1) {
-    if (EnableCJGenericIntrinsicOpt)
-      MPM.add(createCJGenericIntrinsicOptLegacyPass());
   }
 
   // Infer attributes on declarations, call sites, arguments, etc. for an SCC.

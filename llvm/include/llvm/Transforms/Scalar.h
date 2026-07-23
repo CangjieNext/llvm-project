@@ -556,68 +556,6 @@ FunctionPass *createInstSimplifyLegacyPass();
 //
 FunctionPass *createScalarizeMaskedMemIntrinLegacyPass();
 
-//===----------------------------------------------------------------------===//
-//
-// CJLoopFloatOpt - optimizes cangjie Loop Float Computation
-//
-FunctionPass *createCJLoopFloatOptLegacyPass();
-
-//===----------------------------------------------------------------------===//
-//
-// CJSimpleRangeAnalysis - simple range analysis of cangjie
-//
-FunctionPass *createCJSimpleRangeAnalysis();
-
-//===----------------------------------------------------------------------===//
-//
-// CJFillMetadata - Fill size/bitmap/flag fields for klass global varible
-// CJFillMetadata - Fill size/bitmap/flag fields for klass global varible
-//
-ModulePass *createCJFillMetadataLegacyPass();
-ModulePass *createCJFillMetadataLegacyPass();
-
-//===----------------------------------------------------------------------===//
-//
-// CJRuntimeLowering - Rewrite frontend method to runtime interfaces
-//
-ModulePass *createCJRuntimeLoweringLegacyPass();
-
-//===----------------------------------------------------------------------===//
-//
-// CheckFastCall - Checks the fastcall from the optimized code and marks it
-//
-ModulePass *createCangjieSpecificOptLegacyPass(unsigned OptLevel);
-
-//===----------------------------------------------------------------------===//
-//
-// CJRewriteStatepoint - Rewrite any gc.statepoints which do not yet
-// have explicit relocations according to Cangjie GC.
-//
-ModulePass *createCJRewriteStatepointLegacyPass(unsigned OptLevel);
-
-//===----------------------------------------------------------------------===//
-//
-// CJBarrierOpt - optimizes cangjie write barriers
-//
-ModulePass *createCJBarrierOptLegacyPass();
-
-//===----------------------------------------------------------------------===//
-//
-// CJBarrierSplit - Splitting the cangjie barriers
-//
-ModulePass *createCJBarrierSplitLegacyPass();
-
-//===----------------------------------------------------------------------===//
-//
-// CJGenericIntrinsicOpt - optimizes cangjie generic intrinsics
-//
-FunctionPass *createCJGenericIntrinsicOptLegacyPass();
-
-//===----------------------------------------------------------------------===//
-//
-// InsertCJTBAA - insert Cangjie TBAA Metadata
-//
-FunctionPass *createInsertCJTBAALegacyPass();
 } // namespace llvm
 
 #endif

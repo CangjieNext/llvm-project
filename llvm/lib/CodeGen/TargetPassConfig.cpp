@@ -1126,13 +1126,6 @@ bool TargetPassConfig::addISelPasses() {
   PM->add(createTargetTransformInfoWrapperPass(TM->getTargetIRAnalysis()));
 
   if (CJPipeline) {
-    if (CangjieJIT) {
-      addPass(createCJFillMetadataLegacyPass());
-      addPass(createCJRuntimeLoweringLegacyPass());
-      addPass(createCangjieSpecificOptLegacyPass(0));
-      addPass(createPlaceSafepointsLegacyPass());
-      addPass(createCJRewriteStatepointLegacyPass(0));
-    }
     addPass(createCJBarrierLoweringPass(getOptLevel()));
     if (CangjieThreadSanitizer) {
       addPass(createThreadSanitizerPass());
