@@ -111,16 +111,6 @@ void llvm::initializeScalarOpts(PassRegistry &Registry) {
   initializeLoopLoadEliminationPass(Registry);
   initializeLoopSimplifyCFGLegacyPassPass(Registry);
   initializeLoopVersioningLegacyPassPass(Registry);
-  // Cangjie pipeline pass
-  initializeCJFillMetadataLegacyPassPass(Registry);
-  initializeCJBarrierOptLegacyPassPass(Registry);
-  initializeCJBarrierSplitLegacyPassPass(Registry);
-  initializeCJLoopFloatOptLegacyPassPass(Registry);
-  initializeCJRuntimeLoweringLegacyPassPass(Registry);
-  initializeCangjieSpecificOptLegacyPassPass(Registry);
-  initializeInsertCJTBAALegacyPassPass(Registry);
-  initializeCJSimpleRangeAnalysisPass(Registry);
-  initializeCJRewriteStatepointLegacyPassPass(Registry);
 }
 
 void LLVMAddLoopSimplifyCFGPass(LLVMPassManagerRef PM) {
