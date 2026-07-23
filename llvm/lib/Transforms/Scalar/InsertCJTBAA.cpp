@@ -923,27 +923,3 @@ PreservedAnalyses InsertCJTBAA::run(Function &F,
   return PreservedAnalyses::all();
 }
 
-namespace {
-class InsertCJTBAALegacyPass : public FunctionPass {
-public:
-  // Pass identification, replacement for typeid.
-  static char ID;
-
-  InsertCJTBAALegacyPass() : FunctionPass(ID) {
-    initializeInsertCJTBAALegacyPassPass(*PassRegistry::getPassRegistry());
-  }
-  ~InsertCJTBAALegacyPass() = default;
-
-  bool runOnFunction(Function &F) override { return insertCJTBAA(F); };
-};
-
-} // end namespace
-
-char InsertCJTBAALegacyPass::ID = 0;
-
-FunctionPass *llvm::createInsertCJTBAALegacyPass() {
-  return new InsertCJTBAALegacyPass();
-}
-
-INITIALIZE_PASS(InsertCJTBAALegacyPass, "insert-cj-tbaa", "Insert CJ TBAA",
-                false, false)

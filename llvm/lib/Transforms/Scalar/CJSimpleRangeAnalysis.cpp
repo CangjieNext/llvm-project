@@ -480,35 +480,3 @@ PreservedAnalyses CJSimpleRangeAnalysisPass::run(Function &F,
   return PreservedAnalyses::all();
 }
 
-namespace {
-class CJSimpleRangeAnalysis : public FunctionPass {
-  CJSimpleRangeAnalysisPass Impl;
-
-public:
-  static char ID;
-  explicit CJSimpleRangeAnalysis() : FunctionPass(ID) {
-    initializeCJSimpleRangeAnalysisPass(*PassRegistry::getPassRegistry());
-  }
-  ~CJSimpleRangeAnalysis() = default;
-
-  bool runOnFunction(Function &F) override {
-    auto &LI = this->getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
-    auto &DT = this->getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
-    return Impl.runImpl(F, LI, DT);
-  }
-
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.addRequired<LoopInfoWrapperPass>();
-    AU.addRequired<DominatorTreeWrapperPass>();
-  }
-};
-} // namespace
-
-char CJSimpleRangeAnalysis::ID = 0;
-
-FunctionPass *llvm::createCJSimpleRangeAnalysis() {
-  return new CJSimpleRangeAnalysis();
-}
-
-INITIALIZE_PASS(CJSimpleRangeAnalysis, "cj-simple-range-analysis",
-                "Cangjie simple range analysis.", false, false)

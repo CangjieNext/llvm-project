@@ -477,28 +477,3 @@ PreservedAnalyses CJSpecificOpt::run(Module &M, ModuleAnalysisManager &) const {
   return PreservedAnalyses::all();
 }
 
-namespace {
-class CangjieSpecificOptLegacyPass : public ModulePass {
-public:
-  static char ID;
-  unsigned OptLevel;
-
-  explicit CangjieSpecificOptLegacyPass(unsigned OptLevel = 0)
-      : ModulePass(ID), OptLevel(OptLevel) {
-    initializeCangjieSpecificOptLegacyPassPass(
-        *PassRegistry::getPassRegistry());
-  }
-  ~CangjieSpecificOptLegacyPass() = default;
-
-  bool runOnModule(Module &M) override { return processCangjieIR(M, OptLevel); }
-};
-} // namespace
-
-char CangjieSpecificOptLegacyPass::ID = 0;
-
-ModulePass *llvm::createCangjieSpecificOptLegacyPass(unsigned OptLevel) {
-  return new CangjieSpecificOptLegacyPass(OptLevel);
-}
-
-INITIALIZE_PASS(CangjieSpecificOptLegacyPass, "cj-specific-opt",
-                "Cangjie Specific Optimize", false, false)

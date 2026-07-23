@@ -1625,24 +1625,3 @@ PreservedAnalyses CJFillMetadata::run(Module &M, ModuleAnalysisManager &) const 
   return PreservedAnalyses::all();
 }
 
-namespace {
-class CJFillMetadataLegacyPass : public ModulePass {
-public:
-  static char ID;
-  CJFillMetadataLegacyPass() : ModulePass(ID) {
-    initializeCJFillMetadataLegacyPassPass(*PassRegistry::getPassRegistry());
-  }
-  ~CJFillMetadataLegacyPass() = default;
-
-  bool runOnModule(Module &M) override { return fillGV(M); };
-};
-} // namespace
-
-char CJFillMetadataLegacyPass::ID = 0;
-
-ModulePass *llvm::createCJFillMetadataLegacyPass() {
-  return new CJFillMetadataLegacyPass();
-}
-
-INITIALIZE_PASS(CJFillMetadataLegacyPass, "cj-fill-metadata", "Fill Cangjie Metadata", false,
-                false)
