@@ -1144,7 +1144,7 @@ bool llvm::maybeCJFinalizerObj(Value *V) {
   for (auto *Base : Bases) {
     if (auto *CB = dyn_cast<CallBase>(Base)) {
       auto *F = CB->getCalledFunction();
-      if (F && F->getName() == "CJ_MCC_NewFinalizerStub")
+      if (F && F->getName().startswith("CJ_MCC_NewFinalizer"))
         return true;
     }
   }
