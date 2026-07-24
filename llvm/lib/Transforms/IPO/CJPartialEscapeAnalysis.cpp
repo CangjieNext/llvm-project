@@ -31,6 +31,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/SafepointIRVerifier.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Utils/CallGraphUpdater.h"
 #include "llvm/Transforms/Utils/Local.h"
@@ -1862,9 +1863,11 @@ public:
   // MemPtr overrides whose prologue shares the same structure. See
   // compensateMPsSpread.
   //
-  // The per-bucket maximum is saved on enter and restored on exit so that a
-  // high-level frame cannot leave a lingering maximum that over-cuts later
-  // same-bucket re-entries after it has returned.
+  // State bookkeeping is RAII: SpreadGuard enters on construction
+  // (conditioned lift of the bucket's MaxES via SaveAndRestore, plus
+  // ++Depth) and exits on destruction (--Depth), so every early return --
+  // and any future exception path -- restores guard state without a manual
+  // exit call at each return site.
   enum SpreadKind : unsigned { SK_InfoEscape = 0, SK_Escape = 1, SK_Count };
   struct SpreadBucket {
     unsigned Depth = 0;
@@ -1876,31 +1879,43 @@ public:
     SpreadBucket &B = SpreadBuckets[Kind][Direct];
     return B.Depth > 0 && ES <= B.MaxES;
   }
-  unsigned enterSpread(SpreadKind Kind, bool Direct, unsigned ES) {
-    SpreadBucket &B = SpreadBuckets[Kind][Direct];
-    unsigned OldMaxES = B.MaxES;
-    if (B.Depth == 0 || ES > B.MaxES)
-      B.MaxES = ES;
-    ++B.Depth;
-    return OldMaxES;
-  }
-  void exitSpread(SpreadKind Kind, bool Direct, unsigned OldMaxES) {
-    SpreadBucket &B = SpreadBuckets[Kind][Direct];
-    --B.Depth;
-    B.MaxES = OldMaxES;
-  }
+
+  // RAII entry/exit for one spread* frame on *this* node. MaxES is
+  // saved-and-restored by SaveAndRestore (its natural use); Depth is a
+  // counter kept ++/-- rather than snapshot-restored, so the count tracks
+  // active frames rather than a captured value (robust even if Depth were
+  // ever touched mid-frame). Both fields belong to one bucket, so the guard
+  // is keyed on (Kind, Direct).
+  struct SpreadGuard {
+    GCPtr *Node;
+    SpreadKind Kind;
+    bool Direct;
+    SaveAndRestore<unsigned> MaxESGuard;
+    SpreadGuard(GCPtr *N, SpreadKind K, bool D, unsigned ES)
+        : Node(N), Kind(K), Direct(D),
+          MaxESGuard(N->SpreadBuckets[K][D].MaxES,
+                     (N->SpreadBuckets[K][D].Depth == 0 ||
+                      ES > N->SpreadBuckets[K][D].MaxES)
+                         ? ES
+                         : N->SpreadBuckets[K][D].MaxES) {
+      ++N->SpreadBuckets[K][D].Depth;
+    }
+    ~SpreadGuard() { --Node->SpreadBuckets[Kind][Direct].Depth; }
+    SpreadGuard(const SpreadGuard &) = delete;
+    SpreadGuard &operator=(const SpreadGuard &) = delete;
+  };
 
   // Compensate for the MPs growth that happens during a spread
   // (spreadMemEscape -> memPtrspreadEscape -> MemPtr::create(needInsert=
-  // Direct) -> insertMem appends to a GCPtr base's MPs). Called only from the
-  // cut path of the GCPtr base spreadEscape: spreadEscape's entry has no
-  // early return, so the original algorithm ran the full body (including the
-  // MPs loop) on every same-bucket re-entry, marking/cascading freshly
+  // Direct) -> insertMem appends to a GCPtr base's MPs). Called only from
+  // the cut path of the GCPtr base spreadEscape: spreadEscape's entry has
+  // no early return, so the original algorithm ran the full body (including
+  // the MPs loop) on every same-bucket re-entry, marking/cascading freshly
   // inserted members. This loop is idempotent -- the SuccBBInfo guard skips
   // members already propagated at >= ES -- so it only touches newly inserted
   // / not-yet-marked members. spreadInfoEscape does NOT use this: its
-  // prologue forces same-bucket re-entry to early-return before the MPs loop
-  // in the original algorithm, so compensating would over-mark. MemPtr
+  // prologue forces same-bucket re-entry to early-return before the MPs
+  // loop in the original algorithm, so compensating would over-mark. MemPtr
   // overrides don't need it either: their own MPs stay empty (insertMem
   // targets the GCPtr base, not the MemPtr slot).
   void compensateMPsSpread(BasicBlock *BB, unsigned ES,
@@ -1919,11 +1934,10 @@ public:
     if (shouldCutSpread(SK_InfoEscape, Direct, ES)) {
       return;
     }
-    unsigned OldMaxES = enterSpread(SK_InfoEscape, Direct, ES);
+    SpreadGuard G(this, SK_InfoEscape, Direct, ES);
     if (isDerivedPtr() && Direct && DirectSpread < InfoEscaped) {
       DirectSpread = InfoEscaped;
     } else if (SuccBBInfo.count(this) && SuccBBInfo[this] >= InfoEscaped) {
-      exitSpread(SK_InfoEscape, Direct, OldMaxES);
       return;
     }
     if (SuccBBInfo[this] < InfoEscaped) {
@@ -1948,7 +1962,6 @@ public:
     for (auto &V : InfoEscapedVec) {
       V->spreadInfoEscape(BB, ES, SuccBBInfo, Direct);
     }
-    exitSpread(SK_InfoEscape, Direct, OldMaxES);
   }
 
   virtual void spreadMemEscape(BasicBlock *BB, unsigned ES,
@@ -1958,12 +1971,11 @@ public:
     if (IsVisiting) {
       return;
     }
-    IsVisiting = true;
+    SaveAndRestore<bool> Guard(IsVisiting, true);
     int CurOffset = Offsets.pop_back_val();
     if (CurOffset >= 0) {
       Offsets.push_back(CurOffset);
       memPtrspreadEscape(BB, ES, SuccBBInfo, this, Offsets, Direct);
-      IsVisiting = false;
       return;
     }
     if (isPhiOrSelect()) {
@@ -1991,7 +2003,6 @@ public:
       for (auto V : Alias) {
         V.first->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
       }
-      IsVisiting = false;
       return;
     }
     if (Offsets.size() > 0) {
@@ -2032,7 +2043,6 @@ public:
       }
       Offsets.push_back(CurOffset);
     }
-    IsVisiting = false;
   }
 
   virtual void spreadEscape(BasicBlock *BB, unsigned ES,
@@ -2042,7 +2052,7 @@ public:
       compensateMPsSpread(BB, ES, SuccBBInfo);
       return;
     }
-    unsigned OldMaxES = enterSpread(SK_Escape, Direct, ES);
+    SpreadGuard G(this, SK_Escape, Direct, ES);
     if (isDerivedPtr() && Direct && DirectSpread < ES) {
       DirectSpread = ES;
     }
@@ -2074,7 +2084,6 @@ public:
     for (auto &V : InfoEscapedVec) {
       V->spreadInfoEscape(BB, ES, SuccBBInfo, Direct);
     }
-    exitSpread(SK_Escape, Direct, OldMaxES);
   }
 
   void insertMem(GCPtr *MP) { MPs.push_back(MP); }
@@ -2085,11 +2094,15 @@ public:
   bool IsPhiOrSelect;
   unsigned DirectSpread = NotEscape;
   bool InfoEscapeInfo = false;
+  // Re-entrancy guard for spreadMemEscape (kept separate from the
+  // SpreadBuckets guard state, which keys on (Kind, Direct) for the
+  // spreadInfoEscape/spreadEscape family). RAII-managed directly via
+  // SaveAndRestore: each spreadMemEscape call site binds it true right after
+  // the `if (IsVisiting) return;` early-out, and SaveAndRestore restores the
+  // prior (false) value on destruction, so every early return -- and any
+  // future exception path -- restores the flag without a manual reset at
+  // each return site.
   bool IsVisiting = false;
-  // Re-entrancy guard state for spreadInfoEscape / spreadEscape (kept
-  // separate from IsVisiting, which only guards spreadMemEscape). Indexed by
-  // [SpreadKind][Direct]; see shouldCutSpread for why the (Kind, Direct)
-  // keying is required for fixed-point equivalence.
   int MemOff = 0;
   InitializeState InitializeFlag = NotInitialize;
   unsigned LoopDepth;
@@ -2155,11 +2168,10 @@ public:
     if (shouldCutSpread(SK_InfoEscape, Direct, ES)) {
       return;
     }
-    unsigned OldMaxES = enterSpread(SK_InfoEscape, Direct, ES);
+    SpreadGuard G(this, SK_InfoEscape, Direct, ES);
     if (isDerivedPtr() && Direct && DirectSpread < InfoEscaped) {
       DirectSpread = InfoEscaped;
     } else if (SuccBBInfo.count(this) && SuccBBInfo[this] >= InfoEscaped) {
-      exitSpread(SK_InfoEscape, Direct, OldMaxES);
       return;
     }
     if (SuccBBInfo[this] < InfoEscaped) {
@@ -2178,7 +2190,6 @@ public:
     Base->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
     Offsets.pop_back();
     if (Offset < 0) {
-      exitSpread(SK_InfoEscape, Direct, OldMaxES);
       return;
     }
     if (Direct) {
@@ -2206,7 +2217,6 @@ public:
         }
       }
     }
-    exitSpread(SK_InfoEscape, Direct, OldMaxES);
   }
 
   void spreadMemEscape(
@@ -2215,7 +2225,7 @@ public:
     if (IsVisiting) {
       return;
     }
-    IsVisiting = true;
+    SaveAndRestore<bool> Guard(IsVisiting, true);
     int CurOffset = Offsets.back();
     for (auto DefineMap : DefineValues) {
       for (GCPtr *Define : DefineMap.second) {
@@ -2235,7 +2245,6 @@ public:
     Base->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
     Offsets.pop_back();
     if (Offset < 0) {
-      IsVisiting = false;
       return;
     }
     if (Direct) {
@@ -2263,7 +2272,6 @@ public:
         }
       }
     }
-    IsVisiting = false;
   }
 
   void spreadEscape(BasicBlock *BB, unsigned ES,
@@ -2272,7 +2280,7 @@ public:
     if (shouldCutSpread(SK_Escape, Direct, ES)) {
       return;
     }
-    unsigned OldMaxES = enterSpread(SK_Escape, Direct, ES);
+    SpreadGuard G(this, SK_Escape, Direct, ES);
     if (isDerivedPtr() && Direct && DirectSpread < ES) {
       DirectSpread = ES;
     }
@@ -2287,7 +2295,6 @@ public:
     }
     if (Offset < 0 || Base->InfoEscapedVec.size() != 0) {
       Base->spreadInfoEscape(BB, Escaped, SuccBBInfo, Direct);
-      exitSpread(SK_Escape, Direct, OldMaxES);
       return;
     }
     SmallVector<int, 8> Offsets;
@@ -2317,7 +2324,6 @@ public:
         }
       }
     }
-    exitSpread(SK_Escape, Direct, OldMaxES);
   }
 
   bool isDerivedPtr() override { return Base->isDerivedPtr(); }
