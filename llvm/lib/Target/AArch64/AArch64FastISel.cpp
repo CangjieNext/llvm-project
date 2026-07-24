@@ -3134,6 +3134,14 @@ bool AArch64FastISel::fastLowerCall(CallLoweringInfo &CLI) {
   if (!Callee && !Symbol)
     return false;
 
+  // Cangjie N2C/C2N stub callees under Large+MachO: bail to SelectionDAG, whose
+  // LowerCall (MO_NO_FLAG) keeps the target a direct global so AsmPrinter
+  // intercepts it (CJStubGV + N2CStub).
+  if (TM.getCodeModel() == CodeModel::Large && Subtarget->isTargetMachO())
+    if (auto *F = dyn_cast<Function>(Callee))
+      if (F->isCangjieNativeStub(MF->getFunction()) || F->isCangjieSafePoint())
+        return false;
+
   // Allow SelectionDAG isel to handle calls to functions like setjmp that need
   // a bti instruction following the call.
   if (CLI.CB && CLI.CB->hasFnAttr(Attribute::ReturnsTwice) &&

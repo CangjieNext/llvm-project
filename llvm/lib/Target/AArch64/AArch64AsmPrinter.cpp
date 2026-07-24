@@ -2023,16 +2023,31 @@ void AArch64AsmPrinter::emitCangjieCallStubInstImpl(const MachineInstr *MI,
   // |  callee-addr                        |
   // |  param-stack-size (16 bytes align)  |
   extendStackAndInsertFFIInfoForJmp(SymOriAddr, SymOriAddrLo12, CallFrameSize);
-  MCInst TemInst;
   if (Opcode == AArch64::TCRETURNdi) {
-    Opcode = AArch64::B; // Branch directly for tailcall
+    if (TM.getCodeModel() == CodeModel::Large &&
+        getSubtargetInfo().getTargetTriple().isOSBinFormatMachO()) {
+      MCSymbol *StubSym = getSymbol(F);
+      EmitToStreamer(*OutStreamer, MCInstBuilder(AArch64::ADRP).addReg(AArch64::X16).addExpr(
+          MCSymbolRefExpr::create(StubSym, MCSymbolRefExpr::VK_GOTPAGE, OutContext)));
+      EmitToStreamer(*OutStreamer,
+                     MCInstBuilder(AArch64::LDRXui)
+                         .addReg(AArch64::X16)
+                         .addReg(AArch64::X16)
+                         .addExpr(MCSymbolRefExpr::create(
+                             StubSym, MCSymbolRefExpr::VK_GOTPAGEOFF, OutContext))
+                         .addImm(0));
+      EmitToStreamer(*OutStreamer, MCInstBuilder(AArch64::BR).addReg(AArch64::X16));
+    } else {
+      MCInst TemInst;
+      TemInst.setOpcode(AArch64::B);
+      TemInst.addOperand(SymNewAddr);
+      EmitToStreamer(*OutStreamer, TemInst);
+    }
   } else {
     assert(Opcode == AArch64::BL &&
            "Opcode should be BL or TCRETURNdi for Cangjie Call Stub");
+    emitCangjieRuntimeCall(getSymbol(F));
   }
-  TemInst.setOpcode(Opcode);
-  TemInst.addOperand(SymNewAddr);
-  EmitToStreamer(*OutStreamer, TemInst);
   SM.recordCJStackMap(*MI);
   return;
 }

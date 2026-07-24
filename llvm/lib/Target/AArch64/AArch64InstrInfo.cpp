@@ -129,7 +129,9 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
   }
   const auto &CallerFunc = MI.getParent()->getParent()->getFunction();
   if (Callee->isCangjieNativeStub(CallerFunc)) {
-    return 24; // 24: 24 bytes(6 insts) for Native Stub
+    // emitCangjieCallStubInstImpl: 20B (extendStackAndInsertFFIInfoForJmp) +
+    // final call BL/B 4B -> ADRP+LDR+BLR/BR 12B under Large+MachO (+GotExtra).
+    return 24 + GotExtra;
   }
   if (Callee->isGetCJThreadId()) {
     return 12; // 12: 12 bytes(3 insts) for mutex opt
