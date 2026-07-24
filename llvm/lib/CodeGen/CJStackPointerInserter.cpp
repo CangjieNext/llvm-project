@@ -25,6 +25,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/Support/Debug.h"
@@ -767,7 +768,7 @@ void CJStackPointerInserter::getAnalysisUsage(AnalysisUsage &AU) const {
 }
 
 bool CJStackPointerInserter::needRewriteCall(MachineInstr &MI) {
-  if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+  if (!isStatepointOpcode(MI.getOpcode()))
     return false;
 
   StatepointOpers SO(&MI);
@@ -900,7 +901,17 @@ bool CJStackPointerInserter::rewriteStatepoint(MachineFunction &MF,
       MIB.add(MO);
     }
   }
-  MI.getParent()->insert(MI.getNextNode(), MIB);
+  // STATEPOINT_TAIL_CALL is a terminator (isTerminator/isReturn) and is the
+  // last instruction in its block, so MI.getNextNode() is null. Insert the
+  // rewritten MI before MI; MI itself is erased later, leaving the rewritten
+  // MI in MI's original position. For a regular STATEPOINT (non-terminator)
+  // we preserve the original "insert after MI" behavior.
+  MachineBasicBlock::iterator InsertPt;
+  if (MI.isTerminator())
+    InsertPt = MI.getIterator();
+  else
+    InsertPt = MI.getNextNode();
+  MI.getParent()->insert(InsertPt, MIB);
   return true;
 }
 

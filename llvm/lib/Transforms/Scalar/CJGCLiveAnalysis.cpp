@@ -290,10 +290,10 @@ void GCLiveAnalysis::checkBasicSSA(PtrLiveData &Data) {
 
 #endif
 
-// Conservatively identifies any definitions which might be live at the
-// given instruction. The  analysis is performed immediately before the
-// given instruction. Values defined by that instruction are not considered
-// live.  Values used by that instruction are considered live.
+// Conservatively identifies any definitions which might be live across the
+// given parse point. For statepoint insertion we care about values that remain
+// live *after* the current call finishes, not values used only as operands of
+// the current call itself.
 void GCLiveAnalysis::analyzeParsePointLiveness(CallBase *Call,
                                                SetVector<Value *> &LiveSet) {
   findLiveSetAtInst(Call, LiveSet);
@@ -437,8 +437,9 @@ void GCLiveAnalysis::computeLiveness() {
 #endif
 }
 
-/// Given results from the dataflow liveness computation, find the set of live
-/// Values at a particular instruction.
+/// Given results from the dataflow liveness computation, find the set of values
+/// live immediately after the given instruction. The instruction result itself
+/// is never considered live at that point.
 void GCLiveAnalysis::findLiveSetAtInst(Instruction *Inst,
                                        SetVector<Value *> &Out) {
   BasicBlock *BB = Inst->getParent();
@@ -451,12 +452,32 @@ void GCLiveAnalysis::findLiveSetAtInst(Instruction *Inst,
   auto BI = InstLiveSetCache.count(BB)
                 ? InstLiveSetCache[BB].first->getIterator().getReverse()
                 : BB->rbegin();
-  // We want to handle the statepoint itself oddly.  It's
-  // call result is not live (normal), nor are it's arguments
-  // (unless they're used again later).  This adjustment is
-  // specifically what we need to relocate
-  computeLiveInValues(BI, ++Inst->getIterator().getReverse(), LiveOut);
+  // Liveness for a parse point is defined at the program point immediately
+  // after the call. This trims values that are consumed only by the current
+  // call and are dead afterwards.
+  computeLiveInValues(BI, Inst->getIterator().getReverse(), LiveOut);
   LiveOut.remove(Inst);
+  // For FFI/runtime calls (callee does not have cangjie GC), the callee has
+  // no cangjie safepoint and cannot relocate GC pointer arguments itself.
+  // The caller must record these pointers in gc-live so the runtime updates
+  // the caller's frame slot when GC moves the object during the call.
+  // For cangjie-to-cangjie calls (callee has gc "cangjie"), the callee has
+  // its own safepoints that handle relocation of its incoming arguments.
+  // The caller can safely trim these call args, which keeps GCRelocates
+  // empty and enables STATEPOINT_TAIL_CALL for such calls.
+  if (auto *Call = dyn_cast<CallBase>(Inst)) {
+    Function *Callee = Call->getCalledFunction();
+    bool CalleeHasCangjieGC =
+        Callee && Callee->hasGC() && Callee->getGC() == "cangjie";
+    if (!CalleeHasCangjieGC) {
+      for (Value *Arg : Call->args()) {
+        if (isa<Constant>(Arg))
+          continue;
+        if (isHandledGCPointerType(Arg->getType()) && !FakeGCPtrs.count(Arg))
+          LiveOut.insert(Arg);
+      }
+    }
+  }
   Out.insert(LiveOut.begin(), LiveOut.end());
   InstLiveSetCache[BB] = {Inst, Out};
 }

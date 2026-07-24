@@ -28,6 +28,7 @@
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/StackMaps.h"
+#include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
@@ -85,7 +86,7 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
     return 0;
   }
   const MachineOperand *MOSym = nullptr;
-  if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+  if (isStatepointOpcode(MI.getOpcode())) {
     StatepointOpers SO(&MI);
     if (SO.getID() == Cangjie::CJStatepointID::NewArrayFast) {
       return 52; // 52: 52 bytes(13 insts) for new array call
@@ -187,6 +188,7 @@ unsigned AArch64InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
     assert(NumBytes % 4 == 0 && "Invalid number of NOP bytes requested!");
     break;
   case TargetOpcode::STATEPOINT:
+  case TargetOpcode::STATEPOINT_TAIL_CALL:
     NumBytes = StatepointOpers(&MI).getNumPatchBytes();
     assert(NumBytes % 4 == 0 && "Invalid number of NOP bytes requested!");
     // No patch bytes means a normal call inst is emitted

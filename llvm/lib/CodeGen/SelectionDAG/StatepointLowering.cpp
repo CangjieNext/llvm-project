@@ -22,6 +22,8 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/Triple.h"
+#include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/CodeGen/GCMetadata.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
@@ -330,10 +332,18 @@ static void reservePreviousStackSlotForValue(const Value *IncomingValue,
   Builder.StatepointLowering.setLocation(Incoming, Loc);
 }
 
-/// Extract call from statepoint, lower it and return pointer to the
-/// call node. Also update NodeMap so that getValue(statepoint) will
-/// reference lowered call result
-static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
+namespace {
+struct StatepointCallLoweringResult {
+  SDValue ReturnValue;
+  SDNode *CallNode = nullptr;
+  SDNode *CallSeqEnd = nullptr;
+};
+} // end anonymous namespace
+
+/// Extract call from statepoint, lower it and return pointers to the call node
+/// and call sequence end. Also update NodeMap so that getValue(statepoint) will
+/// reference lowered call result.
+static StatepointCallLoweringResult lowerCallFromStatepointLoweringInfo(
     SelectionDAGBuilder::StatepointLoweringInfo &SI,
     SelectionDAGBuilder &Builder, SmallVectorImpl<SDValue> &PendingExports) {
   SDValue ReturnValue, CallEndVal;
@@ -341,9 +351,8 @@ static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
       Builder.lowerInvokable(SI.CLI, SI.EHPadBB);
   SDNode *CallEnd = CallEndVal.getNode();
 
-  // Get a call instruction from the call sequence chain.  Tail calls are not
-  // allowed.  The following code is essentially reverse engineering X86's
-  // LowerCallTo.
+  // Get a call instruction from the call sequence chain.  The following code is
+  // essentially reverse engineering X86's LowerCallTo.
   //
   // We are expecting DAG to have the following form:
   //
@@ -370,7 +379,15 @@ static std::pair<SDValue, SDNode *> lowerCallFromStatepointLoweringInfo(
   }
 
   assert(CallEnd->getOpcode() == ISD::CALLSEQ_END && "expected!");
-  return std::make_pair(ReturnValue, CallEnd->getOperand(0).getNode());
+  return {ReturnValue, CallEnd->getOperand(0).getNode(), CallEnd};
+}
+
+static bool isStatepointTailCallSequenceSafe(SDNode *CallSeqEnd) {
+  assert(CallSeqEnd->getOpcode() == ISD::CALLSEQ_END && "expected!");
+  auto *AdjStackUp = dyn_cast<ConstantSDNode>(CallSeqEnd->getOperand(1));
+  auto *CalleePopBytes = dyn_cast<ConstantSDNode>(CallSeqEnd->getOperand(2));
+  return AdjStackUp && CalleePopBytes && AdjStackUp->getZExtValue() == 0 &&
+         CalleePopBytes->getZExtValue() == 0;
 }
 
 static MachineMemOperand* getMachineMemOperand(MachineFunction &MF,
@@ -933,10 +950,11 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
   SI.CLI.setChain(getRoot());
 
   // Get call node, we will replace it later with statepoint
-  SDValue ReturnVal;
-  SDNode *CallNode;
-  std::tie(ReturnVal, CallNode) =
+  StatepointCallLoweringResult CallLoweringResult =
       lowerCallFromStatepointLoweringInfo(SI, *this, PendingExports);
+  SDValue ReturnVal = CallLoweringResult.ReturnValue;
+  SDNode *CallNode = CallLoweringResult.CallNode;
+  SDNode *CallSeqEnd = CallLoweringResult.CallSeqEnd;
 
   // Construct the actual GC_TRANSITION_START, STATEPOINT, and GC_TRANSITION_END
   // nodes with all the appropriate arguments and return values.
@@ -961,6 +979,10 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
   const bool IsGCTransition =
       (SI.StatepointFlags & (uint64_t)StatepointFlags::GCTransition) ==
       (uint64_t)StatepointFlags::GCTransition;
+  if (SI.IsTailCall &&
+      (IsGCTransition || !SI.CLI.RetTy->isVoidTy() || !SI.GCRelocates.empty() ||
+       !isStatepointTailCallSequenceSafe(CallSeqEnd)))
+    SI.IsTailCall = false;
   if (IsGCTransition) {
     SmallVector<SDValue, 8> TSOps;
 
@@ -1052,8 +1074,10 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
   NodeTys.push_back(MVT::Glue);
 
   unsigned NumResults = NodeTys.size();
+  unsigned StatepointOpcode = SI.IsTailCall ? TargetOpcode::STATEPOINT_TAIL_CALL
+                                            : TargetOpcode::STATEPOINT;
   MachineSDNode *StatepointMCNode =
-    DAG.getMachineNode(TargetOpcode::STATEPOINT, getCurSDLoc(), NodeTys, Ops);
+      DAG.getMachineNode(StatepointOpcode, getCurSDLoc(), NodeTys, Ops);
   DAG.setNodeMemRefs(StatepointMCNode, MemRefs);
 
   // For values lowered to tied-defs, create the virtual registers if used
@@ -1143,8 +1167,13 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
   unsigned NumSinkValues = SinkNode->getNumValues();
   SDValue StatepointValues[2] = {SDValue(SinkNode, NumSinkValues - 2),
                                  SDValue(SinkNode, NumSinkValues - 1)};
-  DAG.ReplaceAllUsesWith(CallNode, StatepointValues);
-  // Remove original call node
+  if (SI.IsTailCall) {
+    DAG.ReplaceAllUsesWith(CallSeqEnd, StatepointValues);
+    DAG.DeleteNode(CallSeqEnd);
+  } else {
+    DAG.ReplaceAllUsesWith(CallNode, StatepointValues);
+  }
+  // Remove original call node.
   DAG.DeleteNode(CallNode);
 
   // Since we always emit CopyToRegs (even for local relocates), we must
@@ -1275,6 +1304,13 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
   SI.StatepointFlags = I.getFlags();
   SI.NumPatchBytes = I.getNumPatchBytes();
   SI.EHPadBB = EHPadBB;
+  const Triple &TT = DAG.getTarget().getTargetTriple();
+  SI.IsTailCall =
+      I.isTailCall() && I.getNumPatchBytes() == 0 &&
+      (TT.isAArch64() || TT.isX86()) &&
+      !needToDisableTailCall(I, DAG.getTargetLoweringInfo(),
+                             I.isMustTailCall()) &&
+      isInTailCallPosition(I, DAG.getTarget());
 
   SI.ActualCalledFunction = I.getActualCalledFunction();
 
@@ -1286,9 +1322,12 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
     // See: X86FrameLowering.cpp:hasFP()
     DAG.getMachineFunction().getFrameInfo().setHasStackMap();
   }
+  if (SI.IsTailCall) {
+    HasTailCall = true;
+    return;
+  }
   // Export the result value if needed
   const auto GCResultLocality = getGCResultLocality(I);
-
   if ((!GCResultLocality.first && !GCResultLocality.second) ||
       (I.getActualReturnType()->isEmptyTy())) {
     // The return value is not needed, just generate a poison value.

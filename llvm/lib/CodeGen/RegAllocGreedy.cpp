@@ -2365,7 +2365,7 @@ RAGreedy::RAGreedyStats RAGreedy::computeStats(MachineBasicBlock &MBB) {
   auto isPatchpointInstr = [](const MachineInstr &MI) {
     return MI.getOpcode() == TargetOpcode::PATCHPOINT ||
            MI.getOpcode() == TargetOpcode::STACKMAP ||
-           MI.getOpcode() == TargetOpcode::STATEPOINT;
+           isStatepointOpcode(MI.getOpcode());
   };
   for (MachineInstr &MI : MBB) {
     if (MI.isCopy()) {

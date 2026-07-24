@@ -31,6 +31,7 @@
 #include "llvm/CodeGen/MachineModuleInfoImpls.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/StackMaps.h"
+#include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Mangler.h"
@@ -1588,6 +1589,8 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
 
   NoAutoPaddingScope NoPadScope(*OutStreamer);
   StatepointOpers SOpers(&MI);
+  const bool IsTailCallStatepoint =
+      MI.getOpcode() == TargetOpcode::STATEPOINT_TAIL_CALL;
   // Lower call target and choose correct opcode
   const MachineOperand &CallTarget = SOpers.getCallTarget();
   if (CJPipeline) {
@@ -1608,6 +1611,8 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
   }
 
   if (unsigned PatchBytes = SOpers.getNumPatchBytes()) {
+    assert(!IsTailCallStatepoint &&
+           "tail call statepoint cannot request patch bytes");
     emitX86Nops(*OutStreamer, PatchBytes, Subtarget);
   } else {
     MCOperand CallTargetMCOp;
@@ -1617,10 +1622,13 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
     case MachineOperand::MO_ExternalSymbol: {
       CallTargetMCOp = MCIL.LowerSymbolOperand(
           CallTarget, MCIL.GetSymbolFromOperand(CallTarget));
-      CallOpcode = X86::CALL64pcrel32;
+      CallOpcode =
+          IsTailCallStatepoint ? X86::TAILJMPd64 : X86::CALL64pcrel32;
       if (tryEmitCangjieSpecificCallByMOSym(&MI, CallTarget, CallOpcode)) {
         return;
       }
+      CallOpcode = IsTailCallStatepoint ? convertTailJumpOpcode(CallOpcode)
+                                        : CallOpcode;
       // Currently, we only support relative addressing with statepoints.
       // Otherwise, we'll need a scratch register to hold the target
       // address.  You'll fail asserts during load & relocation if this
@@ -1629,7 +1637,8 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
     }
     case MachineOperand::MO_Immediate:
       CallTargetMCOp = MCOperand::createImm(CallTarget.getImm());
-      CallOpcode = X86::CALL64pcrel32;
+      CallOpcode = IsTailCallStatepoint ? convertTailJumpOpcode(X86::TAILJMPd64)
+                                        : X86::CALL64pcrel32;
       // Currently, we only support relative addressing with statepoints.
       // Otherwise, we'll need a scratch register to hold the target
       // immediate.  You'll fail asserts during load & relocation if this
@@ -1641,7 +1650,7 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
         report_fatal_error("Lowering register statepoints with thunks not "
                            "yet implemented.");
       CallTargetMCOp = MCOperand::createReg(CallTarget.getReg());
-      CallOpcode = X86::CALL64r;
+      CallOpcode = IsTailCallStatepoint ? X86::JMP64r : X86::CALL64r;
       break;
     default:
       llvm_unreachable("Unsupported operand type in statepoint call target");
@@ -1652,6 +1661,9 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
     MCInst CallInst;
     CallInst.setOpcode(CallOpcode);
     CallInst.addOperand(CallTargetMCOp);
+    if (IsTailCallStatepoint) {
+      OutStreamer->AddComment("TAILCALL");
+    }
     OutStreamer->emitInstruction(CallInst, getSubtargetInfo());
   }
 
@@ -2804,7 +2816,7 @@ void X86AsmPrinter::tryDoAdaptionForFP16InCJ(const MachineInstr *MI,
   }
 
   unsigned Opcode = MI->getOpcode();
-  if (Opcode == TargetOpcode::STATEPOINT) {
+  if (isStatepointOpcode(Opcode)) {
     return;
   }
 
@@ -3074,6 +3086,7 @@ void X86AsmPrinter::emitInstruction(const MachineInstr *MI) {
     return;
   }
   case TargetOpcode::STATEPOINT:
+  case TargetOpcode::STATEPOINT_TAIL_CALL:
     return LowerSTATEPOINT(*MI, MCInstLowering);
 
   case TargetOpcode::FAULTING_OP:
@@ -3439,7 +3452,7 @@ void X86AsmPrinter::emitCJThrowException(const MachineInstr *MI,
 // LNewArrayFin
 void X86AsmPrinter::emitCJNewArrayFastPath(const MachineInstr &MI,
                                            const MachineOperand &MOSym) {
-  if (MI.getOpcode() != TargetOpcode::STATEPOINT) {
+  if (!isStatepointOpcode(MI.getOpcode())) {
     report_fatal_error("New Array Must be in Statepoint");
   }
 

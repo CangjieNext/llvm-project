@@ -162,11 +162,26 @@ public:
   ItemIdxHelper<LineNumberItem> LNItems;
   // <regIdxPlusOne, slotIdxPlusOne>
   std::vector<std::pair<unsigned, unsigned>> DerivedInfo;
+  std::map<std::vector<std::pair<unsigned, unsigned>>, unsigned>
+ 	       DerivedInfo2StartIdx;
 
   MaxBitsInfo MaxBits;
   // unordered_map<regNo, bitIdx>, regNo can be used to find callee saved reg
   // while bitIdx is used in prologue.
   const std::unordered_map<uint32_t, uint32_t> &CSRegMap;
+
+  unsigned getOrInsertDerivedInfoStartIdx(
+      const std::vector<std::pair<unsigned, unsigned>> &Items) {
+    auto Itr = DerivedInfo2StartIdx.find(Items);
+    if (Itr != DerivedInfo2StartIdx.end()) {
+      return Itr->second;
+    }
+
+    unsigned StartIdx = DerivedInfo.size();
+    DerivedInfo.insert(DerivedInfo.end(), Items.begin(), Items.end());
+    DerivedInfo2StartIdx.emplace(Items, StartIdx);
+    return StartIdx;
+  }
 };
 
 class DataEncoder {

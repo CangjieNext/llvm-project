@@ -41,6 +41,7 @@
 #include "llvm/CodeGen/MachineModuleInfoImpls.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/StackMaps.h"
+#include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/IR/DataLayout.h"
@@ -1357,6 +1358,8 @@ void AArch64AsmPrinter::emitGcStateCheck() {
 void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
                                         const MachineInstr &MI) {
   StatepointOpers SOpers(&MI);
+  const bool IsTailCallStatepoint =
+      MI.getOpcode() == TargetOpcode::STATEPOINT_TAIL_CALL;
   // Lower call target and choose correct opcode
   const MachineOperand &CallTarget = SOpers.getCallTarget();
   if (CJPipeline) {
@@ -1377,6 +1380,8 @@ void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
   }
 
   if (unsigned PatchBytes = SOpers.getNumPatchBytes()) {
+    assert(!IsTailCallStatepoint &&
+           "tail call statepoint cannot request patch bytes");
     // 4: size of the patchpoint intrinsic
     assert(PatchBytes % 4 == 0 && "Invalid number of NOP bytes requested");
     for (unsigned i = 0; i < PatchBytes; i += 4)
@@ -1387,8 +1392,11 @@ void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
     switch (CallTarget.getType()) {
     case MachineOperand::MO_GlobalAddress:
     case MachineOperand::MO_ExternalSymbol: {
-      CallOpcode = AArch64::BL;
-      if (tryEmitCangjieSpecificCallByMOSym(&MI, CallTarget, CallOpcode)) {
+      CallOpcode = IsTailCallStatepoint ? AArch64::B : AArch64::BL;
+      unsigned CangjieCallOpcode =
+          IsTailCallStatepoint ? AArch64::TCRETURNdi : CallOpcode;
+      if (tryEmitCangjieSpecificCallByMOSym(&MI, CallTarget,
+                                            CangjieCallOpcode)) {
         SM.recordCJStackMap(MI);
         return;
       }
@@ -1397,11 +1405,11 @@ void AArch64AsmPrinter::LowerSTATEPOINT(MCStreamer &OutStreamer, StackMaps &SM,
     }
     case MachineOperand::MO_Immediate:
       CallTargetMCOp = MCOperand::createImm(CallTarget.getImm());
-      CallOpcode = AArch64::BL;
+      CallOpcode = IsTailCallStatepoint ? AArch64::B : AArch64::BL;
       break;
     case MachineOperand::MO_Register:
       CallTargetMCOp = MCOperand::createReg(CallTarget.getReg());
-      CallOpcode = AArch64::BLR;
+      CallOpcode = IsTailCallStatepoint ? AArch64::BR : AArch64::BLR;
       break;
     default:
       llvm_unreachable("Unsupported operand type in statepoint call target");
@@ -1818,6 +1826,7 @@ void AArch64AsmPrinter::emitInstruction(const MachineInstr *MI) {
     return LowerPATCHPOINT(*OutStreamer, SM, *MI);
 
   case TargetOpcode::STATEPOINT:
+  case TargetOpcode::STATEPOINT_TAIL_CALL:
     return LowerSTATEPOINT(*OutStreamer, SM, *MI);
 
   case TargetOpcode::FAULTING_OP:
@@ -2157,7 +2166,7 @@ void AArch64AsmPrinter::emitCJThrowException(const MachineInstr *MI,
 // .LNewArrayFin
 void AArch64AsmPrinter::emitCJNewArrayFastPath(const MachineInstr &MI,
                                                const MachineOperand &MOSym) {
-  if (MI.getOpcode() != TargetOpcode::STATEPOINT) {
+  if (!isStatepointOpcode(MI.getOpcode())) {
     report_fatal_error("New Obj Must be in Statepoint");
   }
   using namespace AArch64;
