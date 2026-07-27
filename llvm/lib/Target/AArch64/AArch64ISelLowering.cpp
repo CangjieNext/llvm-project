@@ -6882,6 +6882,7 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
     if (CalleeFunc->isCangjieSafepointStub() ||
         CalleeFunc->isCangjieSafePoint() ||
         CalleeFunc->isCangjieStackCheck() ||
+        CalleeFunc->isCangjieThrowException() ||
         CalleeFunc->getName().isGetGCPhase() ||
         CalleeFunc->isGetCJThreadId() ||
         CalleeFunc->getName().isSetDebugLocation() ||

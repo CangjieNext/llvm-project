@@ -266,7 +266,7 @@ private:
   int emitCJSafepointInlineCall(unsigned Index) override;
   void emitGcStateCheck() override;
   void emitGetCJTLSData(int64_t Offset);
-  void emitCangjieRuntimeCall(MCSymbol *Sym);
+  void emitCangjieRuntimeCall(MCSymbol *Sym, bool IsTailCall = false);
 };
 
 } // end anonymous namespace
@@ -1251,7 +1251,7 @@ void AArch64AsmPrinter::emitCJStackCheck(const MachineInstr &MI) {
   OutStreamer->emitLabel(EndSym);
 }
 
-void AArch64AsmPrinter::emitCangjieRuntimeCall(MCSymbol *Sym) {
+void AArch64AsmPrinter::emitCangjieRuntimeCall(MCSymbol *Sym, bool IsTailCall) {
   using namespace AArch64;
   if (TM.getCodeModel() == CodeModel::Large &&
       getSubtargetInfo().getTargetTriple().isOSBinFormatMachO()) {
@@ -1264,10 +1264,12 @@ void AArch64AsmPrinter::emitCangjieRuntimeCall(MCSymbol *Sym) {
                        .addExpr(MCSymbolRefExpr::create(
                            Sym, MCSymbolRefExpr::VK_GOTPAGEOFF, OutContext))
                        .addImm(0));
-    EmitToStreamer(*OutStreamer, MCInstBuilder(BLR).addReg(X16));
+    EmitToStreamer(*OutStreamer,
+                   MCInstBuilder(IsTailCall ? BR : BLR).addReg(X16));
   } else {
-    EmitToStreamer(*OutStreamer, MCInstBuilder(BL).addExpr(
-        MCSymbolRefExpr::create(Sym, OutContext)));
+    EmitToStreamer(*OutStreamer,
+                   MCInstBuilder(IsTailCall ? B : BL).addExpr(
+                       MCSymbolRefExpr::create(Sym, OutContext)));
   }
 }
 
@@ -2006,7 +2008,6 @@ void AArch64AsmPrinter::emitCangjieCallStubInstImpl(const MachineInstr *MI,
   MCOperand SymOriAddr = setGAAndLower(MOSym, AddrGV, AArch64II::MO_PAGE);
   MCOperand SymOriAddrLo12 =
       setGAAndLower(MOSym, AddrGV, AArch64II::MO_PAGEOFF | AArch64II::MO_NC);
-  MCOperand SymNewAddr = setGAAndLower(MOSym, F);
 
   const auto *OriCalled = dyn_cast<Function>(MOSym.getGlobal());
   // push callee-addr and CallFrameSize to stack. This operation extends
@@ -2023,31 +2024,9 @@ void AArch64AsmPrinter::emitCangjieCallStubInstImpl(const MachineInstr *MI,
   // |  callee-addr                        |
   // |  param-stack-size (16 bytes align)  |
   extendStackAndInsertFFIInfoForJmp(SymOriAddr, SymOriAddrLo12, CallFrameSize);
-  if (Opcode == AArch64::TCRETURNdi) {
-    if (TM.getCodeModel() == CodeModel::Large &&
-        getSubtargetInfo().getTargetTriple().isOSBinFormatMachO()) {
-      MCSymbol *StubSym = getSymbol(F);
-      EmitToStreamer(*OutStreamer, MCInstBuilder(AArch64::ADRP).addReg(AArch64::X16).addExpr(
-          MCSymbolRefExpr::create(StubSym, MCSymbolRefExpr::VK_GOTPAGE, OutContext)));
-      EmitToStreamer(*OutStreamer,
-                     MCInstBuilder(AArch64::LDRXui)
-                         .addReg(AArch64::X16)
-                         .addReg(AArch64::X16)
-                         .addExpr(MCSymbolRefExpr::create(
-                             StubSym, MCSymbolRefExpr::VK_GOTPAGEOFF, OutContext))
-                         .addImm(0));
-      EmitToStreamer(*OutStreamer, MCInstBuilder(AArch64::BR).addReg(AArch64::X16));
-    } else {
-      MCInst TemInst;
-      TemInst.setOpcode(AArch64::B);
-      TemInst.addOperand(SymNewAddr);
-      EmitToStreamer(*OutStreamer, TemInst);
-    }
-  } else {
-    assert(Opcode == AArch64::BL &&
-           "Opcode should be BL or TCRETURNdi for Cangjie Call Stub");
-    emitCangjieRuntimeCall(getSymbol(F));
-  }
+  assert((Opcode == AArch64::TCRETURNdi || Opcode == AArch64::BL) &&
+         "Opcode should be BL or TCRETURNdi for Cangjie Call Stub");
+  emitCangjieRuntimeCall(getSymbol(F), Opcode == AArch64::TCRETURNdi);
   SM.recordCJStackMap(*MI);
   return;
 }
@@ -2145,10 +2124,7 @@ void AArch64AsmPrinter::emitMccNewObjectFastPath(const MachineInstr *MI,
 void AArch64AsmPrinter::emitCJThrowException(const MachineInstr *MI,
                                              const MachineOperand &MOSym,
                                              unsigned Opcode) {
-  MCOperand Call;
-  MCInstLowering.lowerOperand(MOSym, Call);
-  MCInst CallThrowException = MCInstBuilder(Opcode).addOperand(Call);
-  EmitToStreamer(*OutStreamer, CallThrowException);
+  emitCangjieRuntimeCall(getSymbol(MOSym.getGlobal()));
   StackMaps::CallsiteInfo CSInfo;
   SM.updateOrInsertFnInfo(CurrentFnSym, CSInfo);
 }
