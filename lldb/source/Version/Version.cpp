@@ -58,7 +58,7 @@ const char *lldb_private::GetVersion() {
       g_version_str += "\n  llvm revision ";
       g_version_str += llvm_rev;
     }
-    g_version_str += "\n  cangjie 1.2.0";
+    g_version_str += "\n  cangjie 1.2.0-beta.rc3";
   }
 
   return g_version_str.c_str();
