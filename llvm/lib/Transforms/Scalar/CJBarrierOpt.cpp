@@ -180,6 +180,7 @@ private:
       if (!isNotDealPathSucc(Succ)) {
         continue;
       }
+      // 这里完全是为了考虑有环的情况
       Loop *SuccLoop = LI->getLoopFor(Succ);
       // Judge if Succ is a node of the same big loop.
       // If Succ is a node of the same big loop, Succ is a node of path.
@@ -241,6 +242,7 @@ private:
     SmallVector<BasicBlock *> ExitBlocks;
     CurLoop->getExitBlocks(ExitBlocks);
     for (auto Exit : ExitBlocks) {
+      // 有一个路径经过 即可
       if (!isNotDealPathSucc(Exit)) {
         continue;
       }
@@ -255,6 +257,7 @@ private:
       return true;
     }
     if (!scanPreForSafepoint(BB, IsSafepoint, nullptr)) {
+      // TODO: 这里是过于保守？ true得话直接re
       return false;
     }
     BBSafepointFlow[BB] = IsSafepoint;
