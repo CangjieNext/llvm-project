@@ -22,27 +22,12 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/PassManager.h"
 
-class GCPtr;
-class MemPtr;
-
 namespace llvm {
 enum EscapeState : unsigned { NotEscape, InfoEscaped, TransEscaped, Escaped };
 struct CJPartialEscapeAnalysisPass
     : public PassInfoMixin<CJPartialEscapeAnalysisPass> {
   PreservedAnalyses run(LazyCallGraph::SCC &C, CGSCCAnalysisManager &AM,
                         LazyCallGraph &CG, CGSCCUpdateResult &URx) const;
-};
-
-class CJEscapeAnalysis {
-public:
-  Value *getBaseValue(Value *CV, int &Offset);
-  void setInfoEscaped(GCPtr *, BasicBlock *);
-  bool isEscapedValue(Value *V);
-
-  Function *ProcessedFunc = nullptr;
-  DenseMap<Value *, GCPtr *> AllPtrLocInfo;
-  DenseMap<std::pair<Value *, int>, MemPtr *> AllMemLocInfo;
-  DenseMap<BasicBlock *, DenseMap<GCPtr *, unsigned>> EscapeBBInfo;
 };
 
 Type *getAllocaType(GlobalVariable *Klass, bool &HasRef, uint32_t &AS, bool &,
