@@ -17,6 +17,7 @@
 
 #include "queue"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/CallGraph.h"
@@ -37,6 +38,7 @@
 #include "llvm/Transforms/Scalar.h"
 
 #include <algorithm>
+#include <limits>
 
 #define DEBUG_TYPE "escape-analysis"
 using namespace llvm;
@@ -1671,11 +1673,104 @@ private:
     }
   }
 };
-}
 class GCPtr;
+class MemPtr;
+
+constexpr unsigned SpreadMemEscapeOffsetInlineCapacity = 8;
+using SpreadMemEscapeOffsetPath =
+    llvm::SmallVector<int, SpreadMemEscapeOffsetInlineCapacity>;
+
+struct SpreadMemEscapeState {
+  const llvm::BasicBlock *Block;
+  const GCPtr *Pointer;
+  unsigned EscapeState;
+  bool IsDirect;
+  SpreadMemEscapeOffsetPath Offsets;
+
+  bool operator==(const SpreadMemEscapeState &Other) const {
+    return Block == Other.Block && Pointer == Other.Pointer &&
+           EscapeState == Other.EscapeState && IsDirect == Other.IsDirect &&
+           Offsets == Other.Offsets;
+  }
+};
+
+struct SpreadMemEscapeStateInfo {
+  static SpreadMemEscapeState getEmptyKey() {
+    return {llvm::DenseMapInfo<const llvm::BasicBlock *>::getEmptyKey(),
+            nullptr, 0, false, {}};
+  }
+
+  static SpreadMemEscapeState getTombstoneKey() {
+    return {llvm::DenseMapInfo<const llvm::BasicBlock *>::getTombstoneKey(),
+            nullptr, 0, false, {}};
+  }
+
+  static unsigned getHashValue(const SpreadMemEscapeState &State) {
+    return static_cast<unsigned>(llvm::hash_combine(
+        State.Block, State.Pointer, State.EscapeState, State.IsDirect,
+        llvm::hash_combine_range(State.Offsets.begin(), State.Offsets.end())));
+  }
+
+  static bool isEqual(const SpreadMemEscapeState &LHS,
+                      const SpreadMemEscapeState &RHS) {
+    return LHS == RHS;
+  }
+};
+
+class CJEscapeAnalysis {
+public:
+  Value *getBaseValue(Value *CV, int &Offset);
+  void setInfoEscaped(GCPtr *, BasicBlock *);
+  bool isEscapedValue(Value *V);
+
+  Function *ProcessedFunc = nullptr;
+  DenseMap<Value *, GCPtr *> AllPtrLocInfo;
+  DenseMap<std::pair<Value *, int>, MemPtr *> AllMemLocInfo;
+  DenseMap<BasicBlock *, DenseMap<GCPtr *, unsigned>> EscapeBBInfo;
+
+  // A completed propagation state remains reusable until a new memory pointer
+  // changes the graph. A single generation conservatively invalidates direct
+  // and transitive dependencies, preserving the un-memoized fixed point.
+  class SpreadMemEscapeMemo {
+  public:
+    bool beginState(const llvm::BasicBlock *Block, const GCPtr *Pointer,
+                    unsigned EscapeState, bool IsDirect,
+                    const SpreadMemEscapeOffsetPath &Offsets) {
+      SpreadMemEscapeState State{Block, Pointer, EscapeState, IsDirect,
+                                 Offsets};
+      auto Insert = CompletedStates.try_emplace(std::move(State),
+                                               MemoryGraphGeneration);
+      if (Insert.second)
+        return true;
+      if (Insert.first->second == MemoryGraphGeneration)
+        return false;
+      Insert.first->second = MemoryGraphGeneration;
+      return true;
+    }
+
+    void recordMemoryGraphGrowth() {
+      if (MemoryGraphGeneration == std::numeric_limits<Generation>::max()) {
+        CompletedStates.clear();
+        MemoryGraphGeneration = 0;
+        return;
+      }
+      ++MemoryGraphGeneration;
+    }
+
+  private:
+    using Generation = uint64_t;
+    llvm::DenseMap<SpreadMemEscapeState, Generation, SpreadMemEscapeStateInfo>
+        CompletedStates;
+    Generation MemoryGraphGeneration = 0;
+  };
+
+  SpreadMemEscapeMemo MemEscapeMemo;
+};
+} // namespace
+
 static void memPtrspreadEscape(BasicBlock *BB, unsigned ES,
                                DenseMap<GCPtr *, unsigned> &SuccBBInfo,
-                               GCPtr *P, SmallVector<int, 8> &Offset,
+                               GCPtr *P, SpreadMemEscapeOffsetPath &Offset,
                                bool Direct);
 
 static void countRefOffsets(StructType *ST, SmallVector<uint64_t, 8> &Offsets,
@@ -1734,6 +1829,7 @@ static void countRefOffsets(StructType *ST, SmallVector<uint64_t, 8> &Offsets,
   }
 }
 
+namespace {
 class GCPtr {
 public:
   explicit GCPtr(Value *Val, unsigned Depth, CJEscapeAnalysis &EAImpl)
@@ -1846,11 +1942,13 @@ public:
 
   virtual void spreadMemEscape(BasicBlock *BB, unsigned ES,
                                DenseMap<GCPtr *, unsigned> &SuccBBInfo,
-                               SmallVector<int, 8> &Offsets,
+                               SpreadMemEscapeOffsetPath &Offsets,
                                bool Direct = true) {
     if (IsVisiting) {
       return;
     }
+    if (!EA.MemEscapeMemo.beginState(BB, this, ES, Direct, Offsets))
+      return;
     IsVisiting = true;
     int CurOffset = Offsets.pop_back_val();
     if (CurOffset >= 0) {
@@ -1964,7 +2062,10 @@ public:
     }
   }
 
-  void insertMem(GCPtr *MP) { MPs.push_back(MP); }
+  void insertMem(GCPtr *MP) {
+    MPs.push_back(MP);
+    EA.MemEscapeMemo.recordMemoryGraphGrowth();
+  }
 
   // Base Value Ptr
   Value *P;
@@ -2050,7 +2151,7 @@ public:
         }
       }
     }
-    SmallVector<int, 8> Offsets;
+    SpreadMemEscapeOffsetPath Offsets;
     Offsets.push_back(-1); // -1 Escaped All
     Offsets.push_back(Offset);
     Base->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
@@ -2087,10 +2188,12 @@ public:
 
   void spreadMemEscape(
       BasicBlock *BB, unsigned ES, DenseMap<GCPtr *, unsigned> &SuccBBInfo,
-      SmallVector<int, 8> &Offsets, bool Direct) override {
+      SpreadMemEscapeOffsetPath &Offsets, bool Direct) override {
     if (IsVisiting) {
       return;
     }
+    if (!EA.MemEscapeMemo.beginState(BB, this, ES, Direct, Offsets))
+      return;
     IsVisiting = true;
     int CurOffset = Offsets.back();
     for (auto DefineMap : DefineValues) {
@@ -2161,7 +2264,7 @@ public:
       Base->spreadInfoEscape(BB, Escaped, SuccBBInfo, Direct);
       return;
     }
-    SmallVector<int, 8> Offsets;
+    SpreadMemEscapeOffsetPath Offsets;
     if (Direct) {
       for (auto &V : Base->BaseValue) {
         for (auto BaseValueOffset : V.second) {
@@ -2195,10 +2298,11 @@ public:
   int Offset;
   DenseMap<BasicBlock *, SmallVector<GCPtr *, 8>> DefineValues;
 };
+} // namespace
 
 static void memPtrspreadEscape(
     BasicBlock *BB, unsigned ES, DenseMap<GCPtr *, unsigned> &SuccBBInfo,
-    GCPtr *P, SmallVector<int, 8> &Offsets, bool Direct) {
+    GCPtr *P, SpreadMemEscapeOffsetPath &Offsets, bool Direct) {
   int CurOffset = Offsets.back();
   MemPtr *MPtr = MemPtr::create(P->P, CurOffset, P->EA, nullptr, Direct);
   if (MPtr == nullptr) {
