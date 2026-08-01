@@ -1221,10 +1221,16 @@ Error PassBuilder::parseModulePass(ModulePassManager &MPM,
         MaxRecursionInl = 1;
       }
       // We put 64-bit safepoint optimization to O3 level for safety.
-      if (L.getSpeedupLevel() > 2) {
-        CountedLoopTripWidth = 64;
-      } else {
-        CountedLoopTripWidth = 16;
+      // Only pick a default when the option was not given on the command
+      // line, matching how MaxRecursionInl above is handled. Without this the
+      // assignment silently overwrites -spp-counted-loop-trip-width, leaving no
+      // way to measure the safepoints the narrower O2 threshold keeps alive.
+      if (!CountedLoopTripWidth.getPosition()) {
+        if (L.getSpeedupLevel() > 2) {
+          CountedLoopTripWidth = 64;
+        } else {
+          CountedLoopTripWidth = 16;
+        }
       }
       if (PGOOpt) {
         // Enable partial inlining for PGO.

@@ -1482,7 +1482,7 @@ void X86AsmPrinter::emitGcStateCheck() {
 }
 
 // load tls data
-//   cmpq   $0, %rax
+//   testq  %rax, %rax
 //   jne    Label
 void X86AsmPrinter::emitCJSafepointInlineCheck(const MachineInstr &MI) {
   emitGetCJTLSData(getSafepointCheckAddrOffsetInCJTLS());
@@ -1492,10 +1492,14 @@ void X86AsmPrinter::emitCJSafepointInlineCheck(const MachineInstr &MI) {
   MCSymbol *MILabel1 = Ctx.createTempSymbol();
   const MCSymbolRefExpr *MILabelExpr =
       MCSymbolRefExpr::create(MILabel, OutContext);
+  // `testq %rax, %rax` is the canonical compare-against-zero form: it encodes in
+  // 3 bytes where `cmpq $0, %rax` built from CMP64ri32 takes 7, and the branch
+  // below only reads ZF, which both set identically. This check is emitted once
+  // per safepoint, so the four bytes add up across a whole module.
   MCInst CmpInst;
-  CmpInst.setOpcode(X86::CMP64ri32);
+  CmpInst.setOpcode(X86::TEST64rr);
   CmpInst.addOperand(MCOperand::createReg(X86::RAX));
-  CmpInst.addOperand(MCOperand::createImm(0));
+  CmpInst.addOperand(MCOperand::createReg(X86::RAX));
   OutStreamer->emitInstruction(CmpInst, getSubtargetInfo());
   MCInst JccInst;
   JccInst.setOpcode(X86::JCC_1);
