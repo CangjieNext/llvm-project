@@ -18,7 +18,6 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/CFG.h"
-#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
@@ -70,228 +69,103 @@ static bool isNewMallocCall(CallBase *CB) {
 
 class BarrierNeed {
 public:
-  explicit BarrierNeed(Instruction *Begin, Instruction *End, LoopInfo *LI,
-                       DenseMap<BasicBlock *, bool> &BBSafepointMaps)
-      : Begin(Begin), End(End), BeginLoop(LI->getLoopFor(Begin->getParent())),
-        EndLoop(LI->getLoopFor(End->getParent())), LI(LI),
-        BBSafepointMaps(BBSafepointMaps) {
-    SameParentLoop = getSameParentLoop(BeginLoop);
-  };
+  explicit BarrierNeed(
+      Instruction *Begin, Instruction *End,
+      const DenseMap<BasicBlock *, bool> &BBSafepointMaps)
+      : Begin(Begin), End(End), BBSafepointMaps(BBSafepointMaps) {}
   ~BarrierNeed() = default;
 
   bool run() {
-    if (isBeginSingleLoop()) {
-      return true;
-    }
-    SmallVector<BasicBlock *> LoopLatches;
-    if (SameParentLoop != nullptr) {
-      SameParentLoop->getLoopLatches(LoopLatches);
-    }
-    Worklist.insert(Begin->getParent());
+    BasicBlock *BeginBB = Begin->getParent();
     BasicBlock *EndBB = End->getParent();
-    while (!Worklist.empty()) {
-      BasicBlock *BB = Worklist.pop_back_val();
-      if (BBSafepointFlow.count(EndBB) > 0) {
-        return BBSafepointFlow[EndBB];
-      }
-      if (BBSafepointFlow.count(BB) > 0) {
-        continue;
-      }
-      if ((BB == End->getParent()) && (scanEndBB())) {
-        return BBSafepointFlow[EndBB];
-      } else if (BB == Begin->getParent()) {
-        scanBeginBB();
-      } else {
-        if (!calculateSafepoint(BB, BBSafepointMaps[BB])) {
-          continue;
+    if (BeginBB == EndBB) {
+      return hasSafepoint(Begin->getIterator(), End->getIterator());
+    }
+
+    SmallPtrSet<BasicBlock *, 16> CanReachEnd;
+    SmallVector<BasicBlock *> ReachabilityWorklist;
+    CanReachEnd.insert(EndBB);
+    ReachabilityWorklist.push_back(EndBB);
+    while (!ReachabilityWorklist.empty()) {
+      BasicBlock *BB = ReachabilityWorklist.pop_back_val();
+      for (BasicBlock *Pred : predecessors(BB)) {
+        if (CanReachEnd.insert(Pred).second) {
+          ReachabilityWorklist.push_back(Pred);
         }
       }
-      if (SameParentLoop != nullptr && isLoopLatch(BB, LoopLatches)) {
-        continue;
-      }
-      scanSuccPath(BB);
     }
-    return (BBSafepointFlow.find(End->getParent()) == BBSafepointFlow.end());
+
+    // Keep the verifier conservative when End is not reachable from Begin.
+    if (!CanReachEnd.contains(BeginBB)) {
+      return true;
+    }
+
+    SetVector<BasicBlock *> Worklist;
+    SmallPtrSet<BasicBlock *, 16> Reached;
+    DenseMap<BasicBlock *, bool> SafepointFlow;
+    Reached.insert(BeginBB);
+    SafepointFlow[BeginBB] = localSafepoint(BeginBB);
+    Worklist.insert(BeginBB);
+
+    while (!Worklist.empty()) {
+      BasicBlock *BB = Worklist.pop_back_val();
+      bool BBFlow = SafepointFlow.lookup(BB);
+      for (BasicBlock *Succ : successors(BB)) {
+        if (!CanReachEnd.contains(Succ)) {
+          continue;
+        }
+
+        bool NewFlow = BBFlow || localSafepoint(Succ);
+        bool FirstVisit = Reached.insert(Succ).second;
+        if (!FirstVisit && (!NewFlow || SafepointFlow.lookup(Succ))) {
+          continue;
+        }
+
+        SafepointFlow[Succ] = NewFlow;
+        if (Succ == EndBB) {
+          continue;
+        }
+        Worklist.insert(Succ);
+      }
+    }
+
+    // If CFG reachability and traversal disagree, conservatively keep the
+    // barrier. Otherwise the fixed-point value at End is the answer.
+    return !Reached.contains(EndBB) || SafepointFlow.lookup(EndBB);
   }
 
 private:
   Instruction *Begin;
   Instruction *End;
-  Loop *BeginLoop;
-  Loop *EndLoop;
-  Loop *SameParentLoop;
-  LoopInfo *LI;
-  SetVector<BasicBlock *> Worklist;
-  // Calculate if path have a safepoint.
-  // If this BB has safepoint depends on himself and its predecessors in path.
-  DenseMap<BasicBlock *, bool> BBSafepointFlow;
-  DenseMap<BasicBlock *, bool> BBSafepointMaps;
+  const DenseMap<BasicBlock *, bool> &BBSafepointMaps;
 
-  // Judge if Begin is in a loop alone or Beginloop is a subloop of Endloop.
-  // In these cases, we need to judge if Beginloop has safepoint.
-  bool isBeginSingleLoop() {
-    // Begin is not in a loop.
-    if (BeginLoop == nullptr) {
-      return false;
-    }
-    // Begin is in a loop, End is not in a loop.
-    if (EndLoop == nullptr) {
-      return true;
-    }
-    // Endloop is a subloop of Beginloop.
-    if (BeginLoop->contains(EndLoop)) {
-      return false;
-    }
-    // Beginloop is subloop of Endloop.
-    // Or Beginloop and Endloop are two completely unrelated loops.
-    return true;
-  }
-
-  // Judge if BeginLoop and EndLoop are in a same parent loop.
-  // In this case, we only need to scan the parent loop,
-  // and when we meet the looplatch of the parent loop, break.
-  Loop *getSameParentLoop(Loop *L) {
-    if (L == nullptr) {
-      return nullptr;
-    }
-    if (L->contains(EndLoop)) {
-      return L;
-    }
-    return getSameParentLoop(L->getParentLoop());
-  }
-
-  // Judge if we have deal with this BB or this BB is in path to End.
-  bool isNotDealPathSucc(BasicBlock *BB) {
-    BasicBlock *EndBB = End->getParent();
-    if (BB->isLandingPad()) {
-      return false;
-    }
-    if (Worklist.contains(BB)) {
-      return false;
-    }
-    if (BBSafepointFlow.count(BB) > 0) {
-      return false;
-    }
-    return isPotentiallyReachable(BB, EndBB);
-  }
-
-  void scanSuccPath(BasicBlock *BB) {
-    for (auto Succ : successors(BB)) {
-      if (!isNotDealPathSucc(Succ)) {
-        continue;
-      }
-      Loop *SuccLoop = LI->getLoopFor(Succ);
-      // Judge if Succ is a node of the same big loop.
-      // If Succ is a node of the same big loop, Succ is a node of path.
-      // Otherwise, SuccLoop is a loop node of path.
-      if ((SuccLoop != nullptr && SameParentLoop != nullptr &&
-           SuccLoop != SameParentLoop) ||
-          (SuccLoop != nullptr && SameParentLoop == nullptr)) {
-        scanPathLoop(SuccLoop);
-        continue;
-      }
-      Worklist.insert(Succ);
-    }
-  }
-
-  void scanBeginBB() {
-    bool IsSafepoint = false;
-    BasicBlock *BeginBB = Begin->getParent();
-    for (auto It = Begin->getIterator(), E = BeginBB->end(); It != E; ++It) {
-      if (auto CB = dyn_cast<CallBase>(&*It)) {
+  bool hasSafepoint(BasicBlock::iterator First,
+                    BasicBlock::iterator Last) const {
+    for (auto It = First; It != Last; ++It) {
+      if (auto *CB = dyn_cast<CallBase>(&*It)) {
         if (isSafepointCall(CB)) {
-          IsSafepoint = true;
-        }
-      }
-      if (It->isTerminator()) {
-        calculateSafepoint(BeginBB, IsSafepoint);
-      }
-    }
-  }
-
-  bool scanEndBB() {
-    bool IsSafepoint = false;
-    BasicBlock *BeginBB = Begin->getParent();
-    BasicBlock *EndBB = End->getParent();
-    for (auto It = EndBB == BeginBB ? Begin->getIterator() : EndBB->begin(),
-              E = EndBB->end();
-         It != E; ++It) {
-      if (It == End->getIterator()) {
-        return calculateSafepoint(End->getParent(), IsSafepoint);
-      }
-      if (auto CB = dyn_cast<CallBase>(&*It)) {
-        if (isSafepointCall(CB)) {
-          IsSafepoint = true;
+          return true;
         }
       }
     }
     return false;
   }
 
-  void scanPathLoop(Loop *CurLoop) {
-    bool IsSafepointLoop = false;
-    for (auto BB : CurLoop->getBlocks()) {
-      IsSafepointLoop |= BBSafepointMaps[BB];
+  bool localSafepoint(BasicBlock *BB) const {
+    if (BB == Begin->getParent()) {
+      return hasSafepoint(Begin->getIterator(), BB->end());
     }
-    scanPreForSafepoint(CurLoop->getHeader(), IsSafepointLoop, CurLoop);
-    for (auto BB : CurLoop->getBlocks()) {
-      BBSafepointFlow[BB] = IsSafepointLoop;
-      Worklist.insert(BB);
+    if (BB == End->getParent()) {
+      return hasSafepoint(BB->begin(), End->getIterator());
     }
-    SmallVector<BasicBlock *> ExitBlocks;
-    CurLoop->getExitBlocks(ExitBlocks);
-    for (auto Exit : ExitBlocks) {
-      if (!isNotDealPathSucc(Exit)) {
-        continue;
-      }
-      Worklist.insert(Exit);
-    }
-  }
-
-  bool calculateSafepoint(BasicBlock *BB, bool &IsSafepoint) {
-    BasicBlock *BeginBB = Begin->getParent();
-    if (BB == BeginBB) {
-      BBSafepointFlow[BB] = IsSafepoint;
-      return true;
-    }
-    if (!scanPreForSafepoint(BB, IsSafepoint, nullptr)) {
-      return false;
-    }
-    BBSafepointFlow[BB] = IsSafepoint;
-    return true;
-  }
-
-  bool scanPreForSafepoint(BasicBlock *BB, bool &IsSafepoint, Loop *L) {
-    BasicBlock *BeginBB = Begin->getParent();
-    for (auto Pre : predecessors(BB)) {
-      if (L != nullptr && L->contains(Pre)) {
-        continue;
-      }
-      if (!isPotentiallyReachable(BeginBB, Pre)) {
-        continue;
-      }
-      if (BBSafepointFlow.find(Pre) == BBSafepointFlow.end()) {
-        return false;
-      }
-      IsSafepoint |= BBSafepointFlow[Pre];
-    }
-    return true;
-  }
-
-  bool isLoopLatch(BasicBlock *BB, SmallVector<BasicBlock *> &LoopLatches) {
-    for (auto LoopLatch : LoopLatches) {
-      if (BB == LoopLatch) {
-        return true;
-      }
-    }
-    return false;
+    return BBSafepointMaps.lookup(BB);
   }
 };
 
 class BarriersCheck {
 public:
-  BarriersCheck(Function *F, LoopInfo *LI) : F(F), LI(LI),
-      DL(F->getParent()->getDataLayout()) {};
+  explicit BarriersCheck(Function *F)
+      : F(F), DL(F->getParent()->getDataLayout()) {};
   ~BarriersCheck() = default;
 
   bool run() {
@@ -328,7 +202,6 @@ public:
 
 private:
   Function *F;
-  LoopInfo *LI;
   const DataLayout &DL;
   // Record gcwrite and gcwrite.agg
   DenseSet<CallBase *> BarrierSet;
@@ -807,7 +680,7 @@ private:
         return true;
 
       Instruction *Begin = getNextNode(CB);
-      BarrierNeed BN(Begin, Cur, LI, BBSafepointMaps);
+      BarrierNeed BN(Begin, Cur, BBSafepointMaps);
       NeedBarrier |= BN.run();
     }
 
@@ -843,8 +716,7 @@ private:
   }
 };
 
-static bool optCJBarrierModule(Module &M,
-                               function_ref<LoopInfo &(Function &)> GetLI) {
+static bool optCJBarrierModule(Module &M) {
   bool Changed = false;
 
   for (Function &F : M) {
@@ -852,21 +724,16 @@ static bool optCJBarrierModule(Module &M,
       continue;
     }
     if (F.hasCangjieGC()) {
-      auto &LI = GetLI(F);
-      BarriersCheck BC(&F, &LI);
+      BarriersCheck BC(&F);
       Changed |= BC.run();
     }
   }
   return Changed;
 }
 
-PreservedAnalyses CJBarrierOpt::run(Module &M, ModuleAnalysisManager &AM) const {
-  FunctionAnalysisManager &FAM =
-      AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
-  auto GetLoopInfo = [&FAM](Function &F) -> LoopInfo & {
-    return FAM.getResult<LoopAnalysis>(F);
-  };
-  if (optCJBarrierModule(M, GetLoopInfo)) {
+PreservedAnalyses CJBarrierOpt::run(Module &M,
+                                    ModuleAnalysisManager & /*AM*/) const {
+  if (optCJBarrierModule(M)) {
     return PreservedAnalyses::none();
   }
   return PreservedAnalyses::all();
@@ -883,18 +750,9 @@ public:
   }
   ~CJBarrierOptLegacyPass() = default;
 
-  bool runOnModule(Module &M) override {
-    bool Changed = false;
-    auto GetLoopInfo = [this, &Changed](Function &F) -> LoopInfo & {
-      return this->getAnalysis<LoopInfoWrapperPass>(F, &Changed).getLoopInfo();
-    };
-    return optCJBarrierModule(M, GetLoopInfo);
-  }
+  bool runOnModule(Module &M) override { return optCJBarrierModule(M); }
 
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.addRequired<LoopInfoWrapperPass>();
-    AU.addPreserved<LoopInfoWrapperPass>();
-  }
+  void getAnalysisUsage(AnalysisUsage & /*AU*/) const override {}
 };
 } // namespace
 
@@ -906,6 +764,5 @@ ModulePass *llvm::createCJBarrierOptLegacyPass() {
 
 INITIALIZE_PASS_BEGIN(CJBarrierOptLegacyPass, "cj-barrier-opt",
                       "CJ Barrier Opt", false, false)
-INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_END(CJBarrierOptLegacyPass, "cj-barrier-opt",
                     "CJ Barrier Opt", false, false)
