@@ -27,6 +27,7 @@
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
@@ -36,6 +37,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <new>
 #include <utility>
 
@@ -744,6 +746,64 @@ unsigned DataLayout::getIndexTypeSizeInBits(Type *Ty) const {
   Get the ABI (\a abi_or_pref == true) or preferred alignment (\a abi_or_pref
   == false) for the requested type \a Ty.
  */
+Optional<TypeSize> DataLayout::getTypeAllocSizeInBitsChecked(Type *Ty) const {
+  assert(Ty->isSized() && "Cannot getTypeInfo() on a type that is unsized!");
+  std::function<Optional<TypeSize>(Type *)> GetAllocSizeChecked =
+      [&](Type *CurrentTy) -> Optional<TypeSize> {
+    if (auto *ATy = dyn_cast<ArrayType>(CurrentTy)) {
+      auto ElementSize = GetAllocSizeChecked(ATy->getElementType());
+      if (!ElementSize)
+        return None;
+      auto ArraySize = checkedMulUnsigned(ATy->getNumElements(),
+                                          ElementSize->getKnownMinSize());
+      if (!ArraySize)
+        return None;
+      return TypeSize(*ArraySize, ElementSize->isScalable());
+    }
+    if (auto *STy = dyn_cast<StructType>(CurrentTy)) {
+      uint64_t StructSize = 0;
+      uint64_t StructAlignment = 8;
+      for (Type *ElementTy : STy->elements()) {
+        auto ElementSize = GetAllocSizeChecked(ElementTy);
+        if (!ElementSize || ElementSize->isScalable())
+          return None;
+        uint64_t Alignment = 8;
+        if (!STy->isPacked()) {
+          auto AlignmentInBits = checkedMulUnsigned(
+              getABITypeAlign(ElementTy).value(), uint64_t(8));
+          if (!AlignmentInBits)
+            return None;
+          Alignment = *AlignmentInBits;
+          StructAlignment = std::max(StructAlignment, Alignment);
+        }
+        auto AlignedSize = checkedAddUnsigned(
+            StructSize, -StructSize & (Alignment - 1));
+        if (!AlignedSize)
+          return None;
+        auto NewSize = checkedAddUnsigned(*AlignedSize,
+                                          ElementSize->getFixedSize());
+        if (!NewSize)
+          return None;
+        StructSize = *NewSize;
+      }
+      if (!STy->isPacked()) {
+        auto AggregateAlignment = checkedMulUnsigned(
+            Alignments[0].ABIAlign.value(), uint64_t(8));
+        if (!AggregateAlignment)
+          return None;
+        StructAlignment = std::max(StructAlignment, *AggregateAlignment);
+      }
+      auto AlignedSize = checkedAddUnsigned(
+          StructSize, -StructSize & (StructAlignment - 1));
+      if (!AlignedSize)
+        return None;
+      return TypeSize::Fixed(*AlignedSize);
+    }
+    return getTypeAllocSizeInBits(CurrentTy);
+  };
+  return GetAllocSizeChecked(Ty);
+}
+
 Align DataLayout::getAlignment(Type *Ty, bool abi_or_pref) const {
   assert(Ty->isSized() && "Cannot getTypeInfo() on a type that is unsized!");
   switch (Ty->getTypeID()) {

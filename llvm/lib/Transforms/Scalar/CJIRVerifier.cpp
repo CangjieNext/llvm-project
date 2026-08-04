@@ -143,6 +143,8 @@ public:
   }
 
   void visitAllocaInst(AllocaInst &AI) {
+    Assert(DL.getTypeAllocSizeInBitsChecked(AI.getAllocatedType()),
+           "allocated type is too large", &AI);
     Type *T = AI.getAllocatedType();
     if (auto *PT = dyn_cast<PointerType>(T)) {
       Type *ET = PT->getElementType();

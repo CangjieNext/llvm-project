@@ -520,6 +520,10 @@ public:
     return 8 * getTypeAllocSize(Ty);
   }
 
+  /// Returns the allocation size in bits, or None if the size cannot be
+  /// represented by TypeSize without overflow.
+  Optional<TypeSize> getTypeAllocSizeInBitsChecked(Type *Ty) const;
+
   /// Returns the minimum ABI-required alignment for the specified type.
   /// FIXME: Deprecate this function once migration to Align is over.
   uint64_t getABITypeAlignment(Type *Ty) const;
