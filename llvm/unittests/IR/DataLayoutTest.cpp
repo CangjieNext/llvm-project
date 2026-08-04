@@ -90,6 +90,23 @@ TEST(DataLayoutTest, GlobalsAddressSpace) {
   EXPECT_EQ(ExplicitGlobal2->getAddressSpace(), 123u);
 }
 
+TEST(DataLayoutTest, ArraySizeOverflow) {
+  const DataLayout DL("");
+  LLVMContext Context;
+  Type *Int64Ty = Type::getInt64Ty(Context);
+  Type *ArrayTy = ArrayType::get(Int64Ty, (uint64_t(1) << 61) + 11);
+  Type *NestedArrayTy = ArrayType::get(ArrayTy, 1);
+  Type *StructTy = StructType::get(Context, ArrayRef<Type *>{ArrayTy});
+  Type *ArrayOfStructTy = ArrayType::get(StructTy, 1);
+
+  EXPECT_FALSE(DL.getTypeAllocSizeInBitsChecked(ArrayTy));
+  EXPECT_FALSE(DL.getTypeAllocSizeInBitsChecked(NestedArrayTy));
+  EXPECT_FALSE(DL.getTypeAllocSizeInBitsChecked(StructTy));
+  EXPECT_FALSE(DL.getTypeAllocSizeInBitsChecked(ArrayOfStructTy));
+  EXPECT_EQ(TypeSize::Fixed(128),
+            DL.getTypeAllocSizeInBitsChecked(ArrayType::get(Int64Ty, 2)));
+}
+
 TEST(DataLayoutTest, VectorAlign) {
   Expected<DataLayout> DL = DataLayout::parse("v64:64");
   EXPECT_THAT_EXPECTED(DL, Succeeded());
