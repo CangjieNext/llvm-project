@@ -15,9 +15,11 @@
 
 #include "llvm/Transforms/Scalar/CJIRVerifier.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/IR/CJIntrinsics.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -29,6 +31,7 @@
 #include "llvm/IR/SafepointIRVerifier.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Scalar/ReflectionInfo.h"
@@ -45,6 +48,83 @@ using namespace cangjie;
   } while (false)
 
 namespace {
+/// Returns the allocation size of \p Ty in bits, or None if it cannot be
+/// represented by uint64_t without overflow (e.g. a huge VArray type).
+/// Unlike DataLayout::getTypeAllocSizeInBits, which wraps silently, array
+/// counts are multiplied and struct members are summed in checked arithmetic.
+/// Struct results are memoized in \p Cache so that nested identified structs
+/// cost linear rather than exponential time.
+static Optional<TypeSize>
+getAllocSizeInBitsChecked(Type *Ty, const DataLayout &DL,
+                          DenseMap<StructType *, Optional<TypeSize>> &Cache);
+
+static Optional<TypeSize>
+getArrayAllocSizeChecked(ArrayType *ATy, const DataLayout &DL,
+                         DenseMap<StructType *, Optional<TypeSize>> &Cache) {
+  auto ElementSize =
+      getAllocSizeInBitsChecked(ATy->getElementType(), DL, Cache);
+  if (!ElementSize)
+    return None;
+  auto ArraySize =
+      checkedMulUnsigned(ATy->getNumElements(), ElementSize->getKnownMinSize());
+  if (!ArraySize)
+    return None;
+  return TypeSize(*ArraySize, ElementSize->isScalable());
+}
+
+static Optional<TypeSize> computeStructAllocSizeChecked(
+    StructType *STy, const DataLayout &DL,
+    DenseMap<StructType *, Optional<TypeSize>> &Cache) {
+  uint64_t StructSize = 0;
+  uint64_t StructAlignment = 8;
+  for (Type *ElementTy : STy->elements()) {
+    auto ElementSize = getAllocSizeInBitsChecked(ElementTy, DL, Cache);
+    if (!ElementSize || ElementSize->isScalable())
+      return None;
+    // Align values are bounded well below 2^61 bytes, so the shift to bits
+    // cannot overflow.
+    uint64_t Alignment = 8;
+    if (!STy->isPacked()) {
+      Alignment = DL.getABITypeAlign(ElementTy).value() * 8;
+      StructAlignment = std::max(StructAlignment, Alignment);
+    }
+    auto AlignedSize =
+        checkedAddUnsigned(StructSize, -StructSize & (Alignment - 1));
+    if (!AlignedSize)
+      return None;
+    auto NewSize =
+        checkedAddUnsigned(*AlignedSize, ElementSize->getFixedSize());
+    if (!NewSize)
+      return None;
+    StructSize = *NewSize;
+  }
+  auto PaddedSize =
+      checkedAddUnsigned(StructSize, -StructSize & (StructAlignment - 1));
+  if (!PaddedSize)
+    return None;
+  return TypeSize::Fixed(*PaddedSize);
+}
+
+static Optional<TypeSize>
+getStructAllocSizeChecked(StructType *STy, const DataLayout &DL,
+                          DenseMap<StructType *, Optional<TypeSize>> &Cache) {
+  auto It = Cache.find(STy);
+  if (It == Cache.end())
+    It = Cache.insert({STy, computeStructAllocSizeChecked(STy, DL, Cache)})
+             .first;
+  return It->second;
+}
+
+static Optional<TypeSize>
+getAllocSizeInBitsChecked(Type *Ty, const DataLayout &DL,
+                          DenseMap<StructType *, Optional<TypeSize>> &Cache) {
+  if (auto *ATy = dyn_cast<ArrayType>(Ty))
+    return getArrayAllocSizeChecked(ATy, DL, Cache);
+  if (auto *STy = dyn_cast<StructType>(Ty))
+    return getStructAllocSizeChecked(STy, DL, Cache);
+  return DL.getTypeAllocSizeInBits(Ty);
+}
+
 class CJVerifier : public InstVisitor<CJVerifier> {
   // Befriend the base class so it can delegate to private visit methods.
   friend class InstVisitor<CJVerifier>;
@@ -143,6 +223,9 @@ public:
   }
 
   void visitAllocaInst(AllocaInst &AI) {
+    Assert(getAllocSizeInBitsChecked(AI.getAllocatedType(), DL,
+                                     AllocSizeCache),
+           "allocated type is too large", &AI);
     Type *T = AI.getAllocatedType();
     if (auto *PT = dyn_cast<PointerType>(T)) {
       Type *ET = PT->getElementType();
@@ -419,6 +502,7 @@ private:
   bool EnableReflection = true;
   // Trace Check for Errors
   bool Broken = false;
+  DenseMap<StructType *, Optional<TypeSize>> AllocSizeCache;
 
   void verifyTypeInfo(GlobalVariable &GV) {
     TypeInfo Klass(&GV);
