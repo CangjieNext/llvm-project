@@ -125,6 +125,10 @@ getAllocSizeInBitsChecked(Type *Ty, const DataLayout &DL,
   return DL.getTypeAllocSizeInBits(Ty);
 }
 
+// The Cangjie language limits a function's stack frame to 2GB, the same
+// limit the X86 and AArch64 backends enforce on the final stack size.
+constexpr uint64_t MaxStackFrameBits = uint64_t(2147483648) * 8;
+
 class CJVerifier : public InstVisitor<CJVerifier> {
   // Befriend the base class so it can delegate to private visit methods.
   friend class InstVisitor<CJVerifier>;
@@ -138,6 +142,7 @@ public:
   bool verify(Function &F) {
     Broken = false;
     visit(F);
+    verifyStackFrameSize(F);
     if (Broken) {
       errs() << "in function " << F.getName() << '\n';
     }
@@ -223,9 +228,6 @@ public:
   }
 
   void visitAllocaInst(AllocaInst &AI) {
-    Assert(getAllocSizeInBitsChecked(AI.getAllocatedType(), DL,
-                                     AllocSizeCache),
-           "allocated type is too large", &AI);
     Type *T = AI.getAllocatedType();
     if (auto *PT = dyn_cast<PointerType>(T)) {
       Type *ET = PT->getElementType();
@@ -850,6 +852,37 @@ private:
         findReferencePositionInStruct(ArrayStruct, BeginPos, EndPos,
                                       CurPos + Idx * EleSize, AllRefPos);
       }
+    }
+  }
+
+  // Enforce the Cangjie stack frame limit on the cumulative size of static
+  // allocas. Being IR-level, the check is target-independent; and since 2GB
+  // is far below 2^63 bytes, it also keeps the int64 offset accumulation in
+  // PrologEpilogInserter from ever wrapping. The X86/AArch64 backend guards
+  // stay as backstops for spill slots and padding this summing cannot see.
+  void verifyStackFrameSize(Function &F) {
+    uint64_t FrameBits = 0;
+    for (Instruction &I : instructions(F)) {
+      auto *AI = dyn_cast<AllocaInst>(&I);
+      if (!AI || !AI->isStaticAlloca())
+        continue;
+      auto AllocBits =
+          getAllocSizeInBitsChecked(AI->getAllocatedType(), DL, AllocSizeCache);
+      if (!AllocBits) {
+        checkFailed("allocated type is too large", AI);
+        continue;
+      }
+      // Scalable allocas are rejected by the generic IR verifier; do not
+      // count them here.
+      if (AllocBits->isScalable())
+        continue;
+      auto NewFrameBits =
+          checkedAddUnsigned(FrameBits, AllocBits->getFixedSize());
+      if (!NewFrameBits || *NewFrameBits >= MaxStackFrameBits) {
+        checkFailed("stack frame exceeds cangjie max stacksize(2GB)", AI);
+        continue;
+      }
+      FrameBits = *NewFrameBits;
     }
   }
 
