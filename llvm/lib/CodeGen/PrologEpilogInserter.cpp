@@ -695,9 +695,15 @@ void PEI::spillCalleeSavedRegs(MachineFunction &MF) {
 static inline void AdjustStackOffset(MachineFrameInfo &MFI, int FrameIdx,
                                      bool StackGrowsDown, int64_t &Offset,
                                      Align &MaxAlign, unsigned Skew) {
+  int64_t ObjSize = MFI.getObjectSize(FrameIdx);
+  // Detect int64 overflow of the cumulative stack offset. A frame this large
+  // (>= 2^63 bytes) is always invalid regardless of target; fail fast instead
+  // of wrapping around and silently producing a wrong frame.
+  if (ObjSize > 0 && Offset > std::numeric_limits<int64_t>::max() - ObjSize)
+    report_fatal_error("Stack frame size overflow");
   // If the stack grows down, add the object size to find the lowest address.
   if (StackGrowsDown)
-    Offset += MFI.getObjectSize(FrameIdx);
+    Offset += ObjSize;
 
   Align Alignment = MFI.getObjectAlign(FrameIdx);
 
@@ -716,7 +722,7 @@ static inline void AdjustStackOffset(MachineFrameInfo &MFI, int FrameIdx,
     LLVM_DEBUG(dbgs() << "alloc FI(" << FrameIdx << ") at SP[" << Offset
                       << "]\n");
     MFI.setObjectOffset(FrameIdx, Offset);
-    Offset += MFI.getObjectSize(FrameIdx);
+    Offset += ObjSize;
   }
 }
 
