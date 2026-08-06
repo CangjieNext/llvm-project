@@ -428,6 +428,7 @@ struct MutexLockLower {
 
   static constexpr char StubFuncName[] = "CJMutexLockStub";
   static constexpr char RTSlowPathName[] = "CJ_MCC_MutexLockSlowPath";
+
   static constexpr char GetCJThreadIDName[] = "GetCJThreadIdForMutexOpt";
 
   Function *createMutexLockStub(FunctionType *FT, Module *M) {
