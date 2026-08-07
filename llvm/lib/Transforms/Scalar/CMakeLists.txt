@@ -3,6 +3,7 @@ add_llvm_component_library(LLVMScalarOpts
   AlignmentFromAssumptions.cpp
   AnnotationRemarks.cpp
   BDCE.cpp
+  CJAllocationSizeCheck.cpp
   CJIRVerifier.cpp
   CJBarrierSplit.cpp
   CJDevirtualOpt.cpp
@@ -116,3 +117,5 @@ add_llvm_component_library(LLVMScalarOpts
   TransformUtils
   Instrumentation
   )
+
+include_directories(${CANGJIE_DEMANGLE_DIR})
