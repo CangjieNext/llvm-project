@@ -220,7 +220,10 @@ static bool isDefChainConsistOfCastOrPHI(Value *V) {
         return false;
       }
     }
-    return (isa<AllocaInst>(Instr) || isCJMallocObj(Instr));
+    // The def chain may end at a value which is not an instruction, e.g. an
+    // `sret` argument. The `dyn_cast` above yields null then, and the source
+    // is neither an alloca nor a cj.malloc.object.
+    return Instr && (isa<AllocaInst>(Instr) || isCJMallocObj(Instr));
   }
   return false;
 }
