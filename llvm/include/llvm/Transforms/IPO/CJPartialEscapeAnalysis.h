@@ -18,6 +18,9 @@
 #ifndef LLVM_TRANSFORMS_IPO_CJPartialEscapeAnalysis_H
 #define LLVM_TRANSFORMS_IPO_CJPartialEscapeAnalysis_H
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/PassManager.h"
@@ -26,7 +29,7 @@ class GCPtr;
 class MemPtr;
 
 namespace llvm {
-enum EscapeState : unsigned { NotEscape, InfoEscaped, TransEscaped, Escaped };
+enum EscapeState : unsigned { NotEscape, InfoEscaped, Escaped };
 struct CJPartialEscapeAnalysisPass
     : public PassInfoMixin<CJPartialEscapeAnalysisPass> {
   PreservedAnalyses run(LazyCallGraph::SCC &C, CGSCCAnalysisManager &AM,
@@ -39,10 +42,36 @@ public:
   void setInfoEscaped(GCPtr *, BasicBlock *);
   bool isEscapedValue(Value *V);
 
+  // Assign unique id to each GCPtr/MemPtr to get consistent iteration order
+  unsigned getNextId() { return NextId++; }
+
+  // Record that P is fully escaped in BB
+  void setEscaped(GCPtr *P, BasicBlock *BB) {
+    if (!EscapeBBInfo[BB].count(P) || EscapeBBInfo[BB][P] < Escaped) {
+      EscapeBBInfo[BB][P] = Escaped;
+    }
+  }
+
+  // Deduplicate spreadMemEscape work: keys are (GCPtr, EscapeState, Offsets)
+  // ensure same propagation is done at most once
+  void resetSpreadVisited() { SpreadVisited.clear(); }
+  bool tryMarkSpreadVisited(GCPtr *P, unsigned ES,
+                            SmallVectorImpl<int> &Offsets);
+
   Function *ProcessedFunc = nullptr;
+  // Upper bound of object sizes seen among this analysis' GCNews. Offsets
+  // beyond it cannot be legitimate field offsets, so they are collapsed to
+  // the escape-all value by MemPtr::create / tryMarkSpreadVisited
+  unsigned MaxObjSize = 0;
   DenseMap<Value *, GCPtr *> AllPtrLocInfo;
   DenseMap<std::pair<Value *, int>, MemPtr *> AllMemLocInfo;
   DenseMap<BasicBlock *, DenseMap<GCPtr *, unsigned>> EscapeBBInfo;
+  // Stable order of BasicBlocks within the current analysis
+  DenseMap<BasicBlock *, unsigned> BBOrder;
+
+private:
+  unsigned NextId = 0;
+  DenseSet<uint64_t> SpreadVisited;
 };
 
 Type *getAllocaType(GlobalVariable *Klass, bool &HasRef, uint32_t &AS, bool &,
