@@ -17,6 +17,7 @@
 
 #include "queue"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/CallGraph.h"
@@ -41,7 +42,32 @@
 
 #define DEBUG_TYPE "escape-analysis"
 using namespace llvm;
+
 constexpr int alignEight = 8;
+
+// Maximum depth of the cumulative-offset path carried by spreadMemEscape.
+// Deeper propagations are collapsed to the escape-all offset (-1), which
+// bounds the number of distinct (node, Offsets) states
+constexpr unsigned MaxSpreadDepth = 16;
+
+// Maximum meaningful field offset for a MemPtr. Offsets are collapsed to
+// the unique escape-all value -1, keeping the number of distinct
+// (node, offset) propagation states bounded.
+constexpr int MaxSpreadOffset = 4096;
+
+// Effective offset bound: once per-object sizes are computed, use the tighter
+// of the object-size-aware upper bound (max object size among this analysis'
+// GCNews; offsets beyond it cannot be legitimate field offsets) and the static
+// MaxSpreadOffset fallback. Before that (during initialize) MaxObjSize is
+// still being accumulated, so keep the bound stable at MaxSpreadOffset.
+static unsigned getSpreadOffsetBound(const CJEscapeAnalysis &EA) {
+  if (!EA.MaxObjSizeComputed)
+    return MaxSpreadOffset;
+  if (EA.MaxObjSize != 0 &&
+      EA.MaxObjSize < static_cast<unsigned>(MaxSpreadOffset))
+    return EA.MaxObjSize;
+  return MaxSpreadOffset;
+}
 enum InitializeState : unsigned { NotInitialize, Initializing, Initialized };
 static cl::opt<unsigned> CJMaxStackObject("cj-max-stack-obj", cl::Hidden,
                                           cl::init(1024));
@@ -50,17 +76,6 @@ static cl::opt<unsigned> CJMaxNonMoveArraySize("cj-max-nonmove-array-size",
 namespace llvm {
 cl::opt<bool> CJDisablePEA("cj-disable-partial-ea",
                                   cl::Hidden, cl::init(false));
-cl::opt<unsigned> CJPEAMaxCycNonzero(
-    "cj-pea-max-cyc-nonzero", cl::Hidden, cl::init(24),
-    // 24 bails the confirmed-pathological case (RedBlackTree.put,
-    // maxCycNonzero=30). The metric counts every non-zero-offset
-    // intra-SCC edge (multi-edges included); the -1 escape-all sentinel
-    // offset is excluded (see countNonzeroIntraEdges).
-    cl::desc("Max non-zero-offset edges inside a cyclic SCC of the PEA "
-             "propagation graph for PEA to proceed; above this PEA bails "
-             "out. A cyclic SCC with non-zero offsets makes spreadMemEscape "
-             "cumulative offset-paths diverge; this is a deterministic graph "
-             "property and the direct topology root cause of the blow-up."));
 cl::opt<bool> CJEASupportFinalizer("cj-ea-support-finalizer", cl::Hidden,
                                    cl::init(true));
 
@@ -1088,7 +1103,7 @@ Value *getObjectVal(Instruction &I) {
 }
 
 #ifndef NDEBUG
-void doPrintFuncObjects(SmallVector<ObjectLocation *, 8> &AllLocations) {
+void doPrintFuncObjects(SmallVectorImpl<ObjectLocation *> &AllLocations) {
   for (unsigned i = 0; i < AllLocations.size(); i++) {
     if (AllLocations[i]->Val) {
       LLVM_DEBUG(dbgs() << AllLocations[i]->Parent->getName() << " : "
@@ -1106,6 +1121,15 @@ void doPrintFuncObjects(SmallVector<ObjectLocation *, 8> &AllLocations) {
 // 1. escape when store into/load from escaped object.
 // 2. object size bigger than threshold.
 // 3. escape as function's params.
+
+// Values that can never legally be stored into a GC reference field.
+static bool isValueInvalid(Value *V) {
+  if (V->getValueID() == llvm::Value::UndefValueVal) {
+    report_fatal_error("store/gcwrite an undef value!");
+  }
+  return V->getValueID() == llvm::Value::ConstantPointerNullVal;
+}
+
 class EADepthImpl : public InstVisitor<EADepthImpl> {
   // Befriend the base class so it can delegate to private visit methods.
   friend class InstVisitor<EADepthImpl>;
@@ -1345,13 +1369,6 @@ public:
     return finishAll(CGUpdater);
   }
 
-  bool isValueInvalid(Value *V) {
-    if (V->getValueID() == llvm::Value::UndefValueVal) {
-      report_fatal_error("store/gcwrite an undef value!");
-    }
-    return V->getValueID() == llvm::Value::ConstantPointerNullVal;
-  }
-
   bool isGCReadIntrinsic(Value *Base) {
     if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(Base)) {
       switch (II->getIntrinsicID()) {
@@ -1425,6 +1442,15 @@ public:
     }
     HeapLoc->insertEdge(&Loc, Path);
     Loc.insertEdge(HeapLoc, -Path);
+  }
+
+  // Mark a location as escaped to the heap at the given instruction. Shared by
+  // the load / store / gcwrite / extractvalue handlers.
+  void markEscaped(ObjectLocation *Loc, Instruction *I) {
+    Loc->Escaped = true;
+    Loc->EscapedInst = I;
+    Loc->EscapeState |= EscapeOrigin | EscapeGlobal;
+    escapeHeap(*Loc);
   }
 
   void handleSCCFunctionCall(CallBase &I, Function *CalledFunction) {
@@ -1553,10 +1579,7 @@ public:
       Loc->insertEdge(SrcLoc, 1);
       SrcLoc->insertEdge(Loc, -1);
     } else {
-      Loc->Escaped = true;
-      Loc->EscapedInst = I;
-      Loc->EscapeState = EscapeOrigin | EscapeGlobal;
-      escapeHeap(*Loc);
+      markEscaped(Loc, I);
     }
     enqueueUsers(I);
   }
@@ -1698,10 +1721,7 @@ public:
       Loc->insertEdge(SrcLoc, 1);
       SrcLoc->insertEdge(Loc, -1);
     } else {
-      Loc->Escaped = true;
-      Loc->EscapedInst = &EVT;
-      Loc->EscapeState = EscapeOrigin | EscapeGlobal;
-      escapeHeap(*Loc);
+      markEscaped(Loc, &EVT);
     }
     enqueueUsers(&EVT);
   }
@@ -1757,10 +1777,7 @@ private:
     if (isGCPointerType(I->getType()) ||
         isMemoryContainsGCPtrType(I->getType())) {
       if (auto Loc = getOrCreateLocation(I)) {
-        Loc->Escaped = true;
-        Loc->EscapedInst = I;
-        Loc->EscapeState |= EscapeOrigin | EscapeGlobal;
-        escapeHeap(*Loc);
+        markEscaped(Loc, I);
       }
     }
     if (IsClosureCall) {
@@ -1776,10 +1793,7 @@ private:
           isMemoryContainsGCPtrType(V->getType())))
         continue;
       if (auto Loc = getOrCreateLocation(V)) {
-        Loc->Escaped = true;
-        Loc->EscapedInst = I;
-        Loc->EscapeState |= EscapeOrigin | EscapeGlobal;
-        escapeHeap(*Loc);
+        markEscaped(Loc, I);
       }
     }
   }
@@ -1833,10 +1847,7 @@ private:
     auto Loc = getOrCreateLocation(V);
     if (!Loc)
       return;
-    Loc->Escaped = true;
-    Loc->EscapedInst = II;
-    Loc->EscapeState |= EscapeOrigin | EscapeGlobal;
-    escapeHeap(*Loc);
+    markEscaped(Loc, II);
   }
 
   void handleGCRead(IntrinsicInst *II, bool IsStatic) {
@@ -1969,15 +1980,15 @@ private:
 }
 class GCPtr;
 static void memPtrspreadEscape(BasicBlock *BB, unsigned ES,
-                               DenseMap<GCPtr *, unsigned> &SuccBBInfo,
-                               GCPtr *P, SmallVector<int, 8> &Offset,
+                               MapVector<GCPtr *, unsigned> &SuccBBInfo,
+                               GCPtr *P, SmallVectorImpl<int> &Offset,
                                bool Direct);
 
-static void countRefOffsets(StructType *ST, SmallVector<uint64_t, 8> &Offsets,
+static void countRefOffsets(StructType *ST, SmallVectorImpl<uint64_t> &Offsets,
                             uint64_t BaseOff, const DataLayout &DL,
                             unsigned Left, unsigned Right);
 
-static void countArrayOffsets(ArrayType *AT, SmallVector<uint64_t, 8> &Offsets,
+static void countArrayOffsets(ArrayType *AT, SmallVectorImpl<uint64_t> &Offsets,
                               uint64_t BaseOff, const DataLayout &DL,
                               unsigned Left, unsigned Right) {
   uint32_t Size = AT->getNumElements();
@@ -2008,7 +2019,7 @@ static void countArrayOffsets(ArrayType *AT, SmallVector<uint64_t, 8> &Offsets,
   }
 }
 
-static void countRefOffsets(StructType *ST, SmallVector<uint64_t, 8> &Offsets,
+static void countRefOffsets(StructType *ST, SmallVectorImpl<uint64_t> &Offsets,
                             uint64_t BaseOff, const DataLayout &DL,
                             unsigned Left, unsigned Right) {
   for (uint32_t Idx = 0; Idx < ST->getNumElements(); Idx++) {
@@ -2034,7 +2045,7 @@ public:
   explicit GCPtr(Value *Val, unsigned Depth, CJEscapeAnalysis &EAImpl)
       : P(Val), IsLoad(isa<LoadInst>(Val) || isa<ExtractValueInst>(Val)),
         IsPhiOrSelect(isa<PHINode>(Val) || isa<SelectInst>(Val)),
-        LoopDepth(Depth), EA(EAImpl) {
+        LoopDepth(Depth), EA(EAImpl), Id(EAImpl.getNextId()) {
     if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(Val))
       IsLoad |= II->getIntrinsicID() == Intrinsic::cj_gcread_ref;
   }
@@ -2042,6 +2053,10 @@ public:
   virtual ~GCPtr() = default;
 
   virtual bool equal(GCPtr *V) { return V->isPtr() && (P == V->P); }
+
+  // Size in bytes of the object this pointer refers to, lazily derived from
+  // the defining instruction (GCNew / load / phi / select); 0 = unknown.
+  virtual unsigned getObjSize();
 
   static GCPtr *get(Value *Val, CJEscapeAnalysis &EAImpl) {
     if (EAImpl.AllPtrLocInfo.count(Val)) {
@@ -2075,7 +2090,7 @@ public:
     GCPtr *New = new GCPtr(Val, LD, EAImpl);
     if (EAImpl.isEscapedValue(Val)) {
       Function *CurFunc = EAImpl.ProcessedFunc;
-      EAImpl.EscapeBBInfo[&CurFunc->getEntryBlock()][New] = Escaped;
+      EAImpl.setEscaped(New, &CurFunc->getEntryBlock());
     }
     EAImpl.AllPtrLocInfo[Val] = New;
     return New;
@@ -2108,7 +2123,7 @@ public:
   bool isInfoEscaped() { return InfoEscapeInfo; }
 
   virtual void spreadInfoEscape(BasicBlock *BB, unsigned ES,
-                                DenseMap<GCPtr *, unsigned> &SuccBBInfo,
+                                MapVector<GCPtr *, unsigned> &SuccBBInfo,
                                 bool Direct = true) {
     if (isDerivedPtr() && Direct && DirectSpread < InfoEscaped) {
       DirectSpread = InfoEscaped;
@@ -2125,78 +2140,81 @@ public:
       }
     }
     if (Direct) {
-      for (auto &V : BaseValue) {
-        V.first->spreadInfoEscape(BB, ES, SuccBBInfo, true);
+      for (auto &KV : BaseValue) {
+        GCPtr *V = KV.first;
+        V->spreadInfoEscape(BB, ES, SuccBBInfo, true);
       }
     }
     if (Alias.size() != 0) {
-      for (auto V : Alias) {
-        V.first->spreadInfoEscape(BB, ES, SuccBBInfo, false);
+      for (auto &KV : Alias) {
+        GCPtr *V = KV.first;
+        V->spreadInfoEscape(BB, ES, SuccBBInfo, false);
       }
     }
-    for (auto &V : InfoEscapedVec) {
+    for (GCPtr *V : InfoEscapedVec) {
       V->spreadInfoEscape(BB, ES, SuccBBInfo, Direct);
     }
   }
 
   virtual void spreadMemEscape(BasicBlock *BB, unsigned ES,
-                               DenseMap<GCPtr *, unsigned> &SuccBBInfo,
-                               SmallVector<int, 8> &Offsets,
+                               MapVector<GCPtr *, unsigned> &SuccBBInfo,
+                               SmallVectorImpl<int> &Offsets,
                                bool Direct = true) {
-    if (IsVisiting) {
+    if (!EA.tryMarkSpreadVisited(this, ES, Direct, Offsets)) {
       return;
     }
-    IsVisiting = true;
     int CurOffset = Offsets.pop_back_val();
     if (CurOffset >= 0) {
       Offsets.push_back(CurOffset);
       memPtrspreadEscape(BB, ES, SuccBBInfo, this, Offsets, Direct);
-      IsVisiting = false;
       return;
     }
     if (isPhiOrSelect()) {
       if (Offsets.size() > 0) {
         for (unsigned I = 0; I < MPs.size(); ++I)
           MPs[I]->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
-        for (auto &V : InfoEscapedVec) {
+        for (GCPtr *V : InfoEscapedVec) {
           for (unsigned I = 0; I < V->MPs.size(); ++I)
             V->MPs[I]->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
         }
       } else {
         for (unsigned I = 0; I < MPs.size(); ++I)
           MPs[I]->spreadEscape(BB, ES, SuccBBInfo, true);
-        for (auto &V : InfoEscapedVec) {
+        for (GCPtr *V : InfoEscapedVec) {
           for (unsigned I = 0; I < V->MPs.size(); ++I)
             V->MPs[I]->spreadEscape(BB, ES, SuccBBInfo, Direct);
         }
       }
       Offsets.push_back(CurOffset);
       if (Direct) {
-        for (auto &V : BaseValue) {
-          V.first->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
+        for (auto &KV : BaseValue) {
+          GCPtr *V = KV.first;
+          V->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
         }
       }
-      for (auto V : Alias) {
-        V.first->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
+      for (auto &KV : Alias) {
+        GCPtr *V = KV.first;
+        V->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
       }
-      IsVisiting = false;
       return;
     }
     if (Offsets.size() > 0) {
       for (unsigned I = 0; I < MPs.size(); ++I)
         MPs[I]->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
       if (Direct) {
-        for (auto &V : BaseValue) {
-          for (unsigned I = 0; I < V.first->MPs.size(); ++I)
-            V.first->MPs[I]->spreadMemEscape(BB, ES, SuccBBInfo, Offsets,
-                                             Direct);
+        for (auto &KV : BaseValue) {
+          GCPtr *V = KV.first;
+          for (unsigned I = 0; I < V->MPs.size(); ++I)
+            V->MPs[I]->spreadMemEscape(BB, ES, SuccBBInfo, Offsets,
+                                       Direct);
         }
       }
-      for (auto V : Alias) {
-        for (unsigned I = 0; I < V.first->MPs.size(); ++I)
-          V.first->MPs[I]->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
+      for (auto &KV : Alias) {
+        GCPtr *V = KV.first;
+        for (unsigned I = 0; I < V->MPs.size(); ++I)
+          V->MPs[I]->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
       }
-      for (auto &V : InfoEscapedVec) {
+      for (GCPtr *V : InfoEscapedVec) {
         for (unsigned I = 0; I < V->MPs.size(); ++I)
           V->MPs[I]->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
       }
@@ -2205,26 +2223,27 @@ public:
       for (unsigned I = 0; I < MPs.size(); ++I)
         MPs[I]->spreadEscape(BB, ES, SuccBBInfo, true);
       if (Direct) {
-        for (auto &V : BaseValue) {
-          for (unsigned I = 0; I < V.first->MPs.size(); ++I)
-            V.first->MPs[I]->spreadEscape(BB, ES, SuccBBInfo, true);
+        for (auto &KV : BaseValue) {
+          GCPtr *V = KV.first;
+          for (unsigned I = 0; I < V->MPs.size(); ++I)
+            V->MPs[I]->spreadEscape(BB, ES, SuccBBInfo, true);
         }
       }
-      for (auto V : Alias) {
-        for (unsigned I = 0; I < V.first->MPs.size(); ++I)
-          V.first->MPs[I]->spreadEscape(BB, ES, SuccBBInfo, Direct);
+      for (auto &KV : Alias) {
+        GCPtr *V = KV.first;
+        for (unsigned I = 0; I < V->MPs.size(); ++I)
+          V->MPs[I]->spreadEscape(BB, ES, SuccBBInfo, Direct);
       }
-      for (auto &V : InfoEscapedVec) {
+      for (GCPtr *V : InfoEscapedVec) {
         for (unsigned I = 0; I < V->MPs.size(); ++I)
           V->MPs[I]->spreadEscape(BB, ES, SuccBBInfo, Direct);
       }
       Offsets.push_back(CurOffset);
     }
-    IsVisiting = false;
   }
 
   virtual void spreadEscape(BasicBlock *BB, unsigned ES,
-                            DenseMap<GCPtr *, unsigned> &SuccBBInfo,
+                            MapVector<GCPtr *, unsigned> &SuccBBInfo,
                             bool Direct) {
     if (isDerivedPtr() && Direct && DirectSpread < ES) {
       DirectSpread = ES;
@@ -2238,23 +2257,25 @@ public:
     }
     // is direct escape
     if (isDerivedPtr() && Direct) {
-      for (auto &V : BaseValue) {
-        if (!SuccBBInfo.count(V.first) || SuccBBInfo[V.first] < ES ||
-            canSpread(V.first, ES)) {
-          SuccBBInfo[V.first] = ES;
-          V.first->spreadEscape(BB, ES, SuccBBInfo, true);
+      for (auto &KV : BaseValue) {
+        GCPtr *V = KV.first;
+        if (!SuccBBInfo.count(V) || SuccBBInfo[V] < ES ||
+            canSpread(V, ES)) {
+          SuccBBInfo[V] = ES;
+          V->spreadEscape(BB, ES, SuccBBInfo, true);
         }
       }
     }
     if (Alias.size() != 0) {
-      for (auto &V : Alias) {
-        if (!SuccBBInfo.count(V.first) || SuccBBInfo[V.first] < ES) {
-          SuccBBInfo[V.first] = ES;
-          V.first->spreadEscape(BB, ES, SuccBBInfo, false);
+      for (auto &KV : Alias) {
+        GCPtr *V = KV.first;
+        if (!SuccBBInfo.count(V) || SuccBBInfo[V] < ES) {
+          SuccBBInfo[V] = ES;
+          V->spreadEscape(BB, ES, SuccBBInfo, false);
         }
       }
     }
-    for (auto &V : InfoEscapedVec) {
+    for (GCPtr *V : InfoEscapedVec) {
       V->spreadInfoEscape(BB, ES, SuccBBInfo, Direct);
     }
   }
@@ -2267,22 +2288,31 @@ public:
   bool IsPhiOrSelect;
   unsigned DirectSpread = NotEscape;
   bool InfoEscapeInfo = false;
-  bool IsVisiting = false;
   int MemOff = 0;
   InitializeState InitializeFlag = NotInitialize;
   unsigned LoopDepth;
   CJEscapeAnalysis &EA;
+  // Stable unique id (assigned in IR-visit order)
+  unsigned Id;
+  // Size in bytes of the object this pointer refers to (0 = unknown). An offset
+  // larger than the object itself cannot be a legitimate field offset, so it
+  // will collapse to the escape-all value.
+  unsigned ObjSize = 0;
   // for load
-  DenseMap<GCPtr *, SmallSet<uint64_t, 2>> BaseValue;
+  MapVector<GCPtr *, SmallSet<uint64_t, 2>> BaseValue;
   // Ptr's memPtr info
   SmallVector<GCPtr *, 8> MPs;
   // pass to other instruction, such as
   // %3 = phi [%1, %bb1], [%2, %bb2]
   // which %1， %2's obj Alias stored %3.
   // Value is the offset of %1's base and %3
-  DenseMap<GCPtr *, SmallSet<int, 2>> Alias;
+  MapVector<GCPtr *, SmallSet<int, 2>> Alias;
   SmallSetVector<GCPtr *, 8> InfoEscapedVec;
 };
+
+// The object size is computed iteratively by EscapeAnalysisImpl::
+// computeAllObjSizes() before propagation.
+unsigned GCPtr::getObjSize() { return ObjSize; }
 
 class MemPtr final : public GCPtr {
 public:
@@ -2297,19 +2327,55 @@ public:
 
   static MemPtr *create(Value *Val, int Off, CJEscapeAnalysis &EAImpl,
                         LoopInfo *LI = nullptr, bool needInsert = true) {
-    if (EAImpl.AllMemLocInfo.count(std::make_pair(Val, Off))) {
-      return EAImpl.AllMemLocInfo[std::make_pair(Val, Off)];
+    // Normalize extreme offsets to the unique escape-all value (-1):
+    // negative offsets and offsets beyond the effective bound are not
+    // meaningful for individual fields.
+    if (Off < 0) {
+      Off = -1;
     }
+    int RawOff = Off;
     GCPtr *P = GCPtr::create(Val, EAImpl, LI);
     if (P == nullptr)
       return nullptr;
-    if (Off < 0) {
-      Off = --P->MemOff;
+    if (Off > 0) {
+      unsigned ObjSize = P->getObjSize();
+      unsigned Bound = ObjSize ? ObjSize : getSpreadOffsetBound(EAImpl);
+      if (Off > static_cast<int>(Bound))
+        Off = -1;
+    }
+    // If the raw offset exceeds the current bound but a MemPtr was already
+    // created at that exact offset (e.g., during initialize under the looser
+    // pre-sizing bound), reuse it. Collapsing to -1 here would orphan the
+    // existing MemPtr and its DefineValues from the offset-precise channel.
+    if (Off == -1 && RawOff > 0) {
+      auto RawIt = EAImpl.AllMemLocInfo.find(std::make_pair(Val, RawOff));
+      if (RawIt != EAImpl.AllMemLocInfo.end()) {
+        MemPtr *M = RawIt->second;
+        if (needInsert && !M->InsertedIntoMPs) {
+          P->insertMem(M);
+          M->InsertedIntoMPs = true;
+        }
+        return M;
+      }
+    }
+    auto CacheIt = EAImpl.AllMemLocInfo.find(std::make_pair(Val, Off));
+    if (CacheIt != EAImpl.AllMemLocInfo.end()) {
+      MemPtr *M = CacheIt->second;
+      // A MemPtr may first be created by an alias/weak path with
+      // needInsert=false; backfill MPs when a later direct/strong path needs
+      // the slot to be visible to base-escape enumeration.
+      if (needInsert && !M->InsertedIntoMPs) {
+        P->insertMem(M);
+        M->InsertedIntoMPs = true;
+      }
+      return M;
     }
     MemPtr *New = new MemPtr(Val, Off, P->LoopDepth, EAImpl, P);
     EAImpl.AllMemLocInfo[std::make_pair(Val, Off)] = New;
-    if (needInsert)
+    if (needInsert) {
       P->insertMem(New);
+      New->InsertedIntoMPs = true;
+    }
     return New;
   }
 
@@ -2323,12 +2389,54 @@ public:
 
   bool isPtr() override { return false; }
 
+  // A memory location lives inside its base object, so it shares its size.
+  unsigned getObjSize() override { return Base->getObjSize(); }
+
   void insertDefine(BasicBlock *BB, GCPtr *Val) {
     DefineValues[BB].push_back(Val);
   }
 
+  // Propagate escape through the Base->BaseValue edges (strong propagation,
+  // only meaningful when Direct). Shared by the three MemPtr spread methods.
+  void spreadBaseValues(BasicBlock *BB, unsigned ES,
+                        MapVector<GCPtr *, unsigned> &SuccBBInfo,
+                        SmallVectorImpl<int> &Offsets, bool Direct) {
+    if (!Direct)
+      return;
+    for (auto &KV : Base->BaseValue) {
+      GCPtr *V = KV.first;
+      for (auto BaseValueOffset : Base->BaseValue[V]) {
+        Offsets.push_back(BaseValueOffset + Offset);
+        V->spreadMemEscape(BB, ES, SuccBBInfo, Offsets);
+        Offsets.pop_back();
+      }
+    }
+  }
+
+  // Propagate escape through the Base->Alias edges (weak propagation).
+  // Shared by the three MemPtr spread methods.
+  void spreadAliases(BasicBlock *BB, unsigned ES,
+                     MapVector<GCPtr *, unsigned> &SuccBBInfo,
+                     SmallVectorImpl<int> &Offsets) {
+    if (Base->Alias.size() == 0)
+      return;
+    for (auto &KV : Base->Alias) {
+      GCPtr *V = KV.first;
+      for (auto AliasOffset : Base->Alias[V]) {
+        if (Offset < AliasOffset)
+          continue;
+        if (AliasOffset != -1)
+          Offsets.push_back(Offset - AliasOffset);
+        else
+          Offsets.push_back(AliasOffset); // == -1, escape-all offset
+        V->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, false);
+        Offsets.pop_back();
+      }
+    }
+  }
+
   void spreadInfoEscape(BasicBlock *BB, unsigned ES,
-                        DenseMap<GCPtr *, unsigned> &SuccBBInfo,
+                        MapVector<GCPtr *, unsigned> &SuccBBInfo,
                         bool Direct = true) override {
     if (isDerivedPtr() && Direct && DirectSpread < InfoEscaped) {
       DirectSpread = InfoEscaped;
@@ -2338,7 +2446,7 @@ public:
     if (SuccBBInfo[this] < InfoEscaped) {
       SuccBBInfo[this] = InfoEscaped;
     }
-    for (auto DefineMap : DefineValues) {
+    for (auto &DefineMap : DefineValues) {
       for (GCPtr *Define : DefineMap.second) {
         if (!SuccBBInfo.count(Define) || SuccBBInfo[Define] < InfoEscaped) {
           Define->spreadInfoEscape(BB, Escaped, SuccBBInfo, Direct);
@@ -2353,42 +2461,18 @@ public:
     if (Offset < 0) {
       return;
     }
-    if (Direct) {
-      for (auto &V : Base->BaseValue) {
-        for (auto BaseValueOffset : V.second) {
-          Offsets.push_back(BaseValueOffset + Offset);
-          V.first->spreadMemEscape(BB, ES, SuccBBInfo, Offsets);
-          Offsets.pop_back();
-        }
-      }
-    }
-    if (Base->Alias.size() != 0) {
-      for (auto &V : Base->Alias) {
-        for (auto AliasOffset : V.second) {
-          if (Offset < AliasOffset) {
-            continue;
-          }
-          if (AliasOffset != -1) {
-            Offsets.push_back(Offset - AliasOffset);
-          } else {
-            Offsets.push_back(AliasOffset);
-          }
-          V.first->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, false);
-          Offsets.pop_back();
-        }
-      }
-    }
+    spreadBaseValues(BB, ES, SuccBBInfo, Offsets, Direct);
+    spreadAliases(BB, ES, SuccBBInfo, Offsets);
   }
 
   void spreadMemEscape(
-      BasicBlock *BB, unsigned ES, DenseMap<GCPtr *, unsigned> &SuccBBInfo,
-      SmallVector<int, 8> &Offsets, bool Direct) override {
-    if (IsVisiting) {
+      BasicBlock *BB, unsigned ES, MapVector<GCPtr *, unsigned> &SuccBBInfo,
+      SmallVectorImpl<int> &Offsets, bool Direct) override {
+    if (!EA.tryMarkSpreadVisited(this, ES, Direct, Offsets)) {
       return;
     }
-    IsVisiting = true;
     int CurOffset = Offsets.back();
-    for (auto DefineMap : DefineValues) {
+    for (auto &DefineMap : DefineValues) {
       for (GCPtr *Define : DefineMap.second) {
         if ((Offsets.size() == 1) && Define->isPtr()) {
           MemPtr *MPtr = MemPtr::create(Define->P, CurOffset, EA);
@@ -2402,48 +2486,27 @@ public:
         Define->spreadMemEscape(BB, ES, SuccBBInfo, Offsets);
       }
     }
-    Offsets.push_back(Offset);
+    // Depth-limit the cumulative offset path: beyond MaxSpreadDepth, collapse
+    // to the escape-all offset (-1) so the number of distinct (node, Offsets)
+    // states stays bounded.
+    int LimitedOffset = (Offsets.size() < MaxSpreadDepth)? Offset : -1;
+    Offsets.push_back(LimitedOffset);
     Base->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, Direct);
     Offsets.pop_back();
     if (Offset < 0) {
-      IsVisiting = false;
       return;
     }
-    if (Direct) {
-      for (auto &V : Base->BaseValue) {
-        for (auto BaseValueOffset : V.second) {
-          Offsets.push_back(BaseValueOffset + Offset);
-          V.first->spreadMemEscape(BB, ES, SuccBBInfo, Offsets);
-          Offsets.pop_back();
-        }
-      }
-    }
-    if (Base->Alias.size() != 0) {
-      for (auto &V : Base->Alias) {
-        for (auto AliasOffset : V.second) {
-          if (Offset < AliasOffset) {
-            continue;
-          }
-          if (AliasOffset != -1) {
-            Offsets.push_back(Offset - AliasOffset);
-          } else {
-            Offsets.push_back(AliasOffset);
-          }
-          V.first->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, false);
-          Offsets.pop_back();
-        }
-      }
-    }
-    IsVisiting = false;
+    spreadBaseValues(BB, ES, SuccBBInfo, Offsets, Direct);
+    spreadAliases(BB, ES, SuccBBInfo, Offsets);
   }
 
   void spreadEscape(BasicBlock *BB, unsigned ES,
-                    DenseMap<GCPtr *, unsigned> &SuccBBInfo,
+                    MapVector<GCPtr *, unsigned> &SuccBBInfo,
                     bool Direct) override {
     if (isDerivedPtr() && Direct && DirectSpread < ES) {
       DirectSpread = ES;
     }
-    for (auto DefineMap : DefineValues) {
+    for (auto &DefineMap : DefineValues) {
       for (GCPtr *Define : DefineMap.second) {
         if (!SuccBBInfo.count(Define) || SuccBBInfo[Define] < ES ||
             canSpread(Define, ES)) {
@@ -2457,43 +2520,21 @@ public:
       return;
     }
     SmallVector<int, 8> Offsets;
-    if (Direct) {
-      for (auto &V : Base->BaseValue) {
-        for (auto BaseValueOffset : V.second) {
-          Offsets.push_back(BaseValueOffset + Offset);
-          V.first->spreadMemEscape(BB, ES, SuccBBInfo, Offsets);
-          Offsets.pop_back();
-        }
-      }
-    }
+    spreadBaseValues(BB, ES, SuccBBInfo, Offsets, Direct);
 
-    if (Base->Alias.size() != 0) {
-      for (auto &V : Base->Alias) {
-        for (auto AliasOffset : V.second) {
-          if (Offset < AliasOffset) {
-            continue;
-          }
-          if (AliasOffset != -1) {
-             Offsets.push_back(Offset - AliasOffset);
-           } else {
-             Offsets.push_back(-1);
-           }
-           V.first->spreadMemEscape(BB, ES, SuccBBInfo, Offsets, false);
-           Offsets.pop_back();
-        }
-      }
-    }
+    spreadAliases(BB, ES, SuccBBInfo, Offsets);
   }
 
   bool isDerivedPtr() override { return Base->isDerivedPtr(); }
   GCPtr *Base;
   int Offset;
-  DenseMap<BasicBlock *, SmallVector<GCPtr *, 8>> DefineValues;
+  bool InsertedIntoMPs = false;
+  MapVector<BasicBlock *, SmallVector<GCPtr *>> DefineValues;
 };
 
 static void memPtrspreadEscape(
-    BasicBlock *BB, unsigned ES, DenseMap<GCPtr *, unsigned> &SuccBBInfo,
-    GCPtr *P, SmallVector<int, 8> &Offsets, bool Direct) {
+    BasicBlock *BB, unsigned ES, MapVector<GCPtr *, unsigned> &SuccBBInfo,
+    GCPtr *P, SmallVectorImpl<int> &Offsets, bool Direct) {
   int CurOffset = Offsets.back();
   MemPtr *MPtr = MemPtr::create(P->P, CurOffset, P->EA, nullptr, Direct);
   if (MPtr == nullptr) {
@@ -2517,6 +2558,57 @@ void CJEscapeAnalysis::setInfoEscaped(GCPtr *GP, BasicBlock *BB) {
   if (!EscapeBBInfo[BB].count(GP)) {
     EscapeBBInfo[BB][GP] = NotEscape;
   }
+}
+
+bool CJEscapeAnalysis::tryMarkSpreadVisited(GCPtr *P, unsigned ES, bool Direct,
+                                            SmallVectorImpl<int> &Offsets) {
+  int Back = Offsets.empty() ? 0 : Offsets.back();
+  if (Back < 0) {
+    Back = -1; // normalize escape-all offsets
+  } else if (Back > 0) {
+    // Per-object bound: an offset beyond the current node's own object size
+    // is not a legitimate field offset. Falls back to the global bound when
+    // the object size is unknown.
+    unsigned ObjSize = P->getObjSize();
+    unsigned Bound = ObjSize ? ObjSize : getSpreadOffsetBound(*this);
+    if (Back > static_cast<int>(Bound)) {
+      // Only GCPtr::spreadMemEscape materializes MemPtr(P->P, Back) through
+      // memPtrspreadEscape. In that case, if a MemPtr at this raw offset was
+      // already created (e.g., during initialize under the looser pre-sizing
+      // bound), keep the concrete back so the existing MemPtr and its
+      // DefineValues remain reachable through the offset-precise channel.
+      // MemPtr::spreadMemEscape does not create (P->P, Back), so the raw
+      // registry entry is not meaningful there and Back should saturate.
+      if (!P->isPtr() || !AllMemLocInfo.count(std::make_pair(P->P, Back)))
+        Back = -1;
+    }
+  }
+  unsigned DepthBucket = Offsets.size() > MaxSpreadDepth ? MaxSpreadDepth
+                                                         : Offsets.size();
+  // Pack the state into a compact integer key:
+  //   Id (32 bits) | Reserved (11 bits) | Direct (1 bit) | ES (2 bits)
+  //   | Back+1 (13 bits) | DepthBucket (5 bits).
+  // Id occupies the high 32 bits. The Reserved field spans the 22nd through
+  // 32nd bits (0-based bit 21..31) and must remain zero for future expansion.
+  // Id is the stable unique id assigned at GCPtr construction; Back+1 keeps
+  // the escape-all (-1) offset addressable.
+  uint64_t BaseKey = ((uint64_t)P->Id << 32) | // Id: bits 32..63
+                     ((uint64_t)(ES & 0x3) << 18) |
+                     ((uint64_t)(Back + 1) << 5) |
+                     (DepthBucket & 0x1F);
+  uint64_t TrueKey = BaseKey | (1ULL << 20); // Direct bit: bit 20
+
+  // Direct==true is strictly stronger than Direct==false for the same state:
+  // it performs all Direct==false propagation plus the BaseValue/needInsert
+  // work. Therefore a Direct==false visit is redundant once a Direct==true
+  // visit of the same state has happened, while a Direct==true visit is never
+  // covered by an earlier Direct==false visit.
+  if (Direct) {
+    return SpreadVisited.insert(TrueKey).second;
+  }
+  if (SpreadVisited.count(TrueKey))
+    return false;
+  return SpreadVisited.insert(BaseKey).second;
 }
 
 Value *CJEscapeAnalysis::getBaseValue(Value *CV, int &Offset) {
@@ -2603,9 +2695,6 @@ public:
           }
           LLVM_DEBUG(dbgs() << "\n");
           break;
-        case TransEscaped:
-          LLVM_DEBUG(dbgs() << "TransEscaped\n");
-          break;
         default:
           LLVM_DEBUG(dbgs() << "info escape state.\n");
           break;
@@ -2664,6 +2753,8 @@ public:
 #endif
 
   void initialize() {
+    MaxObjSize = 0;
+    MaxObjSizeComputed = false;
     for (Function *Func : SCCFunctions) {
       ProcessedFunc = Func;
       LI = &LookupLoopInfo(*Func);
@@ -2769,14 +2860,21 @@ public:
         if (!EscapeBBInfo.count(Pred)) {
           continue;
         }
-        for (auto BBInfo : EscapeBBInfo[Pred]) {
-          if (BBInfo.second >= TransEscaped &&
+        // SpreadEscape can update SuccBBInfo, which is the same MapVector as
+        // EscapeBBInfo[Pred] for a self-loop BB; snapshot the predecessor state
+        // before iterating to avoid mutating a container while iterating it.
+        SmallVector<std::pair<GCPtr *, unsigned>> PredSnapshot;
+        for (auto &PredInfo : EscapeBBInfo[Pred])
+          PredSnapshot.push_back(PredInfo);
+        for (auto BBInfo : PredSnapshot) {
+          if (BBInfo.second == Escaped &&
               (!SuccBBInfo.count(BBInfo.first) ||
-               SuccBBInfo[BBInfo.first] < TransEscaped)) {
+               SuccBBInfo[BBInfo.first] < Escaped)) {
             Changed = true;
-            SuccBBInfo[BBInfo.first] = TransEscaped;
-            // obj stored to Escaped or TransEscaped is to be Escaped.
-            BBInfo.first->spreadEscape(&BB, TransEscaped, SuccBBInfo, true);
+            SuccBBInfo[BBInfo.first] = Escaped;
+            // Any object stored into an Escaped memory location is to be
+            // treated as Escaped.
+            BBInfo.first->spreadEscape(&BB, Escaped, SuccBBInfo, true);
           } else if (BBInfo.second == InfoEscaped &&
                      (!SuccBBInfo.count(BBInfo.first) ||
                       SuccBBInfo[BBInfo.first] < InfoEscaped)) {
@@ -2789,6 +2887,8 @@ public:
   }
 
   void processFunc(Function *Func) {
+    // Start a fresh spreadMemEscape deduplication set for this function.
+    resetSpreadVisited();
     bool Changed = true;
     for (auto &BB : *Func) {
       auto &BBInfo = EscapeBBInfo[&BB];
@@ -2866,127 +2966,91 @@ public:
     }
   }
 
-  // Compute the maximum number of non-zero-offset edges inside any cyclic
-  // SCC of the propagation graph (built from MP / BaseValue / Alias /
-  // InfoEscapedVec edges). A cyclic SCC carrying non-zero offsets is the
-  // topology root cause of spreadMemEscape blow-up: cumulative offset-paths
-  // diverge, so distinct (node, offset) states grow without bound. This is a
-  // deterministic graph property (independent of ASLR or DenseMap order).
-  unsigned computeMaxCycNonzero() {
-    DenseMap<GCPtr *, SmallVector<GCPtr *>> G;
-    DenseMap<GCPtr *, SmallVector<int64_t>> GOff;
-    auto AddEdge = [&](GCPtr *From, GCPtr *To, int64_t Off) {
-      G[From].push_back(To);
-      GOff[From].push_back(Off);
-      // Pre-register every edge target as a key of G: targets such as
-      // MemPtrs live in AllMemLocInfo and are never values of AllPtrLocInfo,
-      // so without this tarjanMaxCycNonzero would insert them via G[U]
-      // while iterating G, invalidating the iteration (UB).
-      if (G.find(To) == G.end()) {
-        G[To];
+  // Aggregate the object size of G from its defining instruction without
+  // recursing: GCNew calls carry their Klass size, loads/phis/selects read the
+  // (already computed) size of their source/operands via GCPtr::get.
+  unsigned deriveObjSize(GCPtr *G) {
+    Value *V = G->P;
+    if (auto *CI = dyn_cast<CallBase>(V)) {
+      if (GlobalVariable *Klass = getNewKlass(CI)) {
+        bool HasRefs = false;
+        uint32_t AS = 0;
+        bool NonMoveArray = false;
+        Type *T = getAllocaType(Klass, HasRefs, AS, NonMoveArray,
+                                dyn_cast<Instruction>(V));
+        if (T != nullptr || NonMoveArray)
+          return AS;
       }
-    };
+      return 0;
+    }
+    if (auto *LI = dyn_cast<LoadInst>(V)) {
+      if (GCPtr *Src = GCPtr::get(LI->getPointerOperand(), *this))
+        return Src->ObjSize;
+      return 0;
+    }
+    unsigned Max = 0;
+    if (auto *PN = dyn_cast<PHINode>(V)) {
+      for (unsigned I = 0; I < PN->getNumIncomingValues(); ++I)
+        if (GCPtr *Inv = GCPtr::get(PN->getIncomingValue(I), *this))
+          Max = std::max(Max, Inv->ObjSize);
+      return Max;
+    }
+    if (auto *SI = dyn_cast<SelectInst>(V)) {
+      for (Value *Op : {SI->getTrueValue(), SI->getFalseValue()})
+        if (GCPtr *OpPtr = GCPtr::get(Op, *this))
+          Max = std::max(Max, OpPtr->ObjSize);
+      return Max;
+    }
+    return 0;
+  }
+
+  void computeAllObjSizes() {
+    constexpr unsigned UseVectorSize = 4;
+    DenseMap<GCPtr *, SmallVector<GCPtr *, UseVectorSize>> Uses;
+    SmallVector<GCPtr *> Worklist;
     for (auto &KV : AllPtrLocInfo) {
-      GCPtr *P = KV.second;
-      for (GCPtr *M : P->MPs) {
-        AddEdge(P, M, 0);
-      }
-      for (auto &V : P->BaseValue) {
-        for (uint64_t O : V.second) {
-          AddEdge(P, V.first, static_cast<int64_t>(O));
-        }
-      }
-      for (auto &V : P->Alias) {
-        for (int O : V.second) {
-          AddEdge(P, V.first, O);
-        }
-      }
-      for (GCPtr *V : P->InfoEscapedVec) {
-        AddEdge(P, V, 0);
-      }
-    }
-    return tarjanMaxCycNonzero(G, GOff);
-  }
-
-  // Iterative Tarjan SCC. For every cyclic SCC, count non-zero-offset
-  // intra-SCC edges and return the maximum such count.
-  unsigned tarjanMaxCycNonzero(DenseMap<GCPtr *, SmallVector<GCPtr *>> &G,
-                               DenseMap<GCPtr *, SmallVector<int64_t>> &GOff) {
-    unsigned Idx = 0;
-    DenseMap<GCPtr *, unsigned> Disc, Low;
-    SmallVector<GCPtr *> Stk;
-    DenseSet<GCPtr *> OnStk;
-    unsigned MaxCycNonzero = 0;
-    for (auto &KV : G) {
-      if (Disc.count(KV.first)) {
-        continue;
-      }
-      SmallVector<std::pair<GCPtr *, unsigned>> Dfs;
-      Dfs.push_back({KV.first, 0});
-      while (!Dfs.empty()) {
-        GCPtr *U = Dfs.back().first;
-        unsigned &Pos = Dfs.back().second;
-        if (Pos == 0) {
-          Disc[U] = Low[U] = Idx++;
-          Stk.push_back(U);
-          OnStk.insert(U);
-        }
-        if (Pos < G[U].size()) {
-          GCPtr *W = G[U][Pos++];
-          if (!Disc.count(W)) {
-            Dfs.push_back({W, 0});
-            continue;
+      GCPtr *G = KV.second;
+      Value *V = G->P;
+      if (auto *CI = dyn_cast<CallBase>(V)) {
+        // Seed: a GCNew carries its Klass size.
+        if (GlobalVariable *Klass = getNewKlass(CI)) {
+          bool HasRefs = false;
+          uint32_t AS = 0;
+          bool NonMoveArray = false;
+          Type *T = getAllocaType(Klass, HasRefs, AS, NonMoveArray,
+                                  dyn_cast<Instruction>(V));
+          if (T != nullptr || NonMoveArray) {
+            G->ObjSize = AS;
+            Worklist.push_back(G);
           }
-          if (OnStk.count(W)) {
-            Low[U] = std::min(Low[U], Disc[W]);
-          }
-          continue;
         }
-        Dfs.pop_back();
-        if (!Dfs.empty()) {
-          Low[Dfs.back().first] = std::min(Low[Dfs.back().first], Low[U]);
-        }
-        if (Low[U] != Disc[U]) {
-          continue;
-        }
-        // U roots an SCC; pop it and, if cyclic, count non-zero intra-edges.
-        SmallVector<GCPtr *> Comp;
-        GCPtr *X;
-        do {
-          X = Stk.pop_back_val();
-          OnStk.erase(X);
-          Comp.push_back(X);
-        } while (X != U);
-        if (Comp.size() <= 1) {
-          continue;
-        }
-        DenseSet<GCPtr *> In(Comp.begin(), Comp.end());
-        unsigned Nz = countNonzeroIntraEdges(Comp, G, GOff, In);
-        MaxCycNonzero = std::max(MaxCycNonzero, Nz);
+      }
+      // Build the reverse use index: def -> users.
+      if (auto *LI = dyn_cast<LoadInst>(V)) {
+        if (GCPtr *Src = GCPtr::get(LI->getPointerOperand(), *this))
+          Uses[Src].push_back(G);
+      } else if (auto *PN = dyn_cast<PHINode>(V)) {
+        for (unsigned I = 0; I < PN->getNumIncomingValues(); ++I)
+          if (GCPtr *Inc = GCPtr::get(PN->getIncomingValue(I), *this))
+            Uses[Inc].push_back(G);
+      } else if (auto *SI = dyn_cast<SelectInst>(V)) {
+        for (Value *Op : {SI->getTrueValue(), SI->getFalseValue()})
+          if (GCPtr *OpPtr = GCPtr::get(Op, *this))
+            Uses[OpPtr].push_back(G);
       }
     }
-    return MaxCycNonzero;
-  }
-
-  // Count edges within a cyclic SCC whose offset is non-zero. The -1
-  // escape-all sentinel (an unknown, non-constant offset; see getBaseValue)
-  // is excluded: it stops offset accumulation in spreadMemEscape rather
-  // than making cumulative offset-paths diverge, so it must not count as a
-  // diverging edge.
-  unsigned countNonzeroIntraEdges(SmallVectorImpl<GCPtr *> &Comp,
-                                  DenseMap<GCPtr *, SmallVector<GCPtr *>> &G,
-                                  DenseMap<GCPtr *, SmallVector<int64_t>> &GOff,
-                                  DenseSet<GCPtr *> &In) {
-    unsigned Nz = 0;
-    for (GCPtr *N : Comp) {
-      for (unsigned I = 0; I < G[N].size(); ++I) {
-        int64_t Off = GOff[N][I];
-        if (In.count(G[N][I]) && Off != 0 && Off != -1) {
-          ++Nz;
+    // Forward propagation: when a def's size grows, recompute its users.
+    while (!Worklist.empty()) {
+      GCPtr *G = Worklist.pop_back_val();
+      for (GCPtr *Use : Uses[G]) {
+        unsigned S = deriveObjSize(Use);
+        if (S > Use->ObjSize) {
+          Use->ObjSize = S;
+          Worklist.push_back(Use);
         }
       }
     }
-    return Nz;
+    MaxObjSizeComputed = true;
   }
 
   bool run() {
@@ -3002,17 +3066,12 @@ public:
     for (auto LoadPtr : LoadValues) {
       processLoadNew(LoadPtr);
     }
-    // Bail out when the propagation graph has a cyclic SCC with too many
-    // non-zero-offset edges (the direct topology root cause of
-    // spreadMemEscape blow-up: a cycle carrying non-zero offsets makes
-    // cumulative offset-paths diverge into an unbounded number of distinct
-    // (node, offset) states). This is a deterministic compile-time graph
-    // property, so the bail-out decision is order-independent. Keep every
-    // GCNew on the heap (conservative, correct, no stack promotion).
-    if (computeMaxCycNonzero() > CJPEAMaxCycNonzero) {
-      cleanupAnalysisState();
-      return Changed;
-    }
+    // Compute per-object sizes before propagation so MemPtr offset saturation
+    // uses each object's own bound. MemPtrs created during initialize /
+    // processLoadNew come from direct IR accesses and are intentionally left
+    // as-is; only MemPtrs created during propagation need to obey the
+    // per-object bound to keep translation-derived offsets bounded.
+    computeAllObjSizes();
     for (Function *Func : SCCFunctions) {
       processFunc(Func);
     }
@@ -3074,13 +3133,6 @@ public:
     }
   }
 
-  bool isValueInvalid(Value *V) {
-    if (V->getValueID() == llvm::Value::UndefValueVal) {
-      report_fatal_error("store/gcwrite an undef value!");
-    }
-    return V->getValueID() == llvm::Value::ConstantPointerNullVal;
-  }
-
   void bindInfoEscape(GCPtr *P, GCPtr *V, BasicBlock *BB) {
     assert((P && V) && "CJEscapeAnalysis::bindInfoEscape GCPtr should not be nullptr!");
     P->InfoEscapedVec.insert(V);
@@ -3095,6 +3147,38 @@ public:
     }
   }
 
+  // Shared handling for "write GC reference V into pointer location P": record
+  // the escape relationship (via MemPtr) and the Def entry. Used by both
+  // cj_gcwrite_ref (handleGCWrite) and plain store (visitStoreInst).
+  void handleWrite(Value *P, Value *V, BasicBlock *BB) {
+    if (P->getValueID() == llvm::Value::ConstantPointerNullVal ||
+        V->getValueID() == llvm::Value::ConstantPointerNullVal)
+      return;
+    GCPtr *GP = GCPtr::create(P, *this, LI);
+    GCPtr *GV = GCPtr::create(V, *this, LI);
+    if (!GP || !GV)
+      return;
+    if (isEscapedValue(P) || GP->LoopDepth < GV->LoopDepth) {
+      if (auto VI = dyn_cast<Instruction>(V)) {
+        setEscaped(GV, BB);
+      }
+    }
+    int Offset = 0;
+    Value *BaseP = getBaseValue(P, Offset);
+    MemPtr *MP = MemPtr::create(BaseP, Offset, *this, LI);
+    MP->insertDefine(BB, GV);
+
+    if (isEscapedValue(V)) {
+      setEscaped(MP, BB);
+    }
+
+    StoreRelations[BB][P].insert(V);
+    if (Offset >= 0 && !Def[BB][BaseP][Offset].empty()) {
+      Def[BB][BaseP][Offset].clear();
+    }
+    Def[BB][BaseP][Offset].insert(GV);
+  }
+
   void handleGCWrite(IntrinsicInst *II) {
     Value *V = II->getOperand(0);
     Type *T = V->getType();
@@ -3103,28 +3187,7 @@ public:
       return;
     }
     Value *P = II->getOperand(2);
-    GCPtr *GP = GCPtr::create(P, *this, LI);
-    GCPtr *GV = GCPtr::create(V, *this, LI);
-    assert((GP && GV) && "CJEscapeAnalysis::handleGCWrite GCPtr should not be nullptr!");
-    if (isEscapedValue(P) || GP->LoopDepth < GV->LoopDepth) {
-      if (auto VI = dyn_cast<Instruction>(V)) {
-        EscapeBBInfo[II->getParent()][GV] = Escaped;
-      }
-    }
-    int Offset = 0;
-    Value *BaseP = getBaseValue(P, Offset); // direct get from intrinsic
-    MemPtr *MP = MemPtr::create(BaseP, Offset, *this, LI);
-    MP->insertDefine(II->getParent(), GV);
-
-    if (isEscapedValue(V)) {
-      EscapeBBInfo[II->getParent()][MP] = Escaped;
-    }
-
-    StoreRelations[II->getParent()][P].insert(V);
-    if (Offset >=0 && !Def[II->getParent()][BaseP][Offset].empty()) {
-      Def[II->getParent()][BaseP][Offset].clear();
-    }
-    Def[II->getParent()][BaseP][Offset].insert(GV);
+    handleWrite(P, V, II->getParent());
   }
 
   void handleGCRead(IntrinsicInst *II, bool IsStatic) {
@@ -3139,7 +3202,7 @@ public:
         isValueInvalid(V)) {
       return;
     }
-    EscapeBBInfo[II->getParent()][GCPtr::create(V, *this, LI)] = Escaped;
+    setEscaped(GCPtr::create(V, *this, LI), II->getParent());
     StoreRelations[II->getParent()][II->getOperand(1)].insert(V);
   }
 
@@ -3380,7 +3443,7 @@ public:
     int Offset = 0;
     if (isGCPointerType(I->getType())) {
       GCPtr *PI = GCPtr::create(I, *this, LI);
-      EscapeBBInfo[I->getParent()][PI] = Escaped;
+      setEscaped(PI, I->getParent());
     }
 
     for (unsigned Idx = 0; Idx < I->getNumOperands(); Idx++) {
@@ -3390,7 +3453,7 @@ public:
         continue;
       GCPtr *Base = GCPtr::create(getBaseValue(V, Offset), *this, LI);
       if (Base != nullptr) {
-        EscapeBBInfo[I->getParent()][Base] = Escaped;
+        setEscaped(Base, I->getParent());
       }
     }
   }
@@ -3419,7 +3482,7 @@ public:
     for (unsigned Idx = 0; Idx < PN.getNumIncomingValues(); Idx++) {
       Value *PhiIn = PN.getIncomingValue(Idx);
       if (isEscapedValue(PhiIn)) {
-        EscapeBBInfo[PN.getParent()][P] = Escaped;
+        setEscaped(P, PN.getParent());
       }
       int Offset = 0;
       Value *BasePhiIn = getBaseValue(PhiIn, Offset);
@@ -3474,7 +3537,7 @@ public:
                 (LD < PhiInPtr->LoopDepth ||
                  (LD != 0 && isInSameLoop(P, PhiInPtr)))) {
               assert(P->LoopDepth <= PhiInPtr->LoopDepth);
-              EscapeBBInfo[PN.getParent()][PhiInPtr] = Escaped;
+              setEscaped(PhiInPtr, PN.getParent());
             }
             break;
           }
@@ -3492,7 +3555,7 @@ public:
     GCPtr *P = GCPtr::create(&SI, *this, LI);
     if (isEscapedValue(SI.getTrueValue()) ||
         isEscapedValue(SI.getFalseValue())) {
-      EscapeBBInfo[SI.getParent()][P] = Escaped;
+      setEscaped(P, SI.getParent());
     }
     int Offset = 0;
     Value *BaseTrue = getBaseValue(SI.getTrueValue(), Offset);
@@ -3524,7 +3587,7 @@ public:
     LoadValues.insert(LoadPtr);
     BasicBlock *CurBB = V->getParent();
     if (isEscapedValue(P)) {
-      EscapeBBInfo[CurBB][LoadPtr] = Escaped;
+      setEscaped(LoadPtr, CurBB);
       return;
     }
     int SrcOffset = 0;
@@ -3576,28 +3639,7 @@ public:
     }
 
     Value *P = SI.getPointerOperand();
-    GCPtr *GP = GCPtr::create(P, *this, LI);
-    GCPtr *GV = GCPtr::create(V, *this, LI);
-    assert((GP && GV) && "CJEscapeAnalysis::visitStoreInst GCPtr should not be nullptr!");
-    if (isEscapedValue(P) || GP->LoopDepth < GV->LoopDepth) {
-      if (auto VI = dyn_cast<Instruction>(V)) {
-        EscapeBBInfo[SI.getParent()][GV] = Escaped;
-      }
-    }
-    int Offset = 0;
-    Value *BaseP = getBaseValue(P, Offset);
-    MemPtr *MP = MemPtr::create(BaseP, Offset, *this, LI);
-    MP->insertDefine(SI.getParent(), GV);
-
-    if (isEscapedValue(V)) {
-      EscapeBBInfo[SI.getParent()][MP] = Escaped;
-    }
-
-    StoreRelations[SI.getParent()][P].insert(V);
-    if (Offset >= 0 && !Def[SI.getParent()][BaseP][Offset].empty()) {
-      Def[SI.getParent()][BaseP][Offset].clear();
-    }
-    Def[SI.getParent()][BaseP][Offset].insert(GV);
+    handleWrite(P, V, SI.getParent());
   }
 
   void visitMemCpyOrMove(Instruction &I) {
@@ -3613,13 +3655,13 @@ public:
       return false;
     GlobalVariable *Klass = getNewKlass(CB);
     if (Klass == nullptr) {
-      EscapeBBInfo[CB->getParent()][GCPtr::create(CB, *this, LI)] = Escaped;
+      setEscaped(GCPtr::create(CB, *this, LI), CB->getParent());
       return true;
     }
     if (isCangjieNewFinalizerFunc(Callee)) {
       LoopInfo *CurLI = &LookupLoopInfo(*CB->getParent()->getParent());
       if (!canStackAllocateFinalizer(CB, M, CurLI)) {
-        EscapeBBInfo[CB->getParent()][GCPtr::create(CB, *this, LI)] = Escaped;
+        setEscaped(GCPtr::create(CB, *this, LI), CB->getParent());
         return true;
       }
     }
@@ -3629,9 +3671,10 @@ public:
     Type *AllocaType =
         getAllocaType(Klass, HasRefs, AllocaSize, NonMoveArray, CB);
     if (AllocaType != nullptr || NonMoveArray) {
+      MaxObjSize = std::max(MaxObjSize, AllocaSize);
       insertGCNew(CB);
     } else {
-      EscapeBBInfo[CB->getParent()][GCPtr::create(CB, *this, LI)] = Escaped;
+      setEscaped(GCPtr::create(CB, *this, LI), CB->getParent());
     }
     return true;
   }
@@ -3678,7 +3721,7 @@ public:
     if (containsGCPtrType(Ret->getType())) {
       GCPtr *RetPtr = GCPtr::create(Ret, *this, LI);
       if (RetPtr != nullptr) {
-        EscapeBBInfo[I.getParent()][RetPtr] = Escaped;
+        setEscaped(RetPtr, I.getParent());
       }
     }
   }

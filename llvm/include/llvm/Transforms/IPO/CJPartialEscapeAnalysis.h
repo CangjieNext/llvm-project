@@ -18,6 +18,10 @@
 #ifndef LLVM_TRANSFORMS_IPO_CJPartialEscapeAnalysis_H
 #define LLVM_TRANSFORMS_IPO_CJPartialEscapeAnalysis_H
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/PassManager.h"
@@ -26,7 +30,7 @@ class GCPtr;
 class MemPtr;
 
 namespace llvm {
-enum EscapeState : unsigned { NotEscape, InfoEscaped, TransEscaped, Escaped };
+enum EscapeState : unsigned { NotEscape, InfoEscaped, Escaped };
 struct CJPartialEscapeAnalysisPass
     : public PassInfoMixin<CJPartialEscapeAnalysisPass> {
   PreservedAnalyses run(LazyCallGraph::SCC &C, CGSCCAnalysisManager &AM,
@@ -39,10 +43,39 @@ public:
   void setInfoEscaped(GCPtr *, BasicBlock *);
   bool isEscapedValue(Value *V);
 
+  // Assign a stable unique id to each GCPtr/MemPtr
+  // provides a compact node identity for SpreadVisited dedup keys
+  unsigned getNextId() { return NextId++; }
+
+  // Record that P is fully escaped in BB
+  void setEscaped(GCPtr *P, BasicBlock *BB) {
+    if (!EscapeBBInfo[BB].count(P) || EscapeBBInfo[BB][P] < Escaped) {
+      EscapeBBInfo[BB][P] = Escaped;
+    }
+  }
+
+  // Deduplicate spreadMemEscape work
+  // ensure the same propagation is done at most once
+  void resetSpreadVisited() { SpreadVisited.clear(); }
+  bool tryMarkSpreadVisited(GCPtr *P, unsigned ES, bool Direct,
+                            SmallVectorImpl<int> &Offsets);
+
   Function *ProcessedFunc = nullptr;
+  // Upper bound of object sizes seen among this analysis' GCNews. Offsets
+  // beyond it cannot be legitimate field offsets, so they are collapsed to
+  // the escape-all value by MemPtr::create / tryMarkSpreadVisited
+  unsigned MaxObjSize = 0;
+  // True once computeAllObjSizes() has finished. Before that MaxObjSize is
+  // still being accumulated during initialize and must not be used as an
+  // offset bound.
+  bool MaxObjSizeComputed = false;
   DenseMap<Value *, GCPtr *> AllPtrLocInfo;
   DenseMap<std::pair<Value *, int>, MemPtr *> AllMemLocInfo;
-  DenseMap<BasicBlock *, DenseMap<GCPtr *, unsigned>> EscapeBBInfo;
+  DenseMap<BasicBlock *, MapVector<GCPtr *, unsigned>> EscapeBBInfo;
+
+private:
+  unsigned NextId = 0;
+  DenseSet<uint64_t> SpreadVisited;
 };
 
 Type *getAllocaType(GlobalVariable *Klass, bool &HasRef, uint32_t &AS, bool &,
