@@ -66,6 +66,8 @@ static cl::opt<unsigned> CBZDisplacementBits(
     "aarch64-cbz-offset-bits", cl::Hidden, cl::init(19),
     cl::desc("Restrict range of CB[N]Z instructions (DEBUG)"));
 
+extern cl::opt<bool> EnableCJNewObjFast;
+
 static cl::opt<unsigned>
     BCCDisplacementBits("aarch64-bcc-offset-bits", cl::Hidden, cl::init(19),
                         cl::desc("Restrict range of Bcc instructions (DEBUG)"));
@@ -90,11 +92,35 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
   if (MI.getNumOperands() == 0) {
     return 0;
   }
+  // Under Large+MachO, emitCangjieRuntimeCall emits ADRP+LDR+BLR (12B) instead
+  // of BL (4B) for runtime calls embedded in the inline lowering of cangjie
+  // sentinels (CJStackCheck -> emitStackOverflowCall, NewObject inline bump
+  // fast path slow path / OnFinalizerCreated sub-call, NewArray inline bump
+  // fast path slow path). Add the +8B delta under Large+MachO so
+  // BranchRelaxation and AArch64CompressJumpTables stay conservative:
+  // over-estimate is safe, under-estimate risks picking too-narrow jump-table
+  // entry width or missing out-of-range TBZ/TBNZ.
+  // emitCangjieRuntimeCall only emits GOT-BLR under Large+MachO; on Large+ELF
+  // it falls back to plain BL (4B), so GotExtra is gated on MachO too -- this
+  // keeps the estimate exact instead of over-estimating by 8/16B on ELF.
+  // Computed early (before the STATEPOINT NewArrayFast early-return below) so
+  // every case shares one definition.
+  const TargetMachine &TM = MI.getMF()->getTarget();
+  const unsigned GotExtra =
+      (TM.getCodeModel() == CodeModel::Large &&
+       TM.getTargetTriple().isOSBinFormatMachO())
+          ? 8
+          : 0;
   const MachineOperand *MOSym = nullptr;
   if (isStatepointOpcode(MI.getOpcode())) {
     StatepointOpers SO(&MI);
     if (SO.getID() == Cangjie::CJStatepointID::NewArrayFast) {
-      return 52; // 52: 52 bytes(13 insts) for new array call
+      // emitCJNewArrayFastPath: 12 base insts (48B fast) + 1 BL slow (4B) =
+      // 52B; under Large+MachO the slow path becomes ADRP+LDR+BLR (+8B) ->
+      // 60B. Was flat 52 (under-estimated under Large+MachO, risking
+      // out-of-range TBZ/TBNZ); now matches the emitCangjieRuntimeCall slow
+      // path introduced symmetric to the NewObject fix (issue #173).
+      return 52 + GotExtra;
     }
     MOSym = &(SO.getCallTarget());
   } else {
@@ -107,18 +133,6 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
   if (Callee == nullptr) {
     return 0;
   }
-  // Under Large+MachO, emitCangjieRuntimeCall emits ADRP+LDR+BLR (12B) instead
-  // of BL (4B) for runtime calls embedded in the inline lowering of cangjie
-  // sentinels (CJStackCheck -> emitStackOverflowCall, NewObject inline bump
-  // fast path slow path / OnFinalizerCreated sub-call). Add the +8B delta
-  // under Large+MachO so BranchRelaxation and AArch64CompressJumpTables stay
-  // conservative: over-estimate is safe, under-estimate risks picking too-
-  // narrow jump-table entry width or missing out-of-range TBZ/TBNZ.
-  // Note: emitCangjieRuntimeCall only emits GOT-BLR under Large+MachO, on
-  // Large+ELF it falls back to plain BL (4B), so GotExtra must be gated on
-  // MachO too.
-  const TargetMachine &TM = MI.getMF()->getTarget();
-  const unsigned GotExtra = (TM.getCodeModel() == CodeModel::Large) ? 8 : 0;
   if (Callee->isCangjieSafePoint()) {
     // If Jmp size beyond the 19bit, emitting safepoint on following inst
     // instead of emit it at the end of the function.
@@ -148,11 +162,14 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
   //   slow path becomes ADRP+LDR+BLR = +8B -> 56B.
   // NewFinalizer: 11 base insts + 1 BL OnFinalizerCreated + 1 BL slow = 52B;
   //   under Large+MachO both calls become ADRP+LDR+BLR = +16B -> 68B.
+  // AsmPrinter only intercepts when EnableCJNewObjFast=true (default). When
+  // the flag is off the call is not expanded and emits as a plain 4B BL via
+  // default lowering, so fall back to 4+GotExtra to keep the estimate exact.
   if (Callee->getName() == "CJ_MCC_NewObject") {
-    return 48 + GotExtra; // small=48, Large+MachO=56
+    return EnableCJNewObjFast ? (48 + GotExtra) : (4 + GotExtra);
   }
   if (Callee->getName() == "CJ_MCC_NewFinalizer") {
-    return 52 + GotExtra * 2; // small=52, Large+MachO=68
+    return EnableCJNewObjFast ? (52 + GotExtra * 2) : (4 + GotExtra);
   }
   if (Callee->getName().isGetGCPhase()) {
     return 4; // 4: 4 bytes(1 insts) for GetGCPhase call
