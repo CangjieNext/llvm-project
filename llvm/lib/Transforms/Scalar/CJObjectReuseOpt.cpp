@@ -249,11 +249,15 @@ void CJObjectReuseOpt::collectNoEscapeValue(
         if (ClassInfo->getNumOperands() <= ClassInfoFieldType::CIT_SIZE) {
           continue;
         }
-        uint64_t BitSize = dyn_cast<Constant>(ClassInfo->getOperand(
-                                                  ClassInfoFieldType::CIT_SIZE))
-                               ->getUniqueInteger()
-                               .getZExtValue() *
-                           BYTE_BIT_WIDTH;
+        // The size field of a generic class (e.g. Array<T>) is a
+        // ConstantExpr rather than a ConstantInt, so only accept a plain
+        // integer constant here. getUniqueInteger() would assert otherwise.
+        auto *SizeInt = dyn_cast<ConstantInt>(
+            ClassInfo->getOperand(ClassInfoFieldType::CIT_SIZE));
+        if (!SizeInt) {
+          continue;
+        }
+        uint64_t BitSize = SizeInt->getZExtValue() * BYTE_BIT_WIDTH;
         if (BitSize == 0) {
           continue;
         }
