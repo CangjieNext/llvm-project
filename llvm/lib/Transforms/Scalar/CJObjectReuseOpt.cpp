@@ -208,9 +208,6 @@ static bool isDefChainConsistOfCastOrPHI(Value *V) {
   if (auto *Instr = dyn_cast<Instruction>(V)) {
     // Only process the source is the cj.malloc.object or alloc now
     while (Instr && !(isa<AllocaInst>(Instr) || isCJMallocObj(Instr))) {
-      if (const Argument *Arg = dyn_cast<Argument>(Instr)) {
-        return false;
-      }
       if (isPointerCastFamily(Instr)) {
         Instr = dyn_cast<Instruction>(Instr->getOperand(0));
       } else if (auto *PHI = dyn_cast<PHINode>(Instr);
@@ -220,7 +217,11 @@ static bool isDefChainConsistOfCastOrPHI(Value *V) {
         return false;
       }
     }
-    return (isa<AllocaInst>(Instr) || isCJMallocObj(Instr));
+    // Cast/PHI chain may end at Argument/GlobalVariable; dyn_cast then
+    // yields nullptr. isa<> on null is UB / EXC_BAD_ACCESS (FAR=16).
+    if (!Instr)
+      return false;
+    return isa<AllocaInst>(Instr) || isCJMallocObj(Instr);
   }
   return false;
 }
