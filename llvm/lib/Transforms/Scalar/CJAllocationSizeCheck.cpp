@@ -19,10 +19,12 @@
 //     bits. It would be laid out with a wrong, smaller extent, so reads and
 //     writes through it go out of bounds.
 //
-// Array counts are multiplied recursively in checked arithmetic. Struct
-// types fall back to DataLayout's size for now: recomputing them in checked
-// arithmetic would duplicate DataLayout's StructLayout algorithm, which is
-// left for future work.
+// Array counts are multiplied recursively in checked arithmetic. For struct
+// types, each element is checked recursively (a member can itself be an
+// overflowing array, e.g. a huge VArray member, which DataLayout's struct
+// size would hide by wrapping silently) and the element sizes are summed in
+// checked arithmetic; the struct's own size still comes from DataLayout, so
+// the StructLayout algorithm is not duplicated.
 //
 // The Cangjie 2GB stack frame limit is not re-checked here: allocations
 // whose type size is representable flow downstream, where the X86 and
@@ -42,6 +44,7 @@
 #include "llvm/Transforms/Scalar/CJAllocationSizeCheck.h"
 
 #include "CangjieDemangle.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -60,18 +63,57 @@ namespace {
 /// Unlike DataLayout::getTypeAllocSizeInBits, which wraps silently, array
 /// counts are multiplied recursively in checked arithmetic. Other types use
 /// DataLayout's size.
-static Optional<uint64_t> getAllocSizeInBitsChecked(Type *Ty,
-                                                    const DataLayout &DL) {
+///
+/// Identified struct types form a DAG: the same type can be an element of
+/// many structs, and many allocas share one type, so naive recursion would
+/// revisit shared nodes exponentially often (a doubling chain
+/// %S1={%S0,%S0}, %S2={%S1,%S1}, ... costs 2^depth visits). \p Memo caches
+/// every computed size, including overflow results, keeping the check linear
+/// in the number of distinct types. Recursive types cannot reach the memo
+/// half-populated: a struct can only contain itself through a pointer, which
+/// terminates the recursion.
+static Optional<uint64_t>
+getAllocSizeInBitsChecked(Type *Ty, const DataLayout &DL,
+                          DenseMap<Type *, Optional<uint64_t>> &Memo) {
+  if (auto It = Memo.find(Ty); It != Memo.end())
+    return It->second;
+  Optional<uint64_t> Result;
   if (auto *ATy = dyn_cast<ArrayType>(Ty)) {
-    Optional<uint64_t> ElementSize =
-        getAllocSizeInBitsChecked(ATy->getElementType(), DL);
-    if (!ElementSize)
-      return None;
-    return checkedMulUnsigned(ATy->getNumElements(), *ElementSize);
+    if (Optional<uint64_t> ElementSize =
+            getAllocSizeInBitsChecked(ATy->getElementType(), DL, Memo))
+      Result = checkedMulUnsigned(ATy->getNumElements(), *ElementSize);
+    // else: element overflowed, Result stays None.
+  } else if (auto *STy = dyn_cast<StructType>(Ty)) {
+    // A struct member can itself be an overflowing array (e.g. a huge VArray
+    // member): DataLayout's struct size would wrap silently and hide the
+    // member's overflow. Check every element recursively and sum the element
+    // sizes in checked arithmetic; padding is bounded by alignment and cannot
+    // rescue an overflow. The struct's own size still comes from DataLayout.
+    uint64_t Sum = 0;
+    bool Overflow = false;
+    for (Type *Element : STy->elements()) {
+      Optional<uint64_t> ElementSize =
+          getAllocSizeInBitsChecked(Element, DL, Memo);
+      if (!ElementSize) {
+        Overflow = true;
+        break;
+      }
+      auto NewSum = checkedAddUnsigned(Sum, *ElementSize);
+      if (!NewSum) {
+        Overflow = true;
+        break;
+      }
+      Sum = *NewSum;
+    }
+    if (!Overflow)
+      Result = DL.getTypeAllocSizeInBits(Ty).getKnownMinSize();
+  } else {
+    // getKnownMinSize tolerates scalable types, which cannot overflow: their
+    // extent scales at runtime, so the known minimum stays representable.
+    Result = DL.getTypeAllocSizeInBits(Ty).getKnownMinSize();
   }
-  // getKnownMinSize tolerates scalable types, which cannot overflow: their
-  // extent scales at runtime, so the known minimum stays representable.
-  return DL.getTypeAllocSizeInBits(Ty).getKnownMinSize();
+  Memo[Ty] = Result;
+  return Result;
 }
 
 /// Returns the demangled Cangjie name (e.g. "default::main") of a mangled
@@ -79,9 +121,9 @@ static Optional<uint64_t> getAllocSizeInBitsChecked(Type *Ty,
 /// function and global-variable symbols.
 static std::string getDemangledName(StringRef MangledName) {
   auto D = Cangjie::Demangle(MangledName.str());
-  std::string DemangledName =
-      D.GetPkgName() + std::string(D.GetPkgName().empty() ? "" : "::") +
-      D.GetFullName();
+  std::string DemangledName = D.GetPkgName() +
+                              std::string(D.GetPkgName().empty() ? "" : "::") +
+                              D.GetFullName();
   if (!DemangledName.empty())
     return DemangledName;
   return MangledName.str();
@@ -115,14 +157,15 @@ static std::string getDemangledName(StringRef MangledName) {
 
 /// Checks a single function for oversized stack allocations and aborts on any
 /// overflow in the size computation.
-static void checkAllocationSize(Function &F, const DataLayout &DL) {
+static void checkAllocationSize(Function &F, const DataLayout &DL,
+                                DenseMap<Type *, Optional<uint64_t>> &Memo) {
   for (Instruction &I : instructions(F)) {
     auto *AI = dyn_cast<AllocaInst>(&I);
     if (!AI)
       continue;
     // Reject any alloca whose allocated type is not representable in uint64
     // bits, including dynamic allocas whose runtime count is unknown.
-    if (!getAllocSizeInBitsChecked(AI->getAllocatedType(), DL))
+    if (!getAllocSizeInBitsChecked(AI->getAllocatedType(), DL, Memo))
       reportOversizedInFunction("The allocation type size exceeds the maximum "
                                 "representable size",
                                 F);
@@ -134,8 +177,9 @@ static void checkAllocationSize(Function &F, const DataLayout &DL) {
 /// uint64 bits would be laid out with a wrong, smaller extent (e.g. the
 /// assembler emits only the wrapped byte count), so reads and writes through
 /// it go out of bounds.
-static void checkGlobalVariable(GlobalVariable &GV, const DataLayout &DL) {
-  if (!getAllocSizeInBitsChecked(GV.getValueType(), DL))
+static void checkGlobalVariable(GlobalVariable &GV, const DataLayout &DL,
+                                DenseMap<Type *, Optional<uint64_t>> &Memo) {
+  if (!getAllocSizeInBitsChecked(GV.getValueType(), DL, Memo))
     reportOversizedInGlobal("The value type size exceeds the maximum "
                             "representable size",
                             GV);
@@ -148,15 +192,16 @@ PreservedAnalyses CJAllocationSizeCheck::run(Module &M,
   if (hasRunCangjieOpt(M))
     return PreservedAnalyses::all();
   const DataLayout &DL = M.getDataLayout();
+  DenseMap<Type *, Optional<uint64_t>> Memo;
   for (GlobalVariable &GV : M.globals()) {
     if (!GV.hasInitializer())
       continue;
-    checkGlobalVariable(GV, DL);
+    checkGlobalVariable(GV, DL, Memo);
   }
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
-    checkAllocationSize(F, DL);
+    checkAllocationSize(F, DL, Memo);
   }
   return PreservedAnalyses::all();
 }
