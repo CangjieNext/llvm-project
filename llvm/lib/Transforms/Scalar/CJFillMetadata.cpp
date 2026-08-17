@@ -1626,6 +1626,159 @@ PreservedAnalyses CJFillMetadata::run(Module &M, ModuleAnalysisManager &) const 
 }
 
 namespace {
+
+// Copy the debug fields of a reflect struct into a small .dbg global.
+// Enum reflects keep operands [0..2] (ctorInfo/modifier/ctorCnt), non-enum
+// reflects keep operand [0] only. We only rewrite when that compact form would
+// actually shrink the payload; otherwise the caller keeps the original
+// reflection operand unchanged.
+// IsEnum comes from the owner's type byte, not operand count — enum reflects
+// can grow to 15+ operands, so field count is not a reliable discriminator.
+GlobalVariable *downgradeReflectGlobal(GlobalVariable &ReflectGV, bool IsEnum) {
+  if (!ReflectGV.hasInitializer())
+    return nullptr;
+
+  auto *Init = dyn_cast<ConstantStruct>(ReflectGV.getInitializer());
+  if (!Init)
+    return nullptr;
+
+  unsigned NumOps = Init->getNumOperands();
+  unsigned CopiedOps = IsEnum ? 3 : 1;
+  if (NumOps <= CopiedOps)
+    return nullptr;
+
+  SmallVector<Type *, 4> DebugTypes;
+  SmallVector<Constant *, 4> DebugOps;
+  for (unsigned I = 0; I < CopiedOps; ++I) {
+    DebugTypes.push_back(Init->getOperand(I)->getType());
+    DebugOps.push_back(Init->getOperand(I));
+  }
+
+  auto *DebugST = StructType::get(ReflectGV.getContext(), DebugTypes);
+  auto *DebugGV = new GlobalVariable(
+      *ReflectGV.getParent(), DebugST, false, GlobalValue::InternalLinkage,
+      ConstantStruct::get(DebugST, DebugOps), ReflectGV.getName() + ".dbg");
+  DebugGV->copyAttributesFrom(&ReflectGV);
+  return DebugGV;
+}
+
+bool rewriteReflectionOperand(GlobalVariable &GV, unsigned FlagIdx,
+                              unsigned ReflectionIdx) {
+  if (!GV.hasInitializer())
+    return false;
+
+  auto *Init = dyn_cast<ConstantStruct>(GV.getInitializer());
+  if (Init == nullptr || Init->getNumOperands() <= ReflectionIdx)
+    return false;
+
+  auto *Flag = cast<ConstantInt>(Init->getOperand(FlagIdx));
+  uint64_t NewFlag = Flag->getZExtValue() & ~TF_REFLECTION;
+
+  if (NewFlag == Flag->getZExtValue())
+    return false;
+
+  SmallVector<Constant *, 0> Ops;
+  Ops.reserve(Init->getNumOperands());
+  for (unsigned I = 0; I < Init->getNumOperands(); ++I)
+    Ops.push_back(cast<Constant>(Init->getOperand(I)));
+
+  Ops[FlagIdx] = ConstantInt::get(Flag->getType(), NewFlag);
+
+  auto *ReflectOp = Init->getOperand(ReflectionIdx);
+  auto *CE = dyn_cast<ConstantExpr>(ReflectOp);
+  if (CE && CE->getOpcode() == Instruction::BitCast) {
+    bool IsEnum = false;
+    unsigned TypeIdx = FlagIdx == CIT_FLAG ? CIT_TYPE : TT_TYPE;
+    if (auto *TypeCI = dyn_cast<ConstantInt>(Init->getOperand(TypeIdx))) {
+      int64_t Kind = TypeCI->getSExtValue();
+      IsEnum = (Kind == TK_ENUM || Kind == TK_TEMP_ENUM);
+    }
+
+    if (auto *ReflectGV = dyn_cast<GlobalVariable>(CE->getOperand(0))) {
+      if (auto *DebugGV = downgradeReflectGlobal(*ReflectGV, IsEnum)) {
+        Ops[ReflectionIdx] = ConstantExpr::getBitCast(DebugGV, CE->getType());
+      }
+    }
+  }
+
+  GV.setInitializer(ConstantStruct::get(Init->getType(), Ops));
+  return true;
+}
+
+bool rewritePackageInfoPayload(GlobalVariable &GV) {
+  if (!GV.hasInitializer())
+    return false;
+
+  auto *Init = dyn_cast<ConstantStruct>(GV.getInitializer());
+  if (Init == nullptr || Init->getNumOperands() < FPT_PTRS)
+    return false;
+
+  // Clear only FPT_FLAG (PackageInfo::isVaild) to make package lookup fail; zeroing the counts
+  // would misalign the runtime's GetPackageSize() stride walk over the packageInfos.
+  auto *Flag = dyn_cast<ConstantInt>(Init->getOperand(FPT_FLAG));
+  if (Flag == nullptr || Flag->isZero())
+    return false;
+
+  SmallVector<Constant *, 0> Ops;
+  Ops.reserve(Init->getNumOperands());
+  for (unsigned I = 0; I < Init->getNumOperands(); ++I)
+    Ops.push_back(cast<Constant>(Init->getOperand(I)));
+
+  Ops[FPT_FLAG] = ConstantInt::get(Flag->getType(), 0);
+  GV.setInitializer(ConstantStruct::get(Init->getType(), Ops));
+  return true;
+}
+
+// Erase reflect globals left unreferenced by the rewrite (needed at FullLTO
+// -O0, where no GlobalDCE follows). Scope: internal + isCJReflectGV() + no
+// uses; fixpoint collects chains. .dbg/fieldNames stay referenced and never
+// touched.
+void eraseReflectGlobals(Module &M) {
+  bool RoundChanged = true;
+  while (RoundChanged) {
+    RoundChanged = false;
+    SmallVector<GlobalVariable *, 16> ToErase;
+    for (auto &GV : M.globals()) {
+      if (GV.isDeclaration() || !GV.isCJReflectGV() ||
+          !GlobalValue::isInternalLinkage(GV.getLinkage()))
+        continue;
+      // The rewrite detaches the old TI/TT initializer constant, whose nested
+      // constant exprs still count as uses; drop them so use_empty() is accurate.
+      GV.removeDeadConstantUsers();
+      if (!GV.use_empty())
+        continue;
+      ToErase.push_back(&GV);
+    }
+    for (auto *GV : ToErase) {
+      GV->eraseFromParent();
+      RoundChanged = true;
+    }
+  }
+}
+} // namespace
+
+PreservedAnalyses
+CJDisableImportLibReflection::run(Module &M, ModuleAnalysisManager &) const {
+  bool Changed = false;
+  for (auto &GV : M.globals()) {
+    if (GV.isCJTypeInfo()) {
+      Changed |= rewriteReflectionOperand(GV, CIT_FLAG, CIT_REFLECTION);
+    } else if (GV.isCJTypeTemplate()) {
+      Changed |= rewriteReflectionOperand(GV, TT_FLAG, TT_REFLECTION);
+    } else if (GV.isCJReflectPkgInfo()) {
+      Changed |= rewritePackageInfoPayload(GV);
+    }
+  }
+  // Self-erase dead reflection globals; harmless where GlobalDCE follows.
+  // Nothing becomes dead unless a rewrite happened, so skip the scan otherwise.
+  if (Changed) {
+    eraseReflectGlobals(M);
+    return PreservedAnalyses::none();
+  }
+  return PreservedAnalyses::all();
+}
+
+namespace {
 class CJFillMetadataLegacyPass : public ModulePass {
 public:
   static char ID;
