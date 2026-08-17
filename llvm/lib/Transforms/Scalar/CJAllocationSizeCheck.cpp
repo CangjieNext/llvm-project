@@ -19,10 +19,12 @@
 //     bits. It would be laid out with a wrong, smaller extent, so reads and
 //     writes through it go out of bounds.
 //
-// Array counts are multiplied recursively in checked arithmetic. Struct
-// types fall back to DataLayout's size for now: recomputing them in checked
-// arithmetic would duplicate DataLayout's StructLayout algorithm, which is
-// left for future work.
+// Array counts are multiplied recursively in checked arithmetic. For struct
+// types, each element is checked recursively (a member can itself be an
+// overflowing array, e.g. a huge VArray member, which DataLayout's struct
+// size would hide by wrapping silently) and the element sizes are summed in
+// checked arithmetic; the struct's own size still comes from DataLayout, so
+// the StructLayout algorithm is not duplicated.
 //
 // The Cangjie 2GB stack frame limit is not re-checked here: allocations
 // whose type size is representable flow downstream, where the X86 and
@@ -68,6 +70,23 @@ static Optional<uint64_t> getAllocSizeInBitsChecked(Type *Ty,
     if (!ElementSize)
       return None;
     return checkedMulUnsigned(ATy->getNumElements(), *ElementSize);
+  }
+  if (auto *STy = dyn_cast<StructType>(Ty)) {
+    // A struct member can itself be an overflowing array (e.g. a huge VArray
+    // member): DataLayout's struct size would wrap silently and hide the
+    // member's overflow. Check every element recursively and sum the element
+    // sizes in checked arithmetic; padding is bounded by alignment and cannot
+    // rescue an overflow. The struct's own size still comes from DataLayout.
+    uint64_t Sum = 0;
+    for (Type *Element : STy->elements()) {
+      Optional<uint64_t> ElementSize = getAllocSizeInBitsChecked(Element, DL);
+      if (!ElementSize)
+        return None;
+      auto NewSum = checkedAddUnsigned(Sum, *ElementSize);
+      if (!NewSum)
+        return None;
+      Sum = *NewSum;
+    }
   }
   // getKnownMinSize tolerates scalable types, which cannot overflow: their
   // extent scales at runtime, so the known minimum stays representable.
