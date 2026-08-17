@@ -26,13 +26,17 @@
 # RUN: llvm-objdump --macho --all-headers %t.ios_12_0 | FileCheck %s --check-prefix=IOS_12_0
 # RUN: %no-arg-lld -arch x86_64 -platform_version ios-simulator 13.0 10.15 -o %t.ios_sim_13_0 %t.o
 # RUN: llvm-objdump --macho --all-headers %t.ios_sim_13_0 | FileCheck %s --check-prefix=IOS_12_0
+# RUN: %no-arg-lld -arch x86_64 -platform_version ios-simulator 12.0 10.15 -o %t.ios_sim_12_0 %t.o
+# RUN: llvm-objdump --macho --all-headers %t.ios_sim_12_0 | FileCheck %s --check-prefix=IOS_12_0
+# RUN: %no-arg-lld -arch x86_64 -platform_version ios-simulator 11.0 10.15 -o %t.ios_sim_11_0 %t.o
+# RUN: llvm-objdump --macho --all-headers %t.ios_sim_11_0 | FileCheck %s --check-prefix=IOS_12_0
 
 # IOS_12_0: cmd LC_BUILD_VERSION
 
 # RUN: %no-arg-lld -arch x86_64 -platform_version ios 11.0 10.15 -o %t.ios_11_0 %t.o
 # RUN: llvm-objdump --macho --all-headers %t.ios_11_0 | FileCheck %s --check-prefix=IOS_11_0
-# RUN: %no-arg-lld -arch x86_64 -platform_version ios-simulator 12.0 10.15 -o %t.ios_sim_12_0 %t.o
-# RUN: llvm-objdump --macho --all-headers %t.ios_sim_12_0 | FileCheck %s --check-prefix=IOS_11_0
+# RUN: %no-arg-lld -arch x86_64 -platform_version ios-simulator 10.0 10.15 -o %t.ios_sim_10_0 %t.o
+# RUN: llvm-objdump --macho --all-headers %t.ios_sim_10_0 | FileCheck %s --check-prefix=IOS_11_0
 
 # IOS_11_0: cmd LC_VERSION_MIN_IPHONEOS
 
