@@ -327,6 +327,10 @@ cl::opt<bool>
     EnableCJPtrAuthBackwardCFI("cj-ptrauth-backward-cfi",
                                cl::desc("Cangjie PtrAuth-based backward CFI"),
                                cl::NotHidden, cl::init(false));
+cl::opt<bool> DisableCJLTOReflection("cj-disable-lto-reflection", cl::Hidden,
+                                     cl::init(false),
+                                     cl::desc("Disable reflection metadata in"
+                                              " cangjie LTO pipelines"));
 
 namespace llvm {
 cl::opt<bool> PrintPipelinePasses(
