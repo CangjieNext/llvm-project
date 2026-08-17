@@ -203,6 +203,7 @@ extern cl::opt<int> MaxRecursionInl;
 extern cl::opt<int> CountedLoopTripWidth;
 extern cl::opt<bool> CangjieLTOPreOpt;
 extern cl::opt<bool> EnableCJPtrAuthBackwardCFI;
+extern cl::opt<bool> DisableCJLTOReflection;
 
 PipelineTuningOptions::PipelineTuningOptions() {
   LoopInterleaving = true;
@@ -1498,6 +1499,8 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
   else if (LTOPreLink)
     LTOPhase = ThinOrFullLTOPhase::FullLTOPreLink;
 
+  // Import-lib reflection is trimmed at post-link by CJDisableImportLibReflection;
+  // the main package already has TF_REFLECTION=0 under --disable-reflection.
   // Add the core simplification pipeline.
   MPM.addPass(buildModuleSimplificationPipeline(Level, LTOPhase));
 
@@ -1613,12 +1616,18 @@ ModulePassManager PassBuilder::buildThinLTODefaultPipeline(
     // with ThinLTO in order to avoid leaving undefined references to dead
     // globals in the object file.
     MPM.addPass(EliminateAvailableExternallyPass());
+    if (CJPipeline && DisableCJLTOReflection)
+      MPM.addPass(CJDisableImportLibReflection());
     MPM.addPass(GlobalDCEPass());
     return MPM;
   }
 
   // Force any function attributes we want the rest of the pipeline to observe.
   MPM.addPass(ForceFunctionAttrsPass());
+
+  if (CJPipeline && DisableCJLTOReflection) {
+    MPM.addPass(CJDisableImportLibReflection());
+  }
 
   // Add the core simplification pipeline.
   MPM.addPass(buildModuleSimplificationPipeline(
@@ -1687,6 +1696,11 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
     // Emit annotation remarks.
     addAnnotationRemarksPass(MPM);
 
+    if (CJPipeline && DisableCJLTOReflection) {
+      MPM.addPass(CJDisableImportLibReflection());
+      // No GlobalDCE at -O0; the pass self-erases dead reflection globals.
+    }
+
     return MPM;
   }
 
@@ -1699,6 +1713,10 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
                       /* IsCS */ false, PGOOpt->ProfileFile,
                       PGOOpt->ProfileRemappingFile,
                       ThinOrFullLTOPhase::FullLTOPostLink);
+  }
+
+  if (CJPipeline && DisableCJLTOReflection) {
+    MPM.addPass(CJDisableImportLibReflection());
   }
 
   if (PGOOpt && PGOOpt->Action == PGOOptions::SampleUse) {

@@ -261,6 +261,17 @@ struct CJFillMetadata : public PassInfoMixin<CJFillMetadata> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &) const;
 };
 
+// CJDisableImportLibReflection strips import-lib reflection at LTO post-link
+// under --disable-reflection: clears the TF_REFLECTION flag on each
+// TypeInfo/TypeTemplate, rewrites oversized reflect structs to a small .dbg
+// global (enum keeps ctorInfo/modifier/ctorCnt, class keeps fieldNames), keeps
+// already-minimal/unsupported reflect operands unchanged, and erases the
+// now-unreferenced reflect globals.
+struct CJDisableImportLibReflection
+    : public PassInfoMixin<CJDisableImportLibReflection> {
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &) const;
+};
+
 constexpr uint32_t ArrayHeadSize = 16;
 constexpr uint32_t ObjectHeadSize = 8;
 constexpr uint32_t SyncSize = 168;
