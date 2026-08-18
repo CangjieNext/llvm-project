@@ -149,6 +149,18 @@ void llvm::computeLTOCacheKey(
   AddString(Conf.DefaultTriple);
   AddString(Conf.DwoDir);
 
+  // Cangjie: hash the hidden-symbol set so cached objects with different
+  // package-visibility configurations are not mixed.
+  {
+    std::vector<uint64_t> SortedHiddenGUIDs;
+    SortedHiddenGUIDs.reserve(Conf.HiddenGUIDs.size());
+    for (uint64_t GUID : Conf.HiddenGUIDs)
+      SortedHiddenGUIDs.push_back(GUID);
+    llvm::sort(SortedHiddenGUIDs);
+    for (uint64_t GUID : SortedHiddenGUIDs)
+      AddUint64(GUID);
+  }
+
   // Include the hash for the current module
   auto ModHash = Index.getModuleHash(ModuleID);
   Hasher.update(ArrayRef<uint8_t>((uint8_t *)&ModHash[0], sizeof(ModHash)));
@@ -1066,6 +1078,10 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
     if (Res.second.ExportDynamic)
       DynamicExportSymbols.insert(GUID);
 
+    // Cangjie: prevailing symbols not marked ExportDynamic are from
+    // non-visible packages and are hidden in the thin backend output (see
+    // runThinLTO for the HiddenGUIDs population).
+
     GUIDPrevailingResolutions[GUID] =
         Res.second.Prevailing ? PrevailingType::Yes : PrevailingType::No;
   }
@@ -1497,6 +1513,24 @@ Error LTO::runThinLTO(AddStreamFn AddStream, FileCache Cache,
   });
   if (ThinLTO.ModuleMap.empty())
     return Error::success();
+
+  // Cangjie: on the ThinLTO path, populate HiddenGUIDs with the prevailing
+  // symbols that are not marked ExportDynamic (non-visible packages). Visible
+  // packages are excluded because BitcodeCompiler::add sets ExportDynamic=true
+  // for them, so they stay external. Gated on EnablePackageVisibility, which
+  // lld sets only when --visible-pkgs / --hide-all-visible-pkgs actually
+  // matched a bitcode module; ordinary LTO links keep it false.
+  if (Conf.EnablePackageVisibility) {
+    for (auto &Res : GlobalResolutions) {
+      if (Res.second.IRName.empty())
+        continue;
+      if (Res.second.Prevailing && !Res.second.ExportDynamic) {
+        GlobalValue::GUID GUID = GlobalValue::getGUID(
+            GlobalValue::dropLLVMManglingEscape(Res.second.IRName));
+        Conf.HiddenGUIDs.insert(GUID);
+      }
+    }
+  }
 
   if (ThinLTO.ModulesToCompile && ThinLTO.ModulesToCompile->empty()) {
     llvm::errs() << "warning: [ThinLTO] No module compiled\n";
