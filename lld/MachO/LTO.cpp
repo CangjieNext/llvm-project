@@ -91,7 +91,7 @@ void BitcodeCompiler::add(BitcodeFile &f) {
 
   // Provide a resolution to the LTO API for each symbol.
   bool defaultExportDynamic =
-      config->outputType != MH_EXECUTE || config->exportDynamic;
+      config->outputType != MH_EXECUTE || config->exportDynamic || config->staticlib;
   bool exportDynamic = defaultExportDynamic && exportForPkg;
   auto symIt = f.symbols.begin();
   for (const lto::InputFile::Symbol &objSym : objSyms) {
@@ -107,8 +107,14 @@ void BitcodeCompiler::add(BitcodeFile &f) {
     r.Prevailing = !objSym.isUndefined() && sym->getFile() == &f;
 
     if (const auto *defined = dyn_cast<Defined>(sym)) {
-      r.ExportDynamic =
-          defined->isExternal() && !defined->privateExtern && exportDynamic;
+      // Only a file that actually defines this IR symbol may mark it export
+      // dynamic. The merged lld Symbol below can be a Defined provided by a
+      // different input file (e.g. lib1 referencing lib2's function); applying
+      // this file's export policy to such a reference would poison the merged
+      // GlobalResolution.ExportDynamic and un-hide a symbol whose defining
+      // package is not visible (--visible-pkgs).
+      r.ExportDynamic = !objSym.isUndefined() && defined->isExternal() &&
+                        !defined->privateExtern && exportDynamic;
       r.FinalDefinitionInLinkageUnit =
           !defined->isExternalWeakDef() && !defined->interposable;
     } else if (const auto *common = dyn_cast<CommonSymbol>(sym)) {
