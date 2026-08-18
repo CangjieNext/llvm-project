@@ -252,6 +252,11 @@ struct Config {
       const DenseSet<GlobalValue::GUID> &GUIDPreservedSymbols)>;
   CombinedIndexHookFn CombinedIndexHook;
 
+  /// Cangjie: symbols (by GUID) that should be hidden in the thin backend
+  /// output, mapped to N_PEXT (private extern) on Mach-O. Used to implement
+  /// package-level symbol visibility. Only consulted by the thin backend.
+  DenseSet<GlobalValue::GUID> HiddenGUIDs;
+
   /// This is a convenience function that configures this Config object to write
   /// temporary files named after the given OutputFileName for each of the LTO
   /// phases to disk. A client can use this function to implement -save-temps.

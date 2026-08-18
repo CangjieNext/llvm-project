@@ -149,6 +149,18 @@ void llvm::computeLTOCacheKey(
   AddString(Conf.DefaultTriple);
   AddString(Conf.DwoDir);
 
+  // Cangjie: hash the hidden-symbol set so cached objects with different
+  // package-visibility configurations are not mixed.
+  {
+    std::vector<uint64_t> SortedHiddenGUIDs;
+    SortedHiddenGUIDs.reserve(Conf.HiddenGUIDs.size());
+    for (uint64_t GUID : Conf.HiddenGUIDs)
+      SortedHiddenGUIDs.push_back(GUID);
+    llvm::sort(SortedHiddenGUIDs);
+    for (uint64_t GUID : SortedHiddenGUIDs)
+      AddUint64(GUID);
+  }
+
   // Include the hash for the current module
   auto ModHash = Index.getModuleHash(ModuleID);
   Hasher.update(ArrayRef<uint8_t>((uint8_t *)&ModHash[0], sizeof(ModHash)));
@@ -1065,6 +1077,11 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
 
     if (Res.second.ExportDynamic)
       DynamicExportSymbols.insert(GUID);
+
+    // Cangjie: prevailing symbols not marked ExportDynamic are from non-visible
+    // packages and should be hidden in the thin backend output.
+    if (Res.second.Prevailing && !Res.second.ExportDynamic)
+      Conf.HiddenGUIDs.insert(GUID);
 
     GUIDPrevailingResolutions[GUID] =
         Res.second.Prevailing ? PrevailingType::Yes : PrevailingType::No;
