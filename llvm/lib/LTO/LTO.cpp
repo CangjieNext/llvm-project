@@ -149,6 +149,18 @@ void llvm::computeLTOCacheKey(
   AddString(Conf.DefaultTriple);
   AddString(Conf.DwoDir);
 
+  // Cangjie: hash the hidden-symbol set so cached objects with different
+  // package-visibility configurations are not mixed.
+  {
+    std::vector<uint64_t> SortedHiddenGUIDs;
+    SortedHiddenGUIDs.reserve(Conf.HiddenGUIDs.size());
+    for (uint64_t GUID : Conf.HiddenGUIDs)
+      SortedHiddenGUIDs.push_back(GUID);
+    llvm::sort(SortedHiddenGUIDs);
+    for (uint64_t GUID : SortedHiddenGUIDs)
+      AddUint64(GUID);
+  }
+
   // Include the hash for the current module
   auto ModHash = Index.getModuleHash(ModuleID);
   Hasher.update(ArrayRef<uint8_t>((uint8_t *)&ModHash[0], sizeof(ModHash)));
@@ -1066,6 +1078,13 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
     if (Res.second.ExportDynamic)
       DynamicExportSymbols.insert(GUID);
 
+    // Cangjie: prevailing symbols not marked ExportDynamic are from non-visible
+    // packages and should be hidden in the thin backend output. The actual
+    // HiddenGUIDs population is deferred to runThinLTO() so that it only happens
+    // on the ThinLTO path (see runThinLTO); fullLTO never reads HiddenGUIDs --
+    // it reaches package visibility via the upstream Partition/ExportList
+    // internalize mechanism.
+
     GUIDPrevailingResolutions[GUID] =
         Res.second.Prevailing ? PrevailingType::Yes : PrevailingType::No;
   }
@@ -1497,6 +1516,30 @@ Error LTO::runThinLTO(AddStreamFn AddStream, FileCache Cache,
   });
   if (ThinLTO.ModuleMap.empty())
     return Error::success();
+
+  // Cangjie: populate HiddenGUIDs here -- only on the ThinLTO path, after the
+  // early-return above, so that fullLTO never populates (and never reads)
+  // HiddenGUIDs (it reaches package visibility via the upstream
+  // Partition/ExportList internalize mechanism instead). Gated on
+  // EnablePackageVisibility, set by lld only when --visible-pkgs /
+  // --hide-all-visible-pkgs actually matched at least one bitcode module.
+  // Which symbols enter HiddenGUIDs (and thus get lowered to N_PEXT by the
+  // thin-backend hide-loop) is decided by ExportDynamic: visible-package
+  // symbols get ExportDynamic=true in BitcodeCompiler::add, so the
+  // !ExportDynamic test here excludes them -> they stay external. Ordinary LTO
+  // links without --visible-pkgs leave EnablePackageVisibility=false, so main /
+  // cross-package symbols are never lowered.
+  if (Conf.EnablePackageVisibility) {
+    for (auto &Res : GlobalResolutions) {
+      if (Res.second.IRName.empty())
+        continue;
+      if (Res.second.Prevailing && !Res.second.ExportDynamic) {
+        GlobalValue::GUID GUID = GlobalValue::getGUID(
+            GlobalValue::dropLLVMManglingEscape(Res.second.IRName));
+        Conf.HiddenGUIDs.insert(GUID);
+      }
+    }
+  }
 
   if (ThinLTO.ModulesToCompile && ThinLTO.ModulesToCompile->empty()) {
     llvm::errs() << "warning: [ThinLTO] No module compiled\n";
