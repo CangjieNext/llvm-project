@@ -122,6 +122,9 @@ def r : Flag<["-"], "r">,
     HelpText<"Merge multiple object files into one, retaining relocations">,
     Flags<[HelpHidden]>,
     Group<grp_kind>;
+def staticlib : Flag<["-"], "staticlib">,
+    HelpText<"Produce a static library">,
+    Group<grp_kind>;
 def dylinker : Flag<["-"], "dylinker">,
     HelpText<"Produce a dylinker only used when building dyld">,
     Flags<[HelpHidden]>,
@@ -948,9 +951,6 @@ def no_objc_category_merging : Flag<["-"], "no_objc_category_merging">,
 def object_path_lto : Separate<["-"], "object_path_lto">,
     MetaVarName<"<path>">,
     HelpText<"Retain any temporary mach-o file in <path> that would otherwise be deleted during LTO">,
-    Group<grp_rare>;
-def lto_emit_obj_only : Flag<["-"], "lto-emit-obj-only">,
-    HelpText<"Stop after emitting LTO native object files">,
     Group<grp_rare>;
 def cache_path_lto : Separate<["-"], "cache_path_lto">,
     MetaVarName<"<path>">,
