@@ -191,7 +191,7 @@
 #include "AArch64RegisterInfo.h"
 #include "AArch64Subtarget.h"
 #include "AArch64TargetMachine.h"
-#include "CangjieDemangle.h"
+#include "llvm/CodeGen/CangjieStackSizeCheck.h"
 #include "MCTargetDesc/AArch64AddressingModes.h"
 #include "MCTargetDesc/AArch64MCTargetDesc.h"
 #include "llvm/ADT/ScopeExit.h"
@@ -1551,17 +1551,10 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
                                : MFI.getStackSize();
 
   assert(NumBytes >= 0 && "NumBytes less than 0 in aarch64!");
-  // 2147483648: 2*1024*1024*1024, 2GB
-  if (CJPipeline && (uint64_t)NumBytes >= 2147483648) {
-    auto D = Cangjie::Demangle(MF.getName().str());
-    std::string DemangledName = D.GetPkgName() +
-                                std::string(D.GetPkgName().empty() ? "" : "::") +
-                                D.GetFullName();
-    report_fatal_error("The stacksize of " + Twine(DemangledName) +
-                       " exceeds cangjie max stacksize(2GB).\nCompilation "
-                       "stopped! Please check the implementation of " +
-                       Twine(DemangledName) + "!", false);
-  }
+  // The frame size accumulation may wrap when several huge objects share one
+  // frame; the shared check cross-validates with a checked object-size sum.
+  if (CJPipeline)
+    checkCangjieStackSize(MF, (uint64_t)NumBytes);
 
   if (!AFI->hasStackFrame() && !windowsRequiresStackProbe(MF, NumBytes)) {
     assert(!HasFP && "unexpected function without stack frame but with FP");

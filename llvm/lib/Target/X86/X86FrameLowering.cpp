@@ -11,7 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "X86FrameLowering.h"
-#include "CangjieDemangle.h"
+#include "llvm/CodeGen/CangjieStackSizeCheck.h"
 #include "MCTargetDesc/X86MCTargetDesc.h"
 #include "X86InstrBuilder.h"
 #include "X86InstrInfo.h"
@@ -1614,18 +1614,10 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
     MFI.setStackSize(StackSize);
   }
 
-  // 2147483648: 2*1024*1024*1024, 2GB
-  if (CJPipeline && StackSize >= 2147483648) {
-    auto D = Cangjie::Demangle(MF.getName().str());
-    std::string DemangledName =
-        D.GetPkgName() + std::string(D.GetPkgName().empty() ? "" : "::") +
-        D.GetFullName();
-    report_fatal_error("The stacksize of " + Twine(DemangledName) +
-                           " exceeds cangjie max stacksize(2GB).\nCompilation "
-                           "stopped! Please check the implementation of " +
-                           Twine(DemangledName) + "!",
-                       false);
-  }
+  // The frame size accumulation may wrap when several huge objects share one
+  // frame; the shared check cross-validates with a checked object-size sum.
+  if (CJPipeline)
+    checkCangjieStackSize(MF, StackSize);
 
   // Insert stack pointer adjustment for later moving of return addr.  Only
   // applies to tail call optimized functions where the callee argument stack
