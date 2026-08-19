@@ -107,6 +107,21 @@ constexpr CJThreadLayoutOffsets offsets_aarch64_linux_ohos = {
     .offset_of_boundCJThread = 320
 };
 
+constexpr CJThreadLayoutOffsets offsets_aarch64_android = {
+    .offset_of_ScheduleManager_dot_allCJThreadList = 128,
+    .offset_of_CJThread_dot_allCJThreadDulink = 240,
+    .offset_of_CJThread_dot_context = 24,
+    .offset_of_CJThread_dot_thread = 16,
+    .offset_of_CJThread_dot_state = 216,
+    .offset_of_CJThread_dot_id = 456,
+    .offset_of_CJThread_dot_name = 464,
+    // Android Bionic sem_t is 4 bytes on AArch64 (glibc Linux uses 32),
+    // so Thread::tid and fields after the semaphore have a different layout.
+    .offset_of_Thread_dot_tid = 76,
+    .offset_of_boundThread = 432,
+    .offset_of_boundCJThread = 288
+};
+
 constexpr CJThreadLayoutOffsets offsets_aarch64_darwin = {
     .offset_of_ScheduleManager_dot_allCJThreadList = 176,
     .offset_of_CJThread_dot_allCJThreadDulink = 240,
@@ -136,8 +151,9 @@ static bool GetCJThreadLayoutOffsets(Process &process, CJThreadLayoutOffsets &of
       offsets = offsets_aarch64_darwin;
       return true;
     } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
-      auto env = triple.getEnvironmentName();
-      if (env.equals("ohos")) {
+      if (triple.isAndroid()) {
+        offsets = offsets_aarch64_android;
+      } else if (triple.getEnvironmentName().equals("ohos")) {
         offsets = offsets_aarch64_linux_ohos;
       } else {
         offsets = offsets_aarch64_linux;
@@ -295,9 +311,13 @@ std::vector<CJThreadInfoOverview> CollectAllCJThreads(Process &process,
     overview.tid = 0;
     if (overview.thread_ptr != 0) {
       uint64_t tid_val = 0;
+      const size_t tid_size =
+          process.GetSystemArchitecture().GetTriple().isOSDarwin()
+              ? sizeof(uint64_t)
+              : sizeof(uint32_t);
       if (!ReadMemoryChecked(process,
                              overview.thread_ptr + offsets.offset_of_Thread_dot_tid,
-                             &tid_val, sizeof(tid_val), status))
+                             &tid_val, tid_size, status))
         break;
       overview.tid = tid_val;
     }
