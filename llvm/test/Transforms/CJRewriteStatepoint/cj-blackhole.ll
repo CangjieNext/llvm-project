@@ -71,3 +71,22 @@ allocas:
   %14 = addrspacecast i8* %13 to i8 addrspace(1)*
   ret i8 addrspace(1)* %14
 }
+
+declare i8* @llvm.cj.blackhole(i8*)
+
+; The intrinsic form must be eliminated as well: used results are replaced
+; with the argument, unused calls are erased.
+; CHECK-LABEL: _CN7default4foo3Hv(
+define i64 @_CN7default4foo3Hv() {
+allocas:
+  %b = alloca i64, align 8
+  store i64 5, i64* %b, align 8
+  %0 = bitcast i64* %b to i8*
+; CHECK-NOT: call i8* @llvm.cj.blackhole
+  %1 = call i8* @llvm.cj.blackhole(i8* nonnull %0)
+  %2 = bitcast i8* %1 to i64*
+  %3 = load i64, i64* %2, align 8
+; CHECK-NOT: call i8* @llvm.cj.blackhole
+  call i8* @llvm.cj.blackhole(i8* nonnull %0)
+  ret i64 %3
+}

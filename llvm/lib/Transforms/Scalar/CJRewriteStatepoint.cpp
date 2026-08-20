@@ -216,6 +216,8 @@ public:
 
     M.addModuleFlag(Module::Warning, "HasRewrittenStatepoint", true);
 
+    Changed |= deleteUnusedBlackHole(M);
+
     if (!Changed)
       return false;
 
@@ -2889,10 +2891,35 @@ void prepareBlackHoleBody(Function *F) {
   ReturnInst::Create(F->getContext(), F->getArg(0), BB);
 }
 
+// Eliminate the intrinsic form of blackhole. llvm.cj.blackhole is kept
+// unlowered through the whole optimization pipeline (its default memory
+// effects block LICM from hoisting loads across it) and is removed here,
+// after the last optimization pass, at zero runtime cost.
+static bool deleteBlackHoleIntrinsic(Module &M) {
+  Function *Intr = M.getFunction(Intrinsic::getName(Intrinsic::cj_blackhole));
+  if (!Intr)
+    return false;
+  SmallVector<CallBase *, 32> Users;
+  for (auto *U : Intr->users()) {
+    auto *CB = dyn_cast<CallBase>(U);
+    assert(CB != nullptr && "User of llvm.cj.blackhole must be call instruction");
+    Users.push_back(CB);
+  }
+  for (auto *CB : Users) {
+    if (!CB->use_empty())
+      CB->replaceAllUsesWith(CB->getArgOperand(0));
+    CB->eraseFromParent();
+  }
+  if (Intr->use_empty())
+    Intr->eraseFromParent();
+  return !Users.empty();
+}
+
 static bool deleteUnusedBlackHole(Module &M) {
+  bool Changed = deleteBlackHoleIntrinsic(M);
   Function *F = M.getFunction("CJ_LLVM_BlackHole");
   if (!F || F->use_empty())
-    return false;
+    return Changed;
   prepareBlackHoleBody(F);
   SmallVector<CallBase *, 32> Users;
   for (auto *U : F->users()) {
