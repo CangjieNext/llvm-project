@@ -1213,6 +1213,13 @@ bool llvm::canSinkOrHoistInst(Instruction &I, AAResults *AA, DominatorTree *DT,
   MemorySSA *MSSA = MSSAU.getMemorySSA();
   // Loads have extra constraints we have to verify before we can hoist them.
   if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
+    // Avoid moving a read of a finalizer object's field out of the loop.
+    // Hoisting/sinking that read removes the only remaining SSA use of the
+    // finalizer object inside the loop, so GC liveness reports it dead and
+    // the GC collects it while the source program still references it, running
+    // its ~init() (finalizer) prematurely.
+    if (CJPipeline && maybeCJFinalizerObj(LI->getPointerOperand()))
+      return false;
     if (!LI->isUnordered())
       return false; // Don't sink/hoist volatile or ordered atomic loads!
 
