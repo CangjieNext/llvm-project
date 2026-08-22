@@ -107,6 +107,19 @@ constexpr CJThreadLayoutOffsets offsets_aarch64_linux_ohos = {
     .offset_of_boundCJThread = 320
 };
 
+constexpr CJThreadLayoutOffsets offsets_aarch64_android = {
+    .offset_of_ScheduleManager_dot_allCJThreadList = 128,
+    .offset_of_CJThread_dot_allCJThreadDulink = 240,
+    .offset_of_CJThread_dot_context = 24,
+    .offset_of_CJThread_dot_thread = 16,
+    .offset_of_CJThread_dot_state = 216,
+    .offset_of_CJThread_dot_id = 456,
+    .offset_of_CJThread_dot_name = 464,
+    .offset_of_Thread_dot_tid = 88,
+    .offset_of_boundThread = 432,
+    .offset_of_boundCJThread = 304
+};
+
 constexpr CJThreadLayoutOffsets offsets_aarch64_darwin = {
     .offset_of_ScheduleManager_dot_allCJThreadList = 176,
     .offset_of_CJThread_dot_allCJThreadDulink = 240,
@@ -136,8 +149,9 @@ static bool GetCJThreadLayoutOffsets(Process &process, CJThreadLayoutOffsets &of
       offsets = offsets_aarch64_darwin;
       return true;
     } else if (triple.getOS() == llvm::Triple::OSType::Linux) {
-      auto env = triple.getEnvironmentName();
-      if (env.equals("ohos")) {
+      if (triple.isAndroid()) {
+        offsets = offsets_aarch64_android;
+      } else if (triple.getEnvironmentName().equals("ohos")) {
         offsets = offsets_aarch64_linux_ohos;
       } else {
         offsets = offsets_aarch64_linux;
@@ -294,7 +308,7 @@ std::vector<CJThreadInfoOverview> CollectAllCJThreads(Process &process,
     // Thread::tid (if thread_ptr is valid)
     overview.tid = 0;
     if (overview.thread_ptr != 0) {
-      uint64_t tid_val = 0;
+      uint32_t tid_val = 0;
       if (!ReadMemoryChecked(process,
                              overview.thread_ptr + offsets.offset_of_Thread_dot_tid,
                              &tid_val, sizeof(tid_val), status))
