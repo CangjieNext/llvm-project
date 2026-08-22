@@ -1809,12 +1809,28 @@ ThreadSP ProcessGDBRemote::SetThreadStopInfo(
                   watch_id = wp_sp->GetID();
                 }
               }
-              if (watch_id == LLDB_INVALID_WATCH_ID) {
+              if (watch_id != LLDB_INVALID_WATCH_ID) {
+                thread_sp->SetStopInfo(
+                    StopInfo::CreateStopReasonWithWatchpointID(
+                        *thread_sp, watch_id, wp_hit_addr));
+              } else {
                 Log *log(GetLog(GDBRLog::Watchpoints));
-                LLDB_LOGF(log, "failed to find watchpoint");
+                LLDB_LOG(log,
+                         "remote reported an unknown watchpoint: address = "
+                         "{0:x}, hardware index = {1}, hit address = {2:x}; "
+                         "ignoring the unknown stop reason",
+                         wp_addr, wp_index, wp_hit_addr);
+
+                // A remote stub can report a stale hardware watchpoint after
+                // the corresponding watchpoint has already been removed (or
+                // when the kernel reports stale debug-register state).  Never
+                // manufacture watchpoint ID 0: StopInfoWatchpoint treats it as
+                // a real, stopping watchpoint and consequently interrupts
+                // thread plans such as "finish".  The stop info was already
+                // cleared before parsing this stop packet; leave it empty so
+                // the active thread plan can handle this trap.
+                description.clear();
               }
-              thread_sp->SetStopInfo(StopInfo::CreateStopReasonWithWatchpointID(
-                  *thread_sp, watch_id, wp_hit_addr));
               handled = true;
             } else if (reason == "exception") {
               thread_sp->SetStopInfo(StopInfo::CreateStopReasonWithException(
