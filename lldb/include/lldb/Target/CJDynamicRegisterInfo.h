@@ -184,6 +184,7 @@ struct CJThreadContext_Arm64 {
       regValMap[ConstString("d13")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d13, byte_order));
       regValMap[ConstString("d14")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d14, byte_order));
       regValMap[ConstString("d15")] = RegisterValue(ReadWithByteOrder<uint64_t>(&this->d15, byte_order));
+      regValMap[ConstString("fpcr")] = RegisterValue(ReadWithByteOrder<uint32_t>(&this->fpcr, byte_order));
     }
 };
 
