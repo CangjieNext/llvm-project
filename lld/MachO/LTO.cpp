@@ -71,6 +71,20 @@ static lto::Config createConfig() {
   c.OptLevel = config->ltoo;
   c.CGOptLevel = args::getCGOptLevel(config->ltoo);
   c.OpaquePointers =false;
+  // Cangjie: gate package-visibility lowering (HiddenGUIDs population in
+  // LTO.cpp) on whether the package-visibility path actually engaged.
+  // Mirrors shouldKeepVisibleForPkg's gate: hideAllVisiblePkgs forces it on;
+  // otherwise at least one bitcode module must have matched a listed package
+  // (hasMatchedVisiblePkg, set by validateVisiblePkgModules in the driver).
+  // This keeps ordinary LTO links (iOS executables, dylibs, archives without
+  // --visible-pkgs) from ever populating HiddenGUIDs. Only the ThinLTO
+  // backend consults HiddenGUIDs; fullLTO reaches package visibility via the
+  // upstream Partition/ExportList internalize mechanism instead. Which
+  // symbols get hidden vs kept-external is decided separately by the
+  // ExportDynamic resolution in BitcodeCompiler::add (visible-package symbols
+  // get ExportDynamic=true and thus never enter HiddenGUIDs).
+  c.EnablePackageVisibility =
+      config->hideAllVisiblePkgs || config->hasMatchedVisiblePkg;
   if (config->saveTemps)
     checkError(c.addSaveTemps(config->outputFile.str() + ".",
                               /*UseInputModulePath=*/true));

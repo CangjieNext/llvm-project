@@ -257,6 +257,14 @@ struct Config {
   /// package-level symbol visibility. Only consulted by the thin backend.
   DenseSet<GlobalValue::GUID> HiddenGUIDs;
 
+  /// Cangjie: master gate for package-visibility lowering. When false (default),
+  /// HiddenGUIDs is never populated, so non-visible-package symbols are NOT
+  /// lowered to N_PEXT -- this protects LTO links that are NOT static-library
+  /// final products (e.g. iOS executables) from having main/cross-package
+  /// symbols wrongly hidden. The cjc driver sets this to true only when
+  /// ShouldEmitStaticLibInLTO holds; lld forwards it into the Config.
+  bool EnablePackageVisibility = false;
+
   /// This is a convenience function that configures this Config object to write
   /// temporary files named after the given OutputFileName for each of the LTO
   /// phases to disk. A client can use this function to implement -save-temps.

@@ -649,11 +649,17 @@ Error lto::thinBackend(const Config &Conf, unsigned Task, AddStreamFn AddStream,
   if (Conf.PreOptModuleHook && !Conf.PreOptModuleHook(Task, Mod))
     return finalizeOptimizationRemarks(std::move(DiagnosticOutputFile));
 
-  // Cangjie: names of package-init/llvm.used-pinned globals, captured before
-  // optimization. opt() below can drop/rewrite llvm.used, so we must remember
-  // what was pinned pre-opt (filled in by the hide-loop later in this function).
-  std::set<std::string> PinnedNames;
-
+  // Cangjie static-lib: the package-visibility semantics (external → N_PEXT,
+  // local 't' unchanged, llvm.used unchanged) is implemented entirely by the
+  // hide-loop below, which sets HiddenVisibility on symbols listed in
+  // HiddenGUIDs. The previous internalize chain (demoting to InternalLinkage /
+  // local 't') is intentionally removed: dropping to 't' breaks cross-partition
+  // GOT references (e.g. _CGP4 init helpers) and defeats static-archive
+  // on-demand pulling semantics. Keeping External linkage + HiddenVisibility
+  // yields N_PEXT (private-extern): linkable across partitions and archive
+  // members, but invisible outside the library. llvm.used-pinned symbols are
+  // exempted by the hide-loop's UsedGVs set (see below); local symbols are
+  // guarded by !isLocalLinkage() so they stay 't'.
   auto OptimizeAndCodegen =
       [&](Module &Mod, TargetMachine *TM,
           std::unique_ptr<ToolOutputFile> DiagnosticOutputFile) {
@@ -661,89 +667,6 @@ Error lto::thinBackend(const Config &Conf, unsigned Task, AddStreamFn AddStream,
                  /*ExportSummary=*/nullptr, /*ImportSummary=*/&CombinedIndex,
                  CmdArgs))
           return finalizeOptimizationRemarks(std::move(DiagnosticOutputFile));
-
-        // Cangjie static-lib: at this point optimization has already run, so the
-        // surviving HiddenGUIDs functions are exactly the ones that were called
-        // (directly or via a ThinLTO import going out to another partition) and
-        // must be preserved, while truly dead ones (e.g. never-called public
-        // funcs in a hidden package) were eliminated by GlobalDCE. Demote the
-        // survivors to InternalLinkage so Mach-O emits a plain local symbol
-        // ('t' in nm) instead of an N_PEXT private-extern ('T'), matching the
-        // --lto-keep-pkg-visibility=<pkg> semantics: the linked package stays
-        // invisible from outside the archive. Declarations (import references)
-        // keep External linkage and are resolved against this definition.
-        // llvm.used-pinned symbols are exempt (see hide-loop).
-        // Cross-partition reference: a hidden function in THIS partition may
-        // be referenced (via GOT / init helpers) from ANOTHER partition's
-        // code. Making it InternalLinkage here would emit it as a Mach-O
-        // local ('t'), which cannot be resolved across objects by the linker,
-        // surfacing as 'undefined symbol' at final link. Symbols that are
-        // referenced from outside must stay N_PEXT/private-external (keep
-        // External linkage + hidden visibility). We detect these via the
-        // combined module index: only address/other refs from other modules
-        // matter here - a plain call edge is handled by ThinLTO import
-        // (caller gets a private copy, so the definition may legitimately
-        // become local 't'), whereas an address-taken reference is never
-        // imported and keeps needing an externally resolvable symbol.
-        auto IsReferredExternally = [&](StringRef Name) {
-          GlobalValue::GUID G = GlobalValue::getGUID(
-              GlobalValue::dropLLVMManglingEscape(Name));
-          ValueInfo VI = CombinedIndex.getValueInfo(G);
-          if (!VI)
-            return false;
-          StringRef ThisMod = Mod.getModuleIdentifier();
-          for (const std::unique_ptr<GlobalValueSummary> &S :
-               VI.getSummaryList())
-            if (S->modulePath() != ThisMod)
-              for (const ValueInfo &Ref : S->refs())
-                if (Ref.getGUID() == G)
-                  return true;
-          return false;
-        };
-        // Symbols pinned by llvm.used/llvm.compiler.used before opt. Use
-        // names captured pre-opt (see capture above).
-        auto IsKeptExternal = [&](StringRef Name) {
-          return PinnedNames.count(
-                     std::string(
-                         GlobalValue::dropLLVMManglingEscape(Name))) != 0;
-        };
-        // Compiler-generated package-init machinery (_CGP4<package>i{H}v...).
-        // The frontend orchestrates package initialization across partitions
-        // by GOT-address direct references that do NOT appear in ThinLTO's
-        // import list or module summaries (observed: refext=0 for
-        // _CGP4lib2ifHv/_CGP4lib2ilHv although lib1's init code calls them).
-        // If we internalize them they become Mach-O locals and cannot be
-        // resolved from the other partition's object -> 'undefined symbol:
-        // __CGP4lib2i{H}v' at final link. Keep them External+Hidden so they
-        // emit as N_PEXT (private-extern): linkable across partitions, but
-        // invisible to the user. The init func family for a package 'X' is
-        // mangled '_CGP4' + 'X' + 'i' + suffix + 'Hv'.
-        auto IsPackageInitHelper = [&](StringRef Name) {
-          StringRef N = GlobalValue::dropLLVMManglingEscape(Name);
-          // _CGP4<i>... -- package init helper/flag functions.
-          return N.startswith("_CGP4") && N.size() > 5;
-        };
-        for (Function &F : Mod.functions()) {
-          bool hit = Conf.HiddenGUIDs.count(GlobalValue::getGUID(
-              GlobalValue::dropLLVMManglingEscape(F.getName())));
-          if (!hit || F.isDeclaration())
-            continue;
-          if (IsKeptExternal(F.getName()) ||
-              IsReferredExternally(F.getName()) ||
-              IsPackageInitHelper(F.getName()))
-            continue;
-          F.setLinkage(GlobalValue::InternalLinkage);
-        }
-        for (GlobalVariable &GV : Mod.globals())
-          if (Conf.HiddenGUIDs.count(GlobalValue::getGUID(
-                  GlobalValue::dropLLVMManglingEscape(GV.getName()))) &&
-              !GV.isDeclaration() && !IsKeptExternal(GV.getName()))
-            GV.setLinkage(GlobalValue::InternalLinkage);
-        for (GlobalAlias &A : Mod.aliases())
-          if (Conf.HiddenGUIDs.count(GlobalValue::getGUID(
-                  GlobalValue::dropLLVMManglingEscape(A.getName()))) &&
-              !IsKeptExternal(A.getName()))
-            A.setLinkage(GlobalValue::InternalLinkage);
         ::codegen(Conf, TM, AddStream, Task, Mod, CombinedIndex);
         return finalizeOptimizationRemarks(std::move(DiagnosticOutputFile));
       };
@@ -769,46 +692,50 @@ Error lto::thinBackend(const Config &Conf, unsigned Task, AddStreamFn AddStream,
   if (!DefinedGlobals.empty())
     thinLTOInternalizeModule(Mod, DefinedGlobals);
 
-  // Cangjie static-lib: hide non-visible-package symbols. Symbols referenced
-  // from llvm.used (or llvm.compiler.used), e.g. the package init function
-  // __CJ_..._init, are pinned by the frontend so they stay externally visible
-  // (they must keep being callable/keepable), so they are exempt from hiding.
-  // Hidden functions keep External linkage at this point (they may be imported
-  // into the visible partition if called there and must survive LTO DCE), but
-  // are marked HiddenVisibility so they are not exported. The final
-  // internalization to a Mach-O local symbol happens right before codegen,
-  // after optimization has decided what survives.
+  // Cangjie static-lib: hide non-visible-package symbols. This hide-loop is
+  // the SOLE visibility rewriter for package-visibility semantics:
+  //   - hidden prevailing symbols (in HiddenGUIDs) → HiddenVisibility, which
+  //     on Mach-O yields N_PEXT (private-extern): linkable across archive
+  //     members and partitions, invisible outside the library;
+  //   - llvm.used/llvm.compiler.used-pinned symbols are exempt (UsedGVs) so
+  //     they keep their original visibility (e.g. package init entries
+  //     __CJ_..._init must remain externally callable);
+  //   - already-local symbols (InternalLinkage / PrivateLinkage, i.e. Mach-O
+  //     't'/'non-external') are guarded by !isLocalLinkage(getLinkage()) so
+  //     they are never touched -- 't' stays 't'.
+  // Note: this runs BEFORE opt(), so collectUsedGlobalVariables reads the
+  // intact @llvm.used array; GlobalDCE inside opt() still honors @llvm.used as
+  // a strong IR-level root, so pinned symbols survive. There is no separate
+  // internalize-to-InternalLinkage step anymore (it broke cross-partition GOT
+  // references and static-archive on-demand pulling; see OptimizeAndCodegen).
   // Note: the standard library participates in LTO only when the archive is a
   // final product (--lto-keep-pkg-visibility delegates interop/final exports to
-  // explicitly listed packages), so std.core is hidden/internalized on the same
-  // terms as any other non-visible package.
+  // explicitly listed packages), so std.core is hidden on the same terms as
+  // any other non-visible package.
   if (!Conf.HiddenGUIDs.empty()) {
     SmallVector<GlobalValue *, 8> UsedVec;
     collectUsedGlobalVariables(Mod, UsedVec, /*CompilerUsed=*/false);
     collectUsedGlobalVariables(Mod, UsedVec, /*CompilerUsed=*/true);
     SmallPtrSet<GlobalValue *, 8> UsedGVs(UsedVec.begin(), UsedVec.end());
-    for (GlobalValue *GV : UsedVec) {
-      std::string N =
-          std::string(GlobalValue::dropLLVMManglingEscape(GV->getName()));
-      if (Conf.HiddenGUIDs.count(GlobalValue::getGUID(N)))
-        PinnedNames.insert(N);
-    }
     for (GlobalVariable &GV : Mod.globals()) {
       bool hit = Conf.HiddenGUIDs.count(GlobalValue::getGUID(
           GlobalValue::dropLLVMManglingEscape(GV.getName())));
-      if (hit && !UsedGVs.count(&GV))
+      if (hit && !UsedGVs.count(&GV) &&
+          !GlobalValue::isLocalLinkage(GV.getLinkage()))
         GV.setVisibility(GlobalValue::HiddenVisibility);
     }
     for (Function &F : Mod.functions()) {
       bool hit = Conf.HiddenGUIDs.count(GlobalValue::getGUID(
           GlobalValue::dropLLVMManglingEscape(F.getName())));
-      if (hit && !UsedGVs.count(&F))
+      if (hit && !UsedGVs.count(&F) &&
+          !GlobalValue::isLocalLinkage(F.getLinkage()))
         F.setVisibility(GlobalValue::HiddenVisibility);
     }
     for (GlobalAlias &A : Mod.aliases())
       if (Conf.HiddenGUIDs.count(GlobalValue::getGUID(
               GlobalValue::dropLLVMManglingEscape(A.getName()))) &&
-          !UsedGVs.count(&A))
+          !UsedGVs.count(&A) &&
+          !GlobalValue::isLocalLinkage(A.getLinkage()))
         A.setVisibility(GlobalValue::HiddenVisibility);
   }
 

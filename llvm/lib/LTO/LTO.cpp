@@ -1079,8 +1079,15 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
       DynamicExportSymbols.insert(GUID);
 
     // Cangjie: prevailing symbols not marked ExportDynamic are from non-visible
-    // packages and should be hidden in the thin backend output.
-    if (Res.second.Prevailing && !Res.second.ExportDynamic)
+    // packages and should be hidden in the thin backend output. Gated on
+    // EnablePackageVisibility (set by lld only when --visible-pkgs/--hide-all-
+    // visible-pkgs matched at least one bitcode module, and only meaningful for
+    // ThinLTO -- fullLTO achieves package visibility via the upstream
+    // Partition/ExportList internalize mechanism, not HiddenGUIDs). This keeps
+    // ordinary LTO links (iOS executables, dylibs, plain archives without
+    // --visible-pkgs) from ever lowering main / cross-package symbols.
+    if (Conf.EnablePackageVisibility && Res.second.Prevailing &&
+        !Res.second.ExportDynamic)
       Conf.HiddenGUIDs.insert(GUID);
 
     GUIDPrevailingResolutions[GUID] =
