@@ -114,12 +114,7 @@ unsigned AArch64InstrInfo::getCangjieSpecificCallInstSizeInBytes(
   if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
     StatepointOpers SO(&MI);
     if (SO.getID() == Cangjie::CJStatepointID::NewArrayFast) {
-      // emitCJNewArrayFastPath: 12 base insts (48B fast) + 1 BL slow (4B) =
-      // 52B; under Large+MachO the slow path becomes ADRP+LDR+BLR (+8B) ->
-      // 60B. Was flat 52 (under-estimated under Large+MachO, risking
-      // out-of-range TBZ/TBNZ); now matches the emitCangjieRuntimeCall slow
-      // path introduced symmetric to the NewObject fix (issue #173).
-      return 52 + GotExtra;
+      return 52; // 52: 52 bytes(13 insts) for new array call
     }
     MOSym = &(SO.getCallTarget());
   } else {
