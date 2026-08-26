@@ -2199,6 +2199,11 @@ void AArch64AsmPrinter::emitCJNewArrayFastPath(const MachineInstr &MI,
   MCSymbol *LFinish = OutContext.createTempSymbol("NewArrayFin", true);
   const MCSymbolRefExpr *FinExpr = MCSymbolRefExpr::create(LFinish, OutContext);
   MCInst BranchToFin = MCInstBuilder(B).addExpr(FinExpr);
+  MCOperand CallSlowPathMCOp;
+  MCInstLowering.lowerOperand(MOSym, CallSlowPathMCOp);
+  unsigned SlowCallOpcode = MOSym.isReg() ? BLR : BL;
+  MCInst CallNewArraySlowPath =
+      MCInstBuilder(SlowCallOpcode).addOperand(CallSlowPathMCOp);
   OutStreamer->emitLabel(LFast);
   EmitToStreamer(*OutStreamer, GetAllocBuffer);
   EmitToStreamer(*OutStreamer, GetRegionPtr);
@@ -2213,13 +2218,7 @@ void AArch64AsmPrinter::emitCJNewArrayFastPath(const MachineInstr &MI,
   EmitToStreamer(*OutStreamer, CopyAllocPtrToX0);
   EmitToStreamer(*OutStreamer, BranchToFin);
   OutStreamer->emitLabel(LSlow);
-  // Slow path: call the original runtime allocator (CJ_MCC_NewArray /
-  // CJ_MCC_NewArray8/16/32/64). Use emitCangjieRuntimeCall so that under
-  // Large+MachO the cross-dylib call goes through ADRP+LDR+BLR (GOT) instead
-  // of a direct branch26 BL, mirroring the NewObject slow-path fix (issue
-  // #173). MOSym is the statepoint call target, always a global function for
-  // NewArray statepoints (lowered from cj_malloc_array intrinsic).
-  emitCangjieRuntimeCall(getSymbol(MOSym.getGlobal()));
+  EmitToStreamer(*OutStreamer, CallNewArraySlowPath);
   OutStreamer->emitLabel(LFinish);
   SM.recordCJStackMap(MI);
 }
