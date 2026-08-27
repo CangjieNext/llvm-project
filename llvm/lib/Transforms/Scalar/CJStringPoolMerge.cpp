@@ -21,8 +21,25 @@
 // buildLTODefaultPipeline, so cjstring literal wrappers (the
 // {poolPtr, offset, length} indirection) are still intact -- after
 // SROA/InstCombine inlines the wrappers, direct GEP users appear that the
-// byte-pool path cannot repoint. By pre-opt, dead buffers are already gone
-// (dropped at link/internalize time), so this pass only sees live ones.
+// byte-pool path cannot repoint. Note the consequence: literals that only
+// become dead during the LTO opt pipeline itself (e.g. dead after inlining)
+// are still baked into the merged pool; only literals already dropped by
+// link time (observed gone before the 0.preopt hook) are excluded.
+//
+// Safety invariant: a buffer that has referring literals is only treated
+// as a per-literal buffer when one of them is a genuine wrapper
+// {cast(buf), 0, N} (N == the buffer's data length). A legacy per-package
+// pool has literals with offset != 0 / len != N, so it is never eligible;
+// this keeps mixed links (e.g. a stale pooled bitcode archive in a
+// full-LTO link) correct. A buffer with no referring literal at all is an
+// orphan whose wrapper was folded away by the per-module opt; its direct
+// handles are repointed by byte offset, which is content-safe.
+//
+// 64-bit only: the {i8*, i64, [N x i8]} buffer shape mirrors the runtime
+// MArray layout whose data offset is sizeof(MArray) == 16 on 64-bit. On
+// 32-bit targets sizeof(MArray) == 8 and this struct shape cannot model it,
+// so the pass skips non-64-bit modules entirely (CodeGen also only emits
+// per-literal buffers on 64-bit targets).
 //
 // Two merge paths:
 //   1. Byte-pool path: buffers reached only via the literal's
@@ -56,6 +73,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -63,9 +81,12 @@
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using namespace llvm;
+
+#define DEBUG_TYPE "cj-string-pool-merge"
 
 // Attribute markers and naming convention emitted by Cangjie CodeGen
 // (cangjie_compiler/src/CodeGen/Utils/Constants.h). The LLVM tree does not
@@ -127,18 +148,49 @@ static bool refersThroughCast(GlobalVariable *lit, GlobalVariable *buf) {
   return C == buf;
 }
 
-// Find the cjstring literal global that references `info.buf`.
-static bool findOwningLiteral(Module &M, BufInfo &info) {
-  auto *buf = info.buf;
+// True if `lit` is a genuine per-literal wrapper of `buf`, i.e. its
+// initializer is exactly {cast-chain(buf), i32 0, i32 dataLen} where
+// dataLen is the buffer's data-array length. This is the structural
+// invariant that distinguishes a deferred per-literal buffer from a legacy
+// per-package pool: legacy literals point into the pool with offset != 0
+// and/or length != pool data length. Without this check a legacy pool in
+// the same module (e.g. a stale pooled bitcode archive in a full-LTO link)
+// would be mistaken for one giant literal and its first literal would be
+// repointed to {newPool, 0, poolLen} -- silently corrupting the string.
+static bool isPerLiteralWrapper(GlobalVariable *lit, GlobalVariable *buf,
+                                uint64_t dataLen) {
+  if (!refersThroughCast(lit, buf))
+    return false;
+  auto *init = cast<ConstantStruct>(lit->getInitializer());
+  if (init->getNumOperands() != 3)
+    return false;
+  auto *off = dyn_cast<ConstantInt>(init->getOperand(1));
+  auto *len = dyn_cast<ConstantInt>(init->getOperand(2));
+  return off && len && off->isZero() && len->getZExtValue() == dataLen;
+}
+
+// Build a buf -> referring-literals map in one scan over the module's
+// globals (O(#globals) total, instead of scanning all globals per buffer).
+// Every literal carrying CJSTRING_LITERAL_ATTR whose initializer operand 0
+// bottoms out at the buffer is recorded; the caller decides whether any of
+// them is a genuine per-literal wrapper (see isPerLiteralWrapper).
+static std::unordered_map<GlobalVariable *, SmallVector<GlobalVariable *, 2>>
+buildOwnerMap(Module &M) {
+  std::unordered_map<GlobalVariable *, SmallVector<GlobalVariable *, 2>>
+      ownerOf;
   for (GlobalVariable &lit : M.globals()) {
-    if (!lit.hasAttribute(CJSTRING_LITERAL_ATTR))
+    if (!lit.hasAttribute(CJSTRING_LITERAL_ATTR) || !lit.hasInitializer())
       continue;
-    if (!refersThroughCast(&lit, buf))
+    auto *init = dyn_cast<ConstantStruct>(lit.getInitializer());
+    if (!init || init->getNumOperands() != 3)
       continue;
-    info.lit = &lit;
-    return true;
+    auto *buf = dyn_cast<GlobalVariable>(
+        init->getOperand(0)->stripPointerCasts());
+    if (!buf)
+      continue;
+    ownerOf[buf].push_back(&lit);
   }
-  return false;
+  return ownerOf;
 }
 
 // Greedy substring-sharing repack (mirrors CodeGen's rawData.find logic):
@@ -192,18 +244,21 @@ static GlobalVariable *buildSharedPool(Module &M, ArrayRef<BufInfo> bufs,
   // Invariant: the byte-pool repoint path (repointHandleToBytePool,
   // CastChain case) relies on AcquireRawData(buf) == buf + sizeof(MArray)
   // landing on the data field (element 2). The runtime MArray layout
-  // (StateWord(8) + length + padding, see cangjie_runtime
+  // (StateWord + length + padding, see cangjie_runtime
   // runtime/src/ObjectModel/MArray.h, GetContentOffset==sizeof(MArray))
   // must therefore place data at the same offset as this struct's element
-  // 2. On 64-bit targets both are 16. Verify via DataLayout so a future
-  // struct-shape change is caught instead of silently mis-offsetting every
-  // repointed direct handle. See cangjie-const-pool-pass-design skill §1.4.
-  constexpr uint64_t CJ_MARRAY_DATA_OFFSET = 16;
+  // 2. sizeof(MArray) is 16 on 64-bit and 8 on 32-bit; the {i8*, i64, ...}
+  // buffer shape can only model it on 64-bit, so run() skips non-64-bit
+  // modules entirely and only the 64-bit value can reach here. Keep the
+  // DataLayout verification so a future struct-shape change is caught
+  // instead of silently mis-offsetting every repointed direct handle.
+  // See cangjie-const-pool-pass-design skill §1.4.
+  const uint64_t marrayDataOffset = 2 * M.getDataLayout().getPointerSize();
   const StructLayout *SL = M.getDataLayout().getStructLayout(poolTy);
-  if (SL->getElementOffset(2) != CJ_MARRAY_DATA_OFFSET)
+  if (SL->getElementOffset(2) != marrayDataOffset)
     report_fatal_error(
         "CJStringPoolMerge: pool data offset " + Twine(SL->getElementOffset(2)) +
-            " != runtime sizeof(MArray)=" + Twine(CJ_MARRAY_DATA_OFFSET) +
+            " != runtime sizeof(MArray)=" + Twine(marrayDataOffset) +
             "; byte-pool repoint would mis-offset data",
         false);
   auto *poolInit = ConstantStruct::get(
@@ -594,12 +649,12 @@ static void mergeDirectUserBuffers(Module &M, std::vector<BufInfo> &bufs,
   // not byte-pool-repointable (e.g. ConstGepOther). This path DOES trigger
   // in practice -- a full-LTO build of stdlib + user program produces a
   // surviving $const_cjstring_data.nested.<n> pool (e.g. stdlib exception
-  // message buffers reached via non-[0,2,off] constant GEPs). Log loudly so
-  // a CI/regression run that hits it is not silently trusted -- the
-  // repointed handles should be manually verified when this fires on new IR.
-  errs() << "CJStringPoolMerge: path 2 (struct-nesting) merged "
-         << eligible.size() << " buffers into " << nested->getName()
-         << " (fallback path -- verify the repointed handles)\n";
+  // message buffers reached via non-[0,2,off] constant GEPs). Note each
+  // nested field keeps its own klassInfo pointer, so this path adds one
+  // .rela.dyn entry per field under PIE; it is a size trade-off, not a win.
+  LLVM_DEBUG(errs() << "CJStringPoolMerge: path 2 (struct-nesting) merged "
+                    << eligible.size() << " buffers into " << nested->getName()
+                    << " (fallback path)\n");
   // Repoint every handle, then erase the old buffers.
   for (unsigned i = 0; i < eligible.size(); ++i) {
     BufInfo *b = eligible[i];
@@ -616,6 +671,14 @@ static void mergeDirectUserBuffers(Module &M, std::vector<BufInfo> &bufs,
 
 PreservedAnalyses CJStringPoolMerge::run(Module &M,
                                          ModuleAnalysisManager &) const {
+  // 64-bit only: the {i8*, i64, [N x i8]} buffer shape mirrors the runtime
+  // MArray whose data offset sizeof(MArray) is 16 on 64-bit but 8 on
+  // 32-bit, which this struct shape cannot model. Skip non-64-bit modules
+  // entirely (CodeGen only emits per-literal buffers on 64-bit anyway, so
+  // this is a defensive no-op there).
+  if (M.getDataLayout().getPointerSize() != 8)
+    return PreservedAnalyses::all();
+
   // Collect every cjstring_data buffer. Direct handles are collected once
   // per buffer into BufInfo.directHandles. Each handle is decomposed once;
   // the shape decides the buffer's fate:
@@ -624,6 +687,16 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
   //     ConstGepOther (none RuntimeGep/NotRepointable) -> nested (path 2)
   //   - any RuntimeGep/NotRepointable                 -> skip whole buffer
   // Buffers with no direct handles go straight to the byte pool (path 1).
+  //
+  // A buffer that has referring literals is only eligible when one of them
+  // is a genuine per-literal wrapper ({buf, 0, dataLen}); anything else --
+  // notably a legacy per-package pool, whose literals have offset != 0 --
+  // is left wholly untouched (see isPerLiteralWrapper). A buffer with NO
+  // referring literal is an orphan whose wrapper was folded away by the
+  // per-module opt, leaving only direct handles; merging it by content is
+  // safe because handle repointing preserves byte offsets (and it cannot
+  // be a legacy pool with live literals -- those would refer to it).
+  auto ownerOf = buildOwnerMap(M);
   std::vector<BufInfo> bytePackable;
   std::vector<BufInfo> directUser; // fallback for struct-nesting
   for (GlobalVariable &gv : M.globals()) {
@@ -633,7 +706,22 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
     info.buf = &gv;
     if (!collectBufferContent(info))
       continue;
-    findOwningLiteral(M, info);
+    auto ownerIt = ownerOf.find(&gv);
+    if (ownerIt != ownerOf.end()) {
+      for (GlobalVariable *lit : ownerIt->second)
+        if (isPerLiteralWrapper(lit, &gv, info.length)) {
+          info.lit = lit;
+          break;
+        }
+      if (!info.lit) {
+        // Literals refer to this buffer but none is a per-literal wrapper:
+        // a legacy per-package pool (or foreign shape). Leave it wholly
+        // untouched -- merging would rewrite its first literal to span the
+        // whole pool (silent miscompile) or duplicate its content.
+        continue;
+      }
+    }
+    // No referring literal: orphan buffer with (at most) direct handles.
     SmallVector<Constant *, 4> handles;
     bool hasLiveInstrUser = !collectDirectHandles(&gv, handles);
     if (hasLiveInstrUser) {
@@ -649,7 +737,8 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
     if (handles.empty()) {
       // Pure indirection: buf is reached only via its literal's
       // {poolPtr, offset, length} wrapper, with no direct instruction
-      // handle. Safe to merge + repoint literal + erase buffer.
+      // handle. Safe to merge + repoint literal + erase buffer. (An orphan
+      // with no handles at all is dead weight; leave it for GlobalDCE.)
       if (info.lit)
         bytePackable.push_back(std::move(info));
       continue;
@@ -706,7 +795,8 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
       if (!litOnly.empty())
         repointAndErase(pool, litOnly, offsets, merged);
       // Repoint direct handles into the pool's data array, then erase the
-      // now-dead direct-user buffers that had no owning literal.
+      // now-dead direct-user buffers (those with an owning literal were
+      // already repointed above; orphans have only their direct handles).
       for (auto &b : bytePackable) {
         if (b.directHandles.empty())
           continue;

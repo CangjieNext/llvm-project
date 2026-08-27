@@ -9,9 +9,14 @@
 //===----------------------------------------------------------------------===//
 //
 // This pass merges the per-literal cjstring byte buffers (emitted by
-// CodeGen under full LTO) back into shared pools with substring sharing,
-// running after LTO GlobalDCE so only live literals are repacked. See
-// requirement/ir_analysis/scenario2_stringpool_trim_design.md section 12.
+// CodeGen under full LTO) back into shared pools with substring sharing.
+// It runs inside LTOBackend's runNewPMPasses BEFORE buildLTODefaultPipeline
+// (the wrappers must still be intact), so only literals already dropped by
+// link time are excluded; literals that die during the opt pipeline itself
+// are still repacked into the pool. Only buffers with a genuine per-literal
+// wrapper literal ({buf, 0, dataLen}) are eligible, so legacy per-package
+// pools in the same module are left untouched. 64-bit targets only.
+// See requirement/ir_analysis/scenario2_stringpool_trim_design.md section 12.
 //
 //===----------------------------------------------------------------------===//
 
