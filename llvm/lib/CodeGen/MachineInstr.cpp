@@ -129,6 +129,24 @@ MachineInstr::MachineInstr(MachineFunction &MF, const MachineInstr &MI)
   for (const MachineOperand &MO : MI.operands())
     addOperand(MF, MO);
 
+  // addOperand() drops incoming ties and rebuilds them from the MCInstrDesc
+  // TIED_TO constraints.  That is enough for instructions whose ties are static,
+  // but not for ones that tie operands at runtime -- STATEPOINT in particular,
+  // whose ties do not appear in its MCInstrDesc at all.  Those would come out of
+  // a clone untied, and the machine verifier rejects them ("STATEPOINT defs
+  // expected to be tied").  Replay the source's ties here.
+  if (MI.hasComplexRegisterTies()) {
+    for (unsigned I = 0, E = getNumOperands(); I != E; ++I) {
+      const MachineOperand &SrcMO = MI.getOperand(I);
+      // Walk uses only; tieOperands() sets both halves of each pair.
+      if (!SrcMO.isReg() || !SrcMO.isUse() || !SrcMO.isTied())
+        continue;
+      unsigned DefIdx = MI.findTiedOperandIdx(I);
+      if (!getOperand(I).isTied() && !getOperand(DefIdx).isTied())
+        tieOperands(DefIdx, I);
+    }
+  }
+
   // Copy all the sensible flags.
   setFlags(MI.Flags);
 }

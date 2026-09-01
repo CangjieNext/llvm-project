@@ -337,7 +337,35 @@ struct StatepointCallLoweringResult {
   SDValue ReturnValue;
   SDNode *CallNode = nullptr;
   SDNode *CallSeqEnd = nullptr;
+  // The CALLSEQ_START opening this call sequence, or null when the sequence
+  // does not have a shape we recognize.  Only needed for tail calls, where
+  // CallSeqEnd is deleted and the start would otherwise be left unpaired.
+  SDNode *CallSeqStart = nullptr;
 };
+
+/// Walk the chain up from a lowered call to the CALLSEQ_START that opens its
+/// call sequence.  Between the two, argument setup only chains CopyToReg /
+/// CopyFromReg nodes -- a tail-call statepoint never has stack arguments, see
+/// isStatepointTailCallSequenceSafe().  Anything else (notably a TokenFactor,
+/// which would merge chains we are not tracking) makes this return null so
+/// callers leave the sequence alone.
+static SDNode *findCallSeqStartForCall(SDNode *CallNode) {
+  SDNode *N = CallNode->getOperand(0).getNode();
+  // Bound the walk so that a malformed DAG cannot spin here.
+  for (unsigned Depth = 0; Depth != 64; ++Depth) {
+    switch (N->getOpcode()) {
+    case ISD::CALLSEQ_START:
+      return N;
+    case ISD::CopyToReg:
+    case ISD::CopyFromReg:
+      N = N->getOperand(0).getNode();
+      break;
+    default:
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
 } // end anonymous namespace
 
 /// Extract call from statepoint, lower it and return pointers to the call node
@@ -379,7 +407,8 @@ static StatepointCallLoweringResult lowerCallFromStatepointLoweringInfo(
   }
 
   assert(CallEnd->getOpcode() == ISD::CALLSEQ_END && "expected!");
-  return {ReturnValue, CallEnd->getOperand(0).getNode(), CallEnd};
+  SDNode *CallNode = CallEnd->getOperand(0).getNode();
+  return {ReturnValue, CallNode, CallEnd, findCallSeqStartForCall(CallNode)};
 }
 
 static bool isStatepointTailCallSequenceSafe(SDNode *CallSeqEnd) {
@@ -955,6 +984,7 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
   SDValue ReturnVal = CallLoweringResult.ReturnValue;
   SDNode *CallNode = CallLoweringResult.CallNode;
   SDNode *CallSeqEnd = CallLoweringResult.CallSeqEnd;
+  SDNode *CallSeqStart = CallLoweringResult.CallSeqStart;
 
   // Construct the actual GC_TRANSITION_START, STATEPOINT, and GC_TRANSITION_END
   // nodes with all the appropriate arguments and return values.
@@ -979,9 +1009,14 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
   const bool IsGCTransition =
       (SI.StatepointFlags & (uint64_t)StatepointFlags::GCTransition) ==
       (uint64_t)StatepointFlags::GCTransition;
+  // Computed while CallSeqEnd is still alive: the tail-call path deletes it
+  // below, but the splice at the end of this function still needs to know that
+  // the call frame was empty.  Keeping the fact local beats relying on the
+  // clearing of SI.IsTailCall a couple hundred lines up.
+  const bool TailCallSeqSafe = isStatepointTailCallSequenceSafe(CallSeqEnd);
   if (SI.IsTailCall &&
       (IsGCTransition || !SI.CLI.RetTy->isVoidTy() || !SI.GCRelocates.empty() ||
-       !isStatepointTailCallSequenceSafe(CallSeqEnd)))
+       !TailCallSeqSafe))
     SI.IsTailCall = false;
   if (IsGCTransition) {
     SmallVector<SDValue, 8> TSOps;
@@ -1175,6 +1210,33 @@ SDValue SelectionDAGBuilder::LowerAsSTATEPOINT(
   }
   // Remove original call node.
   DAG.DeleteNode(CallNode);
+
+  // A tail call needs no call frame: isStatepointTailCallSequenceSafe() has
+  // established that this one is empty (AdjStackUp == CalleePopBytes == 0), and
+  // the CALLSEQ_END closing it was just deleted.  Splice out the matching
+  // CALLSEQ_START too, otherwise the sequence is left unpaired -- which breaks
+  // ScheduleDAGRRList's call-resource bookkeeping, as CallSeqEndForStart never
+  // gets an entry for a start with no end.
+  //
+  // Redirect the start's chain output rather than the statepoint's chain input:
+  // with register arguments the statepoint chains off the last argument
+  // CopyToReg, not off the start, so rewiring the statepoint would strand the
+  // argument setup.
+  if (SI.IsTailCall && CallSeqStart) {
+    // Guard on the cached check rather than re-reading SI.IsTailCall: the
+    // empty-frame fact was established up front while CallSeqEnd was still
+    // alive, and the splice must not depend on the clearing of SI.IsTailCall
+    // that happened (or did not) a couple hundred lines earlier.
+    //
+    // The glue output has no replacement when the incoming chain does not
+    // produce glue (a TokenFactor, say).  Leave the sequence alone in that case
+    // -- an unpaired start is a latent bug, a dropped glue edge is a miscompile.
+    if (TailCallSeqSafe && !CallSeqStart->hasAnyUseOfValue(1)) {
+      DAG.ReplaceAllUsesOfValueWith(SDValue(CallSeqStart, 0),
+                                    CallSeqStart->getOperand(0));
+      DAG.DeleteNode(CallSeqStart);
+    }
+  }
 
   // Since we always emit CopyToRegs (even for local relocates), we must
   // update root, so that they are emitted before any local uses.

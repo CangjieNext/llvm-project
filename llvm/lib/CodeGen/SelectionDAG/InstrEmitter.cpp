@@ -285,7 +285,13 @@ Register InstrEmitter::getVR(SDValue Op,
   }
 
   DenseMap<SDValue, Register>::iterator I = VRBaseMap.find(Op);
-  assert(I != VRBaseMap.end() && "Node emitted out of order - late");
+  // Not an assert: with assertions compiled out, falling through here returns
+  // end()->second, i.e. a read past the end of the bucket array.  The garbage it
+  // yields is used as a register number and eventually indexes the use-list
+  // heads in MachineRegisterInfo, turning a scheduling bug into a wild pointer
+  // write far from its cause.  Fail loudly and in-place instead.
+  if (I == VRBaseMap.end())
+    report_fatal_error("Node emitted out of order - late");
   return I->second;
 }
 
