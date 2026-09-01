@@ -31,6 +31,7 @@
 #include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Constants.h"
@@ -213,11 +214,15 @@ void MachineInstr::addOperand(MachineFunction &MF, const MachineOperand &Op) {
   // instruction, only implicit regs are allowed beyond MCID->getNumOperands().
   // RegMask operands go between the explicit and implicit operands.
   Triple ModuleTriple(MF.getFunction().getParent()->getTargetTriple());
-  // 3750: AArch64::MRS
-  if (!(ModuleTriple.getArch() == Triple::aarch64 && getOpcode() == 3750)) {
+  // Cangjie's MRS (cj_get_fp_state) carries extra operands/results beyond the
+  // 2-slot MCID; skip the assert via the target hook (not a hardcoded opcode).
+  const TargetLowering *TLI = MF.getSubtarget().getTargetLowering();
+  assert(TLI && "Subtarget must provide a TargetLowering!");
+  if (!(ModuleTriple.getArch() == Triple::aarch64 && TLI &&
+        TLI->isCangjieGetFPStateInstr(getOpcode()))) {
     assert((MCID->isVariadic() || OpNo < MCID->getNumOperands() ||
             Op.isValidExcessOperand()) &&
-          "Trying to add an operand to a machine instr that is already done!");
+           "Trying to add an operand to a machine instr that is already done!");
   }
 
   MachineRegisterInfo *MRI = getRegInfo();
