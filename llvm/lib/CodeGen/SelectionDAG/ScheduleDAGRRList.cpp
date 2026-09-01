@@ -860,6 +860,12 @@ void ScheduleDAGRRList::UnscheduleNodeBottomUp(SUnit *SU) {
       assert(SeqEnd && "Call sequence start/end must be known");
       assert(!LiveRegDefs[CallResource]);
       assert(!LiveRegGens[CallResource]);
+      // A CALLSEQ_START whose CALLSEQ_END was deleted has no entry here.  With
+      // assertions compiled out, claiming the call resource anyway would leave
+      // LiveRegDefs set while LiveRegGens stays null -- a state that readers
+      // below dereference unconditionally.  Leave the resource unclaimed.
+      if (!SeqEnd)
+        continue;
       ++NumLiveRegs;
       LiveRegDefs[CallResource] = SU;
       LiveRegGens[CallResource] = SeqEnd;
@@ -1408,7 +1414,9 @@ DelayForLiveRegsBottomUp(SUnit *SU, SmallVectorImpl<unsigned> &LRegs) {
     if (Node->getMachineOpcode() == TII->getCallFrameDestroyOpcode()) {
       // Check the special calling-sequence resource.
       unsigned CallResource = TRI->getNumRegs();
-      if (LiveRegDefs[CallResource]) {
+      // LiveRegGens may be null if the sequence start was never paired with an
+      // end; treat that as "no call in flight" rather than dereferencing it.
+      if (LiveRegDefs[CallResource] && LiveRegGens[CallResource]) {
         SDNode *Gen = LiveRegGens[CallResource]->getNode();
         while (SDNode *Glued = Gen->getGluedNode())
           Gen = Glued;
@@ -1518,12 +1526,15 @@ SUnit *ScheduleDAGRRList::PickNodeToScheduleBottomUp() {
     SUnit *BtSU = nullptr;
     unsigned LiveCycle = std::numeric_limits<unsigned>::max();
     for (unsigned Reg : LRegs) {
-      if (LiveRegGens[Reg]->getHeight() < LiveCycle) {
+      if (LiveRegGens[Reg] && LiveRegGens[Reg]->getHeight() < LiveCycle) {
         BtSU = LiveRegGens[Reg];
         LiveCycle = BtSU->getHeight();
       }
     }
-    if (!WillCreateCycle(TrySU, BtSU))  {
+    // BtSU stays null when none of the interfering registers has a generator
+    // recorded.  There is nothing to backtrack to, so leave this interference
+    // for the copy/duplicate fallback below.
+    if (BtSU && !WillCreateCycle(TrySU, BtSU))  {
       // BacktrackBottomUp mutates Interferences!
       BacktrackBottomUp(TrySU, BtSU);
 
