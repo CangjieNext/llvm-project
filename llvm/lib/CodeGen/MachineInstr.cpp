@@ -31,6 +31,7 @@
 #include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Constants.h"
@@ -213,11 +214,18 @@ void MachineInstr::addOperand(MachineFunction &MF, const MachineOperand &Op) {
   // instruction, only implicit regs are allowed beyond MCID->getNumOperands().
   // RegMask operands go between the explicit and implicit operands.
   Triple ModuleTriple(MF.getFunction().getParent()->getTargetTriple());
-  // 3750: AArch64::MRS
-  if (!(ModuleTriple.getArch() == Triple::aarch64 && getOpcode() == 3750)) {
+  // Cangjie lowers cj_get_fp_state into an MRS MachineNode carrying an
+  // extra fptosi operand and extra results; the MRS MCID only declares 2
+  // slots, so skip the "operand already done" assert for it. Use the target
+  // hook (Opcode == AArch64::MRS by symbol) instead of a hardcoded enum
+  // number, which drifts whenever AArch64 .td files change. See the sibling
+  // exemption in InstrEmitter.cpp.
+  const TargetLowering *TLI = MF.getSubtarget().getTargetLowering();
+  if (!(ModuleTriple.getArch() == Triple::aarch64 && TLI &&
+        TLI->isCangjieGetFPStateInstr(getOpcode()))) {
     assert((MCID->isVariadic() || OpNo < MCID->getNumOperands() ||
             Op.isValidExcessOperand()) &&
-          "Trying to add an operand to a machine instr that is already done!");
+           "Trying to add an operand to a machine instr that is already done!");
   }
 
   MachineRegisterInfo *MRI = getRegInfo();
