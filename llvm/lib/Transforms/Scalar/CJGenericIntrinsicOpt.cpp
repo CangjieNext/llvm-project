@@ -202,7 +202,32 @@ static bool processAssignGeneric(CallInst *CI, MemorySSAUpdater &MSSAU) {
   return false;
 }
 
+// Return the exact type kind of \p GV as an i8 constant if the TypeInfo is
+// fully defined in this module, otherwise nullptr.
+static Constant *getExactTypeKind(GlobalVariable *GV) {
+  if (!GV->hasInitializer())
+    return nullptr;
+  auto *Data = dyn_cast<ConstantStruct>(GV->getInitializer());
+  if (!Data || Data->getNumOperands() <= CIT_TYPE)
+    return nullptr;
+  auto *Kind = dyn_cast<ConstantInt>(Data->getOperand(CIT_TYPE));
+  if (!Kind || !Kind->getType()->isIntegerTy(8))
+    return nullptr;
+  return Kind;
+}
+
+// %x = icmp slt i8 %kind, 0
+static bool isReferenceCheckingCmp(ICmpInst *ICMP, LoadInst *LI) {
+  if (ICMP->getPredicate() != CmpInst::ICMP_SLT)
+    return false;
+  if (ICMP->getOperand(0) != LI)
+    return false;
+  auto *Var = dyn_cast<ConstantInt>(ICMP->getOperand(1));
+  return Var && Var->isNullValue();
+}
+
 static bool eliminateReferenceChecking(Function &F, MemorySSAUpdater &MSSAU) {
+  bool Changed = false;
   SmallVector<LoadInst *> LoadTIs;
   SmallVector<Instruction *> RemoveInsts;
   for (Instruction &I : instructions(F)) {
@@ -225,26 +250,32 @@ static bool eliminateReferenceChecking(Function &F, MemorySSAUpdater &MSSAU) {
     if (!Res)
       continue;
 
-    for (User *U : LI->users()) {
+    // Fold the canonical `icmp slt i8 %kind, 0` users directly to the known
+    // reference-ness result.
+    for (User *U : make_early_inc_range(LI->users())) {
       ICmpInst *ICMP = dyn_cast<ICmpInst>(U);
-      if (!ICMP) {
-        report_fatal_error("Load TypeInfo is used for icmp slt 0!");
-      }
-      // %x = icmp slt i8 %kind, 0
-      if (ICMP->getSignedPredicate() != CmpInst::ICMP_SLT) {
-        report_fatal_error("Load TypeInfo is used for icmp slt 0!");
-      }
-      ConstantInt *Var = dyn_cast<ConstantInt>(ICMP->getOperand(1));
-      if (!Var->isNullValue()) {
-        report_fatal_error("Load TypeInfo is used for icmp slt 0!");
-      }
+      if (!ICMP || !isReferenceCheckingCmp(ICMP, LI))
+        continue;
       ICMP->replaceAllUsesWith(Res);
-      RemoveInsts.push_back(ICMP);
+      ICMP->eraseFromParent();
+      Changed = true;
+    }
+
+    // Earlier passes (GVN PRE, LoopRotate, SimplifyCFG, ...) may have
+    // forwarded the loaded kind into a phi/select or another compare instead
+    // of the canonical icmp. If the TypeInfo is defined in this module the
+    // kind is a compile-time constant, so just replace the load with it.
+    // Otherwise leave the remaining users alone; the load is still valid.
+    if (!LI->use_empty()) {
+      Constant *Kind = getExactTypeKind(GV);
+      if (!Kind || Kind->getType() != LI->getType())
+        continue;
+      LI->replaceAllUsesWith(Kind);
     }
     RemoveInsts.push_back(LI);
   }
   if (RemoveInsts.empty())
-    return false;
+    return Changed;
 
   for (Instruction *I : RemoveInsts) {
     MSSAU.removeMemoryAccess(I);
