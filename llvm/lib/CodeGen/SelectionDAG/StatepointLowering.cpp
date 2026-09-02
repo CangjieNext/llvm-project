@@ -1310,7 +1310,15 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
       (TT.isAArch64() || TT.isX86()) &&
       !needToDisableTailCall(I, DAG.getTargetLoweringInfo(),
                              I.isMustTailCall()) &&
-      isInTailCallPosition(I, DAG.getTarget());
+      isInTailCallPosition(I, DAG.getTarget()) &&
+      // STATEPOINT_TAIL_CALL lowers an indirect call target to a register
+      // jump. If that target must live in a callee-saved register across an
+      // intervening call, the epilogue's callee-saved restore clobbers it
+      // before the tail jump. Direct (symbol) targets use pc-relative tail
+      // jumps and are unaffected, so only allow tail statepoints for direct
+      // callees until indirect targets are lowered to a caller-saved
+      // register after the epilogue.
+      I.getActualCalledFunction() != nullptr;
 
   SI.ActualCalledFunction = I.getActualCalledFunction();
 
