@@ -8,7 +8,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Placeholder for the upcoming cjstring pool merge pass (currently noop).
+// This pass merges the per-string cjstring data buffers that CodeGen emits
+// (deferred pooling) into one shared pool, deduplicating identical strings.
 //
 //===----------------------------------------------------------------------===//
 
