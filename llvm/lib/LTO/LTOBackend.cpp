@@ -48,6 +48,7 @@
 #include "llvm/Transforms/Scalar/CJRuntimeLowering.h"
 #include "llvm/Transforms/Scalar/CJSimpleOpt.h"
 #include "llvm/Transforms/Scalar/CJSpecificOpt.h"
+#include "llvm/Transforms/Scalar/CJStringPoolMerge.h"
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Scalar/PlaceSafepoints.h"
 #include "llvm/Transforms/Utils/FunctionImportUtils.h"
@@ -392,6 +393,9 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   } else if (IsThinLTO) {
     MPM.addPass(PB.buildThinLTODefaultPipeline(OL, ImportSummary));
   } else {
+    // Hook for the upcoming cjstring pool merge pass (currently noop).
+    if (CJPipeline)
+      MPM.addPass(CJStringPoolMerge());
     MPM.addPass(PB.buildLTODefaultPipeline(OL, ExportSummary));
   }
 

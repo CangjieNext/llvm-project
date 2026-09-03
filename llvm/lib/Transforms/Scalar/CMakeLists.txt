@@ -27,6 +27,7 @@ add_llvm_component_library(LLVMScalarOpts
   CJLoopFloatOpt.cpp
   CJObjectReuseOpt.cpp
   CJSpecificOpt.cpp
+  CJStringPoolMerge.cpp
   CJRewriteStatepoint.cpp
   CJFillMetadata.cpp
   CJGCLiveAnalysis.cpp
