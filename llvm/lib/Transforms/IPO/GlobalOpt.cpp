@@ -277,6 +277,10 @@ CleanupPointerRootUsers(GlobalVariable *GV,
 /// clean up the easy and obvious cruft.  This returns true if it made a change.
 static bool CleanupConstantGlobalUsers(GlobalVariable *GV,
                                        const DataLayout &DL) {
+  // A cjstring literal is a black hole: its initializer stays unfoldable
+  // until CJStringPoolMerge fixes the final pool layout.
+  if (GV->hasAttribute("cjstring_literal"))
+    return false;
   Constant *Init = GV->getInitializer();
   SmallVector<User *, 8> WorkList(GV->users());
   SmallPtrSet<User *, 8> Visited;
@@ -1689,7 +1693,10 @@ processGlobal(GlobalValue &GV,
   if (!GVar)
     return Changed;
 
-  if (GVar->isConstant() || !GVar->hasInitializer())
+  // A cjstring literal is a black hole until CJStringPoolMerge fixes the
+  // final pool layout: do not scalarize, const-fold or otherwise rewrite it.
+  if (GVar->isConstant() || !GVar->hasInitializer() ||
+      GVar->hasAttribute("cjstring_literal"))
     return Changed;
 
   return processInternalGlobal(GVar, GS, GetTTI, GetTLI, LookupDomTree) ||
@@ -2123,7 +2130,8 @@ static bool EvaluateStaticConstructor(Function *F, const DataLayout &DL,
     for (const auto &Pair : NewInitializers)
       Pair.first->setInitializer(Pair.second);
     for (GlobalVariable *GV : Eval.getInvariants())
-      GV->setConstant(true);
+      if (!GV->hasAttribute("cjstring_literal"))
+        GV->setConstant(true);
   }
 
   return EvalSuccess;
