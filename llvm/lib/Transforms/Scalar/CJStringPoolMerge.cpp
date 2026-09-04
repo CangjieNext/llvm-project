@@ -9,31 +9,29 @@
 //===----------------------------------------------------------------------===//
 //
 // Merge the per-string cjstring data buffers ($const_cjstring_data.*) that
-// CodeGen emits (deferred pooling) into a single shared byte pool.
+// CodeGen emits (deferred pooling) into one shared byte pool, and repoint
+// the string literals from {buffer, 0, len} to {mergedPool, newStart, len}.
 //
 // Buffer object layout (RawArray<UInt8> style):
 //   { i8* klassInfo, i64 length, [N x i8] data }
 // cjstring literal layout:
 //   { i8 addrspace(1)* bufferPtr, i32 start, i32 length }
 //
-// Every buffer holds exactly one string and every literal has start == 0.
-// Buffer contents are packed into the shared pool (identical contents and
-// substrings share storage), then each buffer global is RAUW'd with a
-// same-typed alias constant bitcast(gep(i8, sharedPool), base) pointing at
-// its relocated content. This transparently fixes up every use — cjstring
-// literals, llvm.cj.gcwrite.ref handles and memcpy GEPs alike.
+// Every buffer holds exactly one string and every literal initially has
+// start == 0. A buffer whose uses all bottom out in cjstring literal
+// initializers is packed into the shared pool (identical contents and
+// substrings share storage) and each of its literals is repointed.
+// The literal's first field keeps pointing at the start of a real RawArray
+// object (the merged pool), so String.rawData() stays valid; the start
+// field becomes a view offset into the pool, exactly like the legacy
+// per-package pool layout.
 //
-// Why alias instead of repointing literals to {sharedPool, newStart}: with
-// LTO, the per-module pre-opt pipeline has already folded the (all-zero)
-// start fields into plain integer instructions before this pass runs at
-// LTOBackend, so changing a literal's start would leave stale baked zeros
-// behind. Aliasing never changes any offset, so it is immune to baked
-// start values and also composes correctly if a module is merged twice.
-//
-// Correctness assumption: buffer bytes are only ever read through the +16
-// data convention (CJ_MCC_AcquireRawData is ptr + sizeof(MArray) and never
-// inspects the header), so a relocated buffer does not need its 16-byte
-// header preserved.
+// Repointing changes the start field, which is only safe if no consumer
+// has baked the old (zero) start into plain integer instructions. To
+// guarantee that, CodeGen emits cjstring literals as NON-constant globals
+// (a black hole): pre-link optimization cannot fold field loads, and this
+// pass flips every cjstring literal back to constant once the final pool
+// layout is fixed. Buffers with direct (non-literal) users are not merged.
 //
 // The pass runs exactly once per linked unit: non-LTO builds run it in the
 // per-module pipeline (skipped when --cangjie-lto pre-opt is active), full
@@ -45,6 +43,8 @@
 
 #include "llvm/Transforms/Scalar/CJStringPoolMerge.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -59,6 +59,7 @@
 using namespace llvm;
 
 STATISTIC(NumBuffersSeen, "Number of cjstring data buffers found");
+STATISTIC(NumMerged, "Number of buffers merged into the shared pool");
 STATISTIC(BytesBefore, "Total buffer bytes before merging");
 STATISTIC(BytesAfter, "Shared pool bytes after merging");
 
@@ -72,6 +73,8 @@ static cl::opt<bool> CJStringPoolMergeVerbose(
 
 static const char *CJSTRING_DATA_ATTR = "cjstring_data";
 static const char *CJSTRING_DATA_PREFIX = "$const_cjstring_data.";
+static const char *CJSTRING_LITERAL_ATTR = "cjstring_literal";
+static const char *CJSTRING_LITERAL_PREFIX = "$const_cjstring.";
 
 namespace {
 
@@ -87,6 +90,81 @@ bool isStringBuffer(const GlobalVariable &gv) {
          gv.getName().startswith(CJSTRING_DATA_PREFIX);
 }
 
+bool isStringLiteral(const GlobalVariable &gv) {
+  return gv.hasAttribute(CJSTRING_LITERAL_ATTR) ||
+         gv.getName().startswith(CJSTRING_LITERAL_PREFIX);
+}
+
+// A GV holding a String record value (literal record or String-typed global
+// variable initialized from a literal).
+bool isStringRecordGV(const GlobalVariable &gv) {
+  auto *st = dyn_cast<StructType>(gv.getValueType());
+  return st && st->hasName() &&
+         st->getName().startswith("record.std.core:String");
+}
+
+// Every use of the buffer must bottom out in cjstring literal initializers.
+// BFS only follows cast/GEP ConstantExpr chains and constant aggregates; it
+// stops at literal GlobalVariables and never recurses into their users
+// (those are loads of the literal, not direct users of the buffer).
+// Returns false for buffers with any direct (instruction) user, which are
+// not mergeable.
+bool collectLiterals(GlobalVariable *buf, SmallVectorImpl<GlobalVariable *> &lits) {
+  SmallVector<Constant *, 8> work;
+  for (User *u : buf->users()) {
+    auto *c = dyn_cast<Constant>(u);
+    if (!c)
+      return false;
+    work.push_back(c);
+  }
+  SmallPtrSet<Constant *, 8> seen;
+  while (!work.empty()) {
+    Constant *c = work.pop_back_val();
+    if (!seen.insert(c).second)
+      continue;
+    if (auto *ce = dyn_cast<ConstantExpr>(c)) {
+      if (!ce->isCast() && ce->getOpcode() != Instruction::GetElementPtr)
+        return false;
+    }
+    for (User *u : c->users()) {
+      if (auto *gv = dyn_cast<GlobalVariable>(u)) {
+        if (!isStringLiteral(*gv) && !isStringRecordGV(*gv))
+          return false;
+        lits.push_back(gv);
+        continue;
+      }
+      auto *cu = dyn_cast<Constant>(u);
+      if (!cu)
+        return false;
+      work.push_back(cu);
+    }
+  }
+  return true;
+}
+
+// Replace `from` by `to` (same type) inside the constant expression tree.
+// Returns the input unchanged when `from` does not occur.
+Constant *substituteConstant(Constant *c, Constant *from, Constant *to) {
+  if (c == from)
+    return to;
+  auto *ce = dyn_cast<ConstantExpr>(c);
+  if (!ce || (!ce->isCast() && ce->getOpcode() != Instruction::GetElementPtr))
+    return c;
+  SmallVector<Constant *, 4> ops;
+  bool changed = false;
+  for (auto &op : ce->operands()) {
+    auto *nc = substituteConstant(cast<Constant>(op), from, to);
+    changed |= nc != op.get();
+    ops.push_back(nc);
+  }
+  if (!changed)
+    return c;
+  Type *srcTy = ce->getOpcode() == Instruction::GetElementPtr
+                    ? ce->getOperand(0)->getType()->getPointerElementType()
+                    : nullptr;
+  return ce->getWithOperands(ops, ce->getType(), false, srcTy);
+}
+
 // Longest k such that the k-byte suffix of `merged` equals the k-byte
 // prefix of `content`.
 size_t suffixPrefixOverlap(StringRef merged, StringRef content) {
@@ -98,13 +176,12 @@ size_t suffixPrefixOverlap(StringRef merged, StringRef content) {
   return 0;
 }
 
-} // end anonymous namespace
+using MergeableList =
+    std::vector<std::pair<BufferInfo *, SmallVector<GlobalVariable *, 4>>>;
 
-PreservedAnalyses CJStringPoolMerge::run(Module &M,
-                                         ModuleAnalysisManager &) const {
-  if (!CJStringPoolMergeEnable)
-    return PreservedAnalyses::all();
-
+// Collect every cjstring data buffer that still carries a RawArray-style
+// {klass, length, bytes} initializer.
+std::vector<BufferInfo> collectBuffers(Module &M) {
   std::vector<BufferInfo> buffers;
   for (auto &gv : M.globals()) {
     if (!isStringBuffer(gv))
@@ -121,24 +198,35 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
     info.bytes = cda->getAsString().str();
     buffers.push_back(std::move(info));
   }
-  NumBuffersSeen += buffers.size();
-  if (buffers.size() < 2)
-    return PreservedAnalyses::all();
+  return buffers;
+}
 
-  // Pack all buffer contents, longest first so identical contents and
-  // substrings share storage.
-  std::vector<BufferInfo *> live;
-  for (auto &b : buffers)
-    if (!b.gv->use_empty())
-      live.push_back(&b);
-  std::sort(live.begin(), live.end(),
-            [](const BufferInfo *a, const BufferInfo *b) {
-              return a->bytes.size() != b->bytes.size()
-                         ? a->bytes.size() > b->bytes.size()
-                         : a->bytes < b->bytes;
-            });
+// Keep only buffers used exclusively by cjstring literals (directly or via
+// constant chains); buffers with instruction users are not mergeable.
+MergeableList filterMergeable(std::vector<BufferInfo> &buffers) {
+  MergeableList mergeable;
+  for (auto &b : buffers) {
+    if (b.gv->use_empty())
+      continue;
+    SmallVector<GlobalVariable *, 4> lits;
+    if (collectLiterals(b.gv, lits) && !lits.empty())
+      mergeable.emplace_back(&b, std::move(lits));
+  }
+  return mergeable;
+}
+
+// Pack the contents into one byte pool, longest first so identical contents
+// and substrings share storage; sets BufferInfo::base for each buffer.
+// start is an i32 in the literal record, so a pool beyond 4 GiB cannot be
+// addressed: fall back to no merging in that (unrealistic) case.
+std::string layoutMergedPool(MergeableList &mergeable) {
+  std::sort(mergeable.begin(), mergeable.end(), [](const auto &a, const auto &b) {
+    return a.first->bytes.size() != b.first->bytes.size()
+               ? a.first->bytes.size() > b.first->bytes.size()
+               : a.first->bytes < b.first->bytes;
+  });
   std::string merged;
-  for (auto *b : live) {
+  for (auto &[b, lits] : mergeable) {
     if (b->bytes.empty()) {
       b->base = 0;
       continue;
@@ -151,63 +239,149 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
     }
     b->base = pos;
   }
-  if (merged.size() > UINT32_MAX || live.empty())
-    return PreservedAnalyses::all();
+  if (merged.size() > UINT32_MAX) {
+    mergeable.clear();
+    merged.clear();
+  }
+  return merged;
+}
 
-  uint64_t before = 0;
-  for (auto *b : live)
-    before += b->bytes.size() + 16;
-  BytesBefore += before;
-  BytesAfter += merged.size() + 16;
-
-  // Emit the shared pool with the same RawArray shape CodeGen emits.
+// Emit the shared pool with the same RawArray shape CodeGen emits.
+GlobalVariable *emitMergedPool(Module &M, const MergeableList &mergeable,
+                               const std::string &merged) {
   auto &ctx = M.getContext();
-  auto *i8Ty = Type::getInt8Ty(ctx);
   auto *i8PtrTy = Type::getInt8PtrTy(ctx);
   auto *data = ConstantDataArray::getString(ctx, merged, false);
-  auto *poolTy = StructType::get(ctx, {i8PtrTy, Type::getInt64Ty(ctx),
-                                       data->getType()});
+  auto *poolTy =
+      StructType::get(ctx, {i8PtrTy, Type::getInt64Ty(ctx), data->getType()});
   auto *poolInit = ConstantStruct::get(
-      poolTy, {live.front()->klass,
+      poolTy, {mergeable.front().first->klass,
                ConstantInt::getSigned(Type::getInt64Ty(ctx),
                                       static_cast<int64_t>(merged.size())),
                data});
-  auto *mergedGV = new GlobalVariable(
-      M, poolTy, true, GlobalValue::PrivateLinkage, poolInit,
-      CJSTRING_DATA_PREFIX + std::string("merged"));
+  auto *mergedGV = new GlobalVariable(M, poolTy, true,
+                                      GlobalValue::PrivateLinkage, poolInit,
+                                      CJSTRING_DATA_PREFIX + std::string("merged"));
   mergedGV->addAttribute(CJSTRING_DATA_ATTR);
   uint64_t maxAlign = 0;
-  for (auto *b : live)
+  for (auto &[b, lits] : mergeable)
     if (b->gv->getAlign())
       maxAlign = std::max(maxAlign, b->gv->getAlign()->value());
   if (maxAlign)
     mergedGV->setAlignment(Align(maxAlign));
+  return mergedGV;
+}
 
-  // Replace every buffer with a same-typed alias into the shared pool.
-  Constant *mergedI8 = ConstantExpr::getBitCast(mergedGV, i8PtrTy);
-  for (auto *b : live) {
-    Constant *gep = ConstantExpr::getGetElementPtr(
-        i8Ty, mergedI8, ConstantInt::get(Type::getInt64Ty(ctx), b->base));
-    Constant *alias = ConstantExpr::getBitCast(gep, b->gv->getType());
-    b->gv->replaceAllUsesWith(alias);
+// Repoint one literal-associated global to {mergedPool, base, len}. Two
+// kinds: String record literals get a rewritten record initializer; GC
+// root-holder / slot globals get their held pointer substituted for the
+// pool start (a real object), preserving the constant-expression shape.
+void repointLiteral(Module &M, GlobalVariable *lit, GlobalVariable *buf,
+                    GlobalVariable *mergedGV, Constant *mergedAsBufTy,
+                    int64_t base) {
+  auto *oldInit = lit->getInitializer();
+  if (!oldInit)
+    return;
+  auto &ctx = M.getContext();
+  auto *i32Ty = Type::getInt32Ty(ctx);
+  if (auto *st = dyn_cast<ConstantStruct>(oldInit);
+      st && st->getNumOperands() == 3 && isa<StructType>(st->getType())) {
+    auto *i8PtrTy = Type::getInt8PtrTy(ctx);
+    Constant *ptr = ConstantExpr::getBitCast(mergedGV, i8PtrTy);
+    if (st->getOperand(0)->getType() != ptr->getType())
+      ptr = ConstantExpr::getAddrSpaceCast(ptr, st->getOperand(0)->getType());
+    lit->setInitializer(ConstantStruct::get(
+        cast<StructType>(st->getType()),
+        {ptr, ConstantInt::getSigned(i32Ty, base), st->getOperand(2)}));
+    return;
   }
+  if (auto *newInit = substituteConstant(oldInit, buf, mergedAsBufTy))
+    if (newInit != oldInit)
+      lit->setInitializer(newInit);
+  // A literal record may have been scalarized into per-field slots named
+  // <literal>.0/.1/.2 (object pointer / start / length). The .0 slot was
+  // repointed above; keep the .1 (start) slot in sync.
+  if (!lit->getName().endswith(".0"))
+    return;
+  auto *s1 = dyn_cast_or_null<GlobalVariable>(
+      M.getNamedValue(lit->getName().drop_back(2).str() + ".1"));
+  if (s1)
+    if (auto *ci = dyn_cast_or_null<ConstantInt>(s1->getInitializer()))
+      if (ci->isZero() && ci->getType()->isIntegerTy(32))
+        s1->setInitializer(ConstantInt::getSigned(i32Ty, base));
+}
 
-  // Erase the old buffers; never leave a duplicate behind.
+void repointLiterals(Module &M, MergeableList &mergeable,
+                     GlobalVariable *mergedGV) {
+  for (auto &[b, lits] : mergeable) {
+    Constant *mergedAsBufTy =
+        ConstantExpr::getBitCast(mergedGV, b->gv->getType());
+    for (auto *lit : lits)
+      repointLiteral(M, lit, b->gv, mergedGV, mergedAsBufTy, b->base);
+  }
+}
+
+// Erase the merged buffers; never leave a duplicate behind.
+unsigned eraseMergedBuffers(MergeableList &mergeable) {
   unsigned numErased = 0;
-  for (auto &b : buffers) {
-    b.gv->removeDeadConstantUsers();
-    if (b.gv->use_empty()) {
-      b.gv->eraseFromParent();
+  for (auto &[b, lits] : mergeable) {
+    b->gv->removeDeadConstantUsers();
+    if (b->gv->use_empty()) {
+      b->gv->eraseFromParent();
       ++numErased;
     } else {
-      errs() << "CJStringPoolMerge: " << b.gv->getName()
+      errs() << "CJStringPoolMerge: " << b->gv->getName()
              << " still has users after merging, kept (duplicate!)\n";
     }
   }
+  return numErased;
+}
+
+// Black-hole teardown: literal records that were emitted as non-constant
+// (marked with cjstring_literal) become constant again now that the pool
+// layout is final. With recordsOnly, mutable String globals (no attribute)
+// and GC root-holder / slot globals (not records) stay untouched.
+void restoreConstantLiterals(Module &M, bool recordsOnly) {
+  for (auto &gv : M.globals())
+    if (isStringLiteral(gv) && (!recordsOnly || isStringRecordGV(gv)))
+      gv.setConstant(true);
+}
+
+} // end anonymous namespace
+
+PreservedAnalyses CJStringPoolMerge::run(Module &M,
+                                         ModuleAnalysisManager &) const {
+  // Even with merging disabled, restore constness: CodeGen emitted the
+  // literals as non-constant black holes and expects this pass to flip them.
+  if (!CJStringPoolMergeEnable) {
+    restoreConstantLiterals(M, false);
+    return PreservedAnalyses::none();
+  }
+
+  auto buffers = collectBuffers(M);
+  NumBuffersSeen += buffers.size();
+  auto mergeable = filterMergeable(buffers);
+  std::string merged = layoutMergedPool(mergeable);
+
+  uint64_t before = 0;
+  for (auto &[b, lits] : mergeable)
+    before += b->bytes.size() + 16;
+  BytesBefore += before;
+  if (!mergeable.empty())
+    BytesAfter += merged.size() + 16;
+
+  if (!mergeable.empty()) {
+    auto *mergedGV = emitMergedPool(M, mergeable, merged);
+    repointLiterals(M, mergeable, mergedGV);
+    NumMerged += mergeable.size();
+  }
+  unsigned numErased = eraseMergedBuffers(mergeable);
+  restoreConstantLiterals(M, true);
 
   if (CJStringPoolMergeVerbose)
     errs() << "CJStringPoolMerge: buffers=" << buffers.size()
-           << " merged=" << numErased << " bytes " << before << " -> "
-           << merged.size() + 16 << "\n";
-  return numErased ? PreservedAnalyses::none() : PreservedAnalyses::all();
+           << " merged=" << mergeable.size() << " erased=" << numErased
+           << " bytes " << before << " -> "
+           << (mergeable.empty() ? 0 : merged.size() + 16) << "\n";
+  return PreservedAnalyses::none();
 }

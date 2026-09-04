@@ -393,7 +393,7 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   } else if (IsThinLTO) {
     MPM.addPass(PB.buildThinLTODefaultPipeline(OL, ImportSummary));
   } else {
-    // Hook for the upcoming cjstring pool merge pass (currently noop).
+    // Merge cjstring pools once per linked unit before the final pipeline.
     if (CJPipeline)
       MPM.addPass(CJStringPoolMerge());
     MPM.addPass(PB.buildLTODefaultPipeline(OL, ExportSummary));
