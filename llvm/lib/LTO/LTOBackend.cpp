@@ -391,6 +391,12 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   } else if (Conf.UseDefaultPipeline) {
     MPM.addPass(PB.buildPerModuleDefaultPipeline(OL));
   } else if (IsThinLTO) {
+    // Merge cjstring pools once per linked unit before the final pipeline.
+    // ThinLTO runs one backend per module and private cjstring buffers are
+    // never imported, so each backend merges its own module's buffers,
+    // mirroring the non-LTO per-module placement.
+    if (CJPipeline)
+      MPM.addPass(CJStringPoolMerge());
     MPM.addPass(PB.buildThinLTODefaultPipeline(OL, ImportSummary));
   } else {
     // Merge cjstring pools once per linked unit before the final pipeline.
