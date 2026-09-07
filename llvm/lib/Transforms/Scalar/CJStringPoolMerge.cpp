@@ -82,7 +82,6 @@ static const char *CJSTRING_DATA_ATTR = "cjstring_data";
 static const char *CJSTRING_DATA_PREFIX = "$const_cjstring_data.";
 static const char *CJSTRING_DEFERRED_ATTR = "cjstring_deferred";
 static const char *CJSTRING_LITERAL_ATTR = "cjstring_literal";
-static const char *CJSTRING_LITERAL_PREFIX = "$const_cjstring.";
 
 // RawArray buffer layout: {i8* klass, i64 length, [N x i8] data}.
 constexpr unsigned BUFFER_FIELD_COUNT = 3;
@@ -109,8 +108,7 @@ bool isStringBuffer(const GlobalVariable &gv) {
 }
 
 bool isStringLiteral(const GlobalVariable &gv) {
-  return gv.hasAttribute(CJSTRING_LITERAL_ATTR) ||
-         gv.getName().startswith(CJSTRING_LITERAL_PREFIX);
+  return gv.hasAttribute(CJSTRING_LITERAL_ATTR);
 }
 
 // A GV holding a String record value (literal record or String-typed global
@@ -309,9 +307,10 @@ GlobalVariable *emitMergedPool(Module &M, const MergeableList &mergeable,
 }
 
 // Repoint one literal-associated global to {mergedPool, base, len}. Two
-// kinds: String record literals get a rewritten record initializer; GC
-// root-holder / slot globals get their held pointer substituted for the
-// pool start (a real object), preserving the constant-expression shape.
+// kinds: String record literals get a rewritten record initializer; other
+// constant holders (e.g. aggregates referencing the buffer via constant
+// expressions) get the buffer reference substituted for the pool start (a
+// real object), preserving the constant-expression shape.
 void repointLiteral(Module &M, GlobalVariable *lit, GlobalVariable *buf,
                     GlobalVariable *mergedGV, Constant *mergedAsBufTy,
                     int64_t base) {
@@ -367,7 +366,7 @@ unsigned eraseMergedBuffers(MergeableList &mergeable) {
 // Black-hole teardown: literal records that were emitted as non-constant
 // (marked with cjstring_literal) become constant again now that the pool
 // layout is final. With recordsOnly, mutable String globals (no attribute)
-// and GC root-holder / slot globals (not records) stay untouched.
+// stay untouched.
 void restoreConstantLiterals(Module &M, bool recordsOnly) {
   for (auto &gv : M.globals())
     if (isStringLiteral(gv) && (!recordsOnly || isStringRecordGV(gv)))
