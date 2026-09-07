@@ -34,8 +34,15 @@
 // layout is fixed. Buffers with direct (non-literal) users are not merged.
 //
 // The pass runs exactly once per linked unit: non-LTO builds run it in the
-// per-module pipeline (skipped when --cangjie-lto pre-opt is active), full
-// LTO builds run it in LTOBackend before buildLTODefaultPipeline.
+// per-module pipeline (skipped when --cangjie-lto pre-opt is active), LTO
+// builds run it in LTOBackend before the full/thin default pipeline.
+//
+// Only buffers emitted by the deferred-pooling CodeGen are mergeable; they
+// carry the "cjstring_deferred" attribute. Legacy per-package pools from
+// older compilers (e.g. prebuilt .bc) share the "cjstring_data" attribute
+// and the "$const_cjstring_data." name prefix, but their literals have
+// nonzero start offsets and possibly already-folded consumers, so they are
+// left completely untouched.
 //
 //===----------------------------------------------------------------------===//
 
@@ -73,8 +80,20 @@ static cl::opt<bool> CJStringPoolMergeVerbose(
 
 static const char *CJSTRING_DATA_ATTR = "cjstring_data";
 static const char *CJSTRING_DATA_PREFIX = "$const_cjstring_data.";
+static const char *CJSTRING_DEFERRED_ATTR = "cjstring_deferred";
 static const char *CJSTRING_LITERAL_ATTR = "cjstring_literal";
 static const char *CJSTRING_LITERAL_PREFIX = "$const_cjstring.";
+
+// RawArray buffer layout: {i8* klass, i64 length, [N x i8] data}.
+constexpr unsigned BUFFER_FIELD_COUNT = 3;
+constexpr unsigned BUFFER_DATA_FIELD = 2; // index of the byte-array field
+// cjstring literal record layout: {i8 addrspace(1)* buffer, i32 start, i32 len}.
+constexpr unsigned LITERAL_FIELD_COUNT = 3;
+constexpr unsigned LITERAL_LEN_FIELD = 2; // index of the length field
+// Bytes of the fixed RawArray header: klass pointer (8B) + length (8B).
+constexpr uint64_t RAWARRAY_HEADER_BYTES = 16;
+// Bit width of the start field in the literal record (i32).
+constexpr unsigned START_FIELD_BITS = 32;
 
 namespace {
 
@@ -86,8 +105,9 @@ struct BufferInfo {
 };
 
 bool isStringBuffer(const GlobalVariable &gv) {
-  return gv.hasAttribute(CJSTRING_DATA_ATTR) ||
-         gv.getName().startswith(CJSTRING_DATA_PREFIX);
+  // Only deferred-pooling buffers are mergeable. Legacy pools must not be
+  // matched by name prefix or the older cjstring_data attribute.
+  return gv.hasAttribute(CJSTRING_DEFERRED_ATTR);
 }
 
 bool isStringLiteral(const GlobalVariable &gv) {
@@ -166,14 +186,32 @@ Constant *substituteConstant(Constant *c, Constant *from, Constant *to) {
 }
 
 // Longest k such that the k-byte suffix of `merged` equals the k-byte
-// prefix of `content`.
+// prefix of `content`. Built on the KMP failure function of `content` plus
+// one scan over the only bytes that can participate (the tail of `merged`),
+// i.e. O(|content|) per call instead of the quadratic worst case of trying
+// every candidate overlap length.
 size_t suffixPrefixOverlap(StringRef merged, StringRef content) {
-  size_t maxK = std::min(merged.size(), content.size());
-  for (size_t k = maxK; k > 0; --k) {
-    if (merged.substr(merged.size() - k) == content.substr(0, k))
-      return k;
+  size_t m = content.size();
+  if (m == 0 || merged.empty())
+    return 0;
+  std::vector<size_t> fail(m, 0);
+  for (size_t i = 1, k = 0; i < m; ++i) {
+    while (k && content[i] != content[k])
+      k = fail[k - 1];
+    if (content[i] == content[k])
+      ++k;
+    fail[i] = k;
   }
-  return 0;
+  size_t tailLen = std::min(merged.size(), m);
+  StringRef tail = merged.substr(merged.size() - tailLen);
+  size_t k = 0;
+  for (char ch : tail) {
+    while (k && ch != content[k])
+      k = fail[k - 1];
+    if (ch == content[k])
+      ++k;
+  }
+  return k;
 }
 
 using MergeableList =
@@ -187,8 +225,8 @@ std::vector<BufferInfo> collectBuffers(Module &M) {
     if (!isStringBuffer(gv))
       continue;
     auto *init = dyn_cast_or_null<ConstantStruct>(gv.getInitializer());
-    auto *cda = init && init->getNumOperands() == 3
-                    ? dyn_cast<ConstantDataArray>(init->getOperand(2))
+    auto *cda = init && init->getNumOperands() == BUFFER_FIELD_COUNT
+                    ? dyn_cast<ConstantDataArray>(init->getOperand(BUFFER_DATA_FIELD))
                     : nullptr;
     if (!cda || !cda->isString())
       continue;
@@ -285,14 +323,16 @@ void repointLiteral(Module &M, GlobalVariable *lit, GlobalVariable *buf,
   auto &ctx = M.getContext();
   auto *i32Ty = Type::getInt32Ty(ctx);
   if (auto *st = dyn_cast<ConstantStruct>(oldInit);
-      st && st->getNumOperands() == 3 && isa<StructType>(st->getType())) {
+      st && st->getNumOperands() == LITERAL_FIELD_COUNT &&
+      isa<StructType>(st->getType())) {
     auto *i8PtrTy = Type::getInt8PtrTy(ctx);
     Constant *ptr = ConstantExpr::getBitCast(mergedGV, i8PtrTy);
     if (st->getOperand(0)->getType() != ptr->getType())
       ptr = ConstantExpr::getAddrSpaceCast(ptr, st->getOperand(0)->getType());
     lit->setInitializer(ConstantStruct::get(
         cast<StructType>(st->getType()),
-        {ptr, ConstantInt::getSigned(i32Ty, base), st->getOperand(2)}));
+        {ptr, ConstantInt::getSigned(i32Ty, base),
+         st->getOperand(LITERAL_LEN_FIELD)}));
     return;
   }
   if (auto *newInit = substituteConstant(oldInit, buf, mergedAsBufTy))
@@ -301,13 +341,14 @@ void repointLiteral(Module &M, GlobalVariable *lit, GlobalVariable *buf,
   // A literal record may have been scalarized into per-field slots named
   // <literal>.0/.1/.2 (object pointer / start / length). The .0 slot was
   // repointed above; keep the .1 (start) slot in sync.
-  if (!lit->getName().endswith(".0"))
+  StringRef ptrSlotSuffix = ".0";
+  if (!lit->getName().endswith(ptrSlotSuffix))
     return;
-  auto *s1 = dyn_cast_or_null<GlobalVariable>(
-      M.getNamedValue(lit->getName().drop_back(2).str() + ".1"));
+  auto *s1 = dyn_cast_or_null<GlobalVariable>(M.getNamedValue(
+      lit->getName().drop_back(ptrSlotSuffix.size()).str() + ".1"));
   if (s1)
     if (auto *ci = dyn_cast_or_null<ConstantInt>(s1->getInitializer()))
-      if (ci->isZero() && ci->getType()->isIntegerTy(32))
+      if (ci->isZero() && ci->getType()->isIntegerTy(START_FIELD_BITS))
         s1->setInitializer(ConstantInt::getSigned(i32Ty, base));
 }
 
@@ -365,10 +406,10 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
 
   uint64_t before = 0;
   for (auto &[b, lits] : mergeable)
-    before += b->bytes.size() + 16;
+    before += b->bytes.size() + RAWARRAY_HEADER_BYTES;
   BytesBefore += before;
   if (!mergeable.empty())
-    BytesAfter += merged.size() + 16;
+    BytesAfter += merged.size() + RAWARRAY_HEADER_BYTES;
 
   if (!mergeable.empty()) {
     auto *mergedGV = emitMergedPool(M, mergeable, merged);
@@ -382,6 +423,7 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
     errs() << "CJStringPoolMerge: buffers=" << buffers.size()
            << " merged=" << mergeable.size() << " erased=" << numErased
            << " bytes " << before << " -> "
-           << (mergeable.empty() ? 0 : merged.size() + 16) << "\n";
+           << (mergeable.empty() ? 0 : merged.size() + RAWARRAY_HEADER_BYTES)
+           << "\n";
   return PreservedAnalyses::none();
 }
