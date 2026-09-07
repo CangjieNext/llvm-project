@@ -163,7 +163,7 @@ public:
   // <regIdxPlusOne, slotIdxPlusOne>
   std::vector<std::pair<unsigned, unsigned>> DerivedInfo;
   std::map<std::vector<std::pair<unsigned, unsigned>>, unsigned>
- 	       DerivedInfo2StartIdx;
+      DerivedInfo2StartIdx;
 
   MaxBitsInfo MaxBits;
   // unordered_map<regNo, bitIdx>, regNo can be used to find callee saved reg
