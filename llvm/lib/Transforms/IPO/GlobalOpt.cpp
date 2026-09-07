@@ -277,10 +277,6 @@ CleanupPointerRootUsers(GlobalVariable *GV,
 /// clean up the easy and obvious cruft.  This returns true if it made a change.
 static bool CleanupConstantGlobalUsers(GlobalVariable *GV,
                                        const DataLayout &DL) {
-  // A cjstring literal is a black hole: its initializer stays unfoldable
-  // until CJStringPoolMerge fixes the final pool layout.
-  if (GV->hasAttribute("cjstring_literal"))
-    return false;
   Constant *Init = GV->getInitializer();
   SmallVector<User *, 8> WorkList(GV->users());
   SmallPtrSet<User *, 8> Visited;
