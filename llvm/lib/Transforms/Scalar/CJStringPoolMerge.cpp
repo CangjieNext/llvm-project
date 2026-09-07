@@ -50,7 +50,7 @@
 
 #include "llvm/Transforms/Scalar/CJStringPoolMerge.h"
 
-#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Constants.h"
@@ -130,14 +130,14 @@ bool isStringRecordGV(const GlobalVariable &gv) {
 // Returns false for buffers with any direct (instruction) user, which are
 // not mergeable.
 bool collectLiterals(GlobalVariable *buf, SmallVectorImpl<GlobalVariable *> &lits) {
-  SmallVector<Constant *, 8> work;
+  SmallVector<Constant *> work;
   for (User *u : buf->users()) {
     auto *c = dyn_cast<Constant>(u);
     if (!c)
       return false;
     work.push_back(c);
   }
-  SmallPtrSet<Constant *, 8> seen;
+  SmallDenseSet<Constant *> seen;
   while (!work.empty()) {
     Constant *c = work.pop_back_val();
     if (!seen.insert(c).second)
@@ -170,7 +170,7 @@ Constant *substituteConstant(Constant *c, Constant *from, Constant *to) {
   auto *ce = dyn_cast<ConstantExpr>(c);
   if (!ce || (!ce->isCast() && ce->getOpcode() != Instruction::GetElementPtr))
     return c;
-  SmallVector<Constant *, 4> ops;
+  SmallVector<Constant *> ops;
   bool changed = false;
   for (auto &op : ce->operands()) {
     auto *nc = substituteConstant(cast<Constant>(op), from, to);
@@ -215,7 +215,7 @@ size_t suffixPrefixOverlap(StringRef merged, StringRef content) {
 }
 
 using MergeableList =
-    std::vector<std::pair<BufferInfo *, SmallVector<GlobalVariable *, 4>>>;
+    std::vector<std::pair<BufferInfo *, SmallVector<GlobalVariable *>>>;
 
 // Collect every cjstring data buffer that still carries a RawArray-style
 // {klass, length, bytes} initializer.
@@ -246,7 +246,7 @@ MergeableList filterMergeable(std::vector<BufferInfo> &buffers) {
   for (auto &b : buffers) {
     if (b.gv->use_empty())
       continue;
-    SmallVector<GlobalVariable *, 4> lits;
+    SmallVector<GlobalVariable *> lits;
     if (collectLiterals(b.gv, lits) && !lits.empty())
       mergeable.emplace_back(&b, std::move(lits));
   }
