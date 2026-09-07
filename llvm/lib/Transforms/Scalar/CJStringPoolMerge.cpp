@@ -92,8 +92,6 @@ constexpr unsigned LITERAL_FIELD_COUNT = 3;
 constexpr unsigned LITERAL_LEN_FIELD = 2; // index of the length field
 // Bytes of the fixed RawArray header: klass pointer (8B) + length (8B).
 constexpr uint64_t RAWARRAY_HEADER_BYTES = 16;
-// Bit width of the start field in the literal record (i32).
-constexpr unsigned START_FIELD_BITS = 32;
 
 namespace {
 
@@ -338,18 +336,6 @@ void repointLiteral(Module &M, GlobalVariable *lit, GlobalVariable *buf,
   if (auto *newInit = substituteConstant(oldInit, buf, mergedAsBufTy))
     if (newInit != oldInit)
       lit->setInitializer(newInit);
-  // A literal record may have been scalarized into per-field slots named
-  // <literal>.0/.1/.2 (object pointer / start / length). The .0 slot was
-  // repointed above; keep the .1 (start) slot in sync.
-  StringRef ptrSlotSuffix = ".0";
-  if (!lit->getName().endswith(ptrSlotSuffix))
-    return;
-  auto *s1 = dyn_cast_or_null<GlobalVariable>(M.getNamedValue(
-      lit->getName().drop_back(ptrSlotSuffix.size()).str() + ".1"));
-  if (s1)
-    if (auto *ci = dyn_cast_or_null<ConstantInt>(s1->getInitializer()))
-      if (ci->isZero() && ci->getType()->isIntegerTy(START_FIELD_BITS))
-        s1->setInitializer(ConstantInt::getSigned(i32Ty, base));
 }
 
 void repointLiterals(Module &M, MergeableList &mergeable,
