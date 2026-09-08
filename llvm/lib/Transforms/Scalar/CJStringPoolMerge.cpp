@@ -158,29 +158,6 @@ bool collectLiterals(GlobalVariable *buf, SmallVectorImpl<GlobalVariable *> &lit
   return true;
 }
 
-// Replace `from` by `to` (same type) inside the constant expression tree.
-// Returns the input unchanged when `from` does not occur.
-Constant *substituteConstant(Constant *c, Constant *from, Constant *to) {
-  if (c == from)
-    return to;
-  auto *ce = dyn_cast<ConstantExpr>(c);
-  if (!ce || (!ce->isCast() && ce->getOpcode() != Instruction::GetElementPtr))
-    return c;
-  SmallVector<Constant *> ops;
-  bool changed = false;
-  for (auto &op : ce->operands()) {
-    auto *nc = substituteConstant(cast<Constant>(op), from, to);
-    changed |= nc != op.get();
-    ops.push_back(nc);
-  }
-  if (!changed)
-    return c;
-  Type *srcTy = ce->getOpcode() == Instruction::GetElementPtr
-                    ? ce->getOperand(0)->getType()->getPointerElementType()
-                    : nullptr;
-  return ce->getWithOperands(ops, ce->getType(), false, srcTy);
-}
-
 // Longest k such that the k-byte suffix of `merged` equals the k-byte
 // prefix of `content`. Built on the KMP failure function of `content` plus
 // one scan over the only bytes that can participate (the tail of `merged`),
@@ -306,45 +283,34 @@ GlobalVariable *emitMergedPool(Module &M, const MergeableList &mergeable,
   return mergedGV;
 }
 
-// Repoint one literal-associated global to {mergedPool, base, len}. Two
-// kinds: String record literals get a rewritten record initializer; other
-// constant holders (e.g. aggregates referencing the buffer via constant
-// expressions) get the buffer reference substituted for the pool start (a
-// real object), preserving the constant-expression shape.
-void repointLiteral(Module &M, GlobalVariable *lit, GlobalVariable *buf,
-                    GlobalVariable *mergedGV, Constant *mergedAsBufTy,
+// Repoint one literal record to {mergedPool, base, len}: rewrite the
+// record initializer, keeping the length field. Every literal collected by
+// collectLiterals has a String-record initializer: aggregates reference the
+// literal record GV rather than the buffer, and any other global holding a
+// buffer reference makes the buffer unmergeable there.
+void repointLiteral(Module &M, GlobalVariable *lit, GlobalVariable *mergedGV,
                     int64_t base) {
-  auto *oldInit = lit->getInitializer();
-  if (!oldInit)
-    return;
   auto &ctx = M.getContext();
   auto *i32Ty = Type::getInt32Ty(ctx);
-  if (auto *st = dyn_cast<ConstantStruct>(oldInit);
-      st && st->getNumOperands() == LITERAL_FIELD_COUNT &&
-      isa<StructType>(st->getType())) {
-    auto *i8PtrTy = Type::getInt8PtrTy(ctx);
-    Constant *ptr = ConstantExpr::getBitCast(mergedGV, i8PtrTy);
-    if (st->getOperand(0)->getType() != ptr->getType())
-      ptr = ConstantExpr::getAddrSpaceCast(ptr, st->getOperand(0)->getType());
-    lit->setInitializer(ConstantStruct::get(
-        cast<StructType>(st->getType()),
-        {ptr, ConstantInt::getSigned(i32Ty, base),
-         st->getOperand(LITERAL_LEN_FIELD)}));
+  auto *st = dyn_cast<ConstantStruct>(lit->getInitializer());
+  if (!st || st->getNumOperands() != LITERAL_FIELD_COUNT ||
+      !isa<StructType>(st->getType()))
     return;
-  }
-  if (auto *newInit = substituteConstant(oldInit, buf, mergedAsBufTy))
-    if (newInit != oldInit)
-      lit->setInitializer(newInit);
+  auto *i8PtrTy = Type::getInt8PtrTy(ctx);
+  Constant *ptr = ConstantExpr::getBitCast(mergedGV, i8PtrTy);
+  if (st->getOperand(0)->getType() != ptr->getType())
+    ptr = ConstantExpr::getAddrSpaceCast(ptr, st->getOperand(0)->getType());
+  lit->setInitializer(ConstantStruct::get(
+      cast<StructType>(st->getType()),
+      {ptr, ConstantInt::getSigned(i32Ty, base),
+       st->getOperand(LITERAL_LEN_FIELD)}));
 }
 
 void repointLiterals(Module &M, MergeableList &mergeable,
                      GlobalVariable *mergedGV) {
-  for (auto &[b, lits] : mergeable) {
-    Constant *mergedAsBufTy =
-        ConstantExpr::getBitCast(mergedGV, b->gv->getType());
+  for (auto &[b, lits] : mergeable)
     for (auto *lit : lits)
-      repointLiteral(M, lit, b->gv, mergedGV, mergedAsBufTy, b->base);
-  }
+      repointLiteral(M, lit, mergedGV, b->base);
 }
 
 // Erase the merged buffers; never leave a duplicate behind.
