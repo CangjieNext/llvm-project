@@ -198,15 +198,24 @@ std::vector<BufferInfo> collectBuffers(Module &M) {
     if (!isStringBuffer(gv))
       continue;
     auto *init = dyn_cast_or_null<ConstantStruct>(gv.getInitializer());
-    auto *cda = init && init->getNumOperands() == BUFFER_FIELD_COUNT
-                    ? dyn_cast<ConstantDataArray>(init->getOperand(BUFFER_DATA_FIELD))
-                    : nullptr;
-    if (!cda || !cda->isString())
+    if (!init || init->getNumOperands() != BUFFER_FIELD_COUNT)
       continue;
+    Constant *data = init->getOperand(BUFFER_DATA_FIELD);
     BufferInfo info;
+    if (auto *cda = dyn_cast<ConstantDataArray>(data)) {
+      if (!cda->isString())
+        continue;
+      info.bytes = cda->getAsString().str();
+    } else if (isa<ConstantAggregateZero>(data) &&
+               cast<ArrayType>(data->getType())->getNumElements() == 0) {
+      // Constant uniquing folds an empty data array to zeroinitializer;
+      // CodeGen emits empty-string buffers in that form.
+      info.bytes = "";
+    } else {
+      continue;
+    }
     info.gv = &gv;
     info.klass = init->getOperand(0);
-    info.bytes = cda->getAsString().str();
     buffers.push_back(std::move(info));
   }
   return buffers;
