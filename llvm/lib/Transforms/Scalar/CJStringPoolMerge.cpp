@@ -165,6 +165,9 @@ bool collectLiterals(GlobalVariable *buf, SmallVectorImpl<GlobalVariable *> &lit
 // every candidate overlap length.
 size_t suffixPrefixOverlap(StringRef merged, StringRef content) {
   size_t m = content.size();
+  // Invariant: callers skip empty buffers, so content is never empty;
+  // merged is empty only for the very first buffer inserted into the pool.
+  assert(m != 0 && "content must be non-empty (empty buffers are skipped)");
   if (m == 0 || merged.empty())
     return 0;
   std::vector<size_t> fail(m, 0);
@@ -198,11 +201,19 @@ std::vector<BufferInfo> collectBuffers(Module &M) {
     if (!isStringBuffer(gv))
       continue;
     auto *init = dyn_cast_or_null<ConstantStruct>(gv.getInitializer());
+    // Invariant: CJSTRING_DEFERRED_ATTR is emitted only by Cangjie CodeGen,
+    // always on buffers of the RawArray shape {i8*, i64, [N x i8]}; bitcode
+    // predating the attribute never carries it. The guard stays so foreign
+    // IR degrades to skipping the buffer instead of crashing release builds.
+    assert(init && init->getNumOperands() == BUFFER_FIELD_COUNT &&
+           "cjstring_deferred buffer must be a {i8*, i64, [N x i8]} struct");
     if (!init || init->getNumOperands() != BUFFER_FIELD_COUNT)
       continue;
     Constant *data = init->getOperand(BUFFER_DATA_FIELD);
     BufferInfo info;
     if (auto *cda = dyn_cast<ConstantDataArray>(data)) {
+      // Invariant: the data operand is an i8 array (RawArray<UInt8> data).
+      assert(cda->isString() && "cjstring buffer data must be an i8 array");
       if (!cda->isString())
         continue;
       info.bytes = cda->getAsString().str();
@@ -229,6 +240,8 @@ MergeableList filterMergeable(std::vector<BufferInfo> &buffers) {
     if (b.gv->use_empty())
       continue;
     SmallVector<GlobalVariable *> lits;
+    // lits can be empty when every use chain ends in dead constants (e.g.
+    // an orphaned bitcast); such a buffer has nothing to repoint.
     if (collectLiterals(b.gv, lits) && !lits.empty())
       mergeable.emplace_back(&b, std::move(lits));
   }
