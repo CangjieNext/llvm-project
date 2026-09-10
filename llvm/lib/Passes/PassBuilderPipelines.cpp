@@ -81,6 +81,7 @@
 #include "llvm/Transforms/Scalar/CJBarrierSplit.h"
 #include "llvm/Transforms/Scalar/CJDevirtualOpt.h"
 #include "llvm/Transforms/Scalar/CJSimpleOpt.h"
+#include "llvm/Transforms/Scalar/CJStringPoolMerge.h"
 #include "llvm/Transforms/Scalar/CJObjectReuseOpt.h"
 #include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/Scalar/CJGenericIntrinsicOpt.h"
@@ -1585,6 +1586,22 @@ ModulePassManager PassBuilder::buildThinLTODefaultPipeline(
 
   setSLPVectorization(PTO);
 
+  // Merge per-string cjstring buffers once per linked unit, before anything
+  // that could fold the placeholder literal fields. ThinLTO runs one
+  // backend per module and private cjstring buffers are never imported, so
+  // each backend merges its own module's buffers, mirroring the non-LTO
+  // per-module placement in the cjc pipeline.
+  if (CJPipeline) {
+    // Drop globals that are dead in IR but were kept live by the summary
+    // index (e.g. interface implementations of unused types, referenced only
+    // via !type metadata): their cjstring bytes would otherwise be frozen
+    // into the merged pool below. O0 is excluded: O0 pipelines carry no
+    // GlobalDCE historically, and O0+LTO is not a supported combination.
+    if (Level != OptimizationLevel::O0)
+      MPM.addPass(GlobalDCEPass());
+    MPM.addPass(CJStringPoolMerge());
+  }
+
   // Convert @llvm.global.annotations to !annotation metadata.
   MPM.addPass(Annotation2MetadataPass());
 
@@ -1658,6 +1675,19 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   ModulePassManager MPM;
 
   setSLPVectorization(PTO);
+
+  // Merge per-string cjstring buffers once per linked unit, before anything
+  // that could fold the placeholder literal fields.
+  if (CJPipeline) {
+    // Drop globals that are dead in IR but were kept live by the summary
+    // index (e.g. interface implementations of unused types, referenced only
+    // via !type metadata): their cjstring bytes would otherwise be frozen
+    // into the merged pool below. O0 is excluded: O0 pipelines carry no
+    // GlobalDCE historically, and O0+LTO is not a supported combination.
+    if (Level != OptimizationLevel::O0)
+      MPM.addPass(GlobalDCEPass());
+    MPM.addPass(CJStringPoolMerge());
+  }
 
   // Convert @llvm.global.annotations to !annotation metadata.
   MPM.addPass(Annotation2MetadataPass());

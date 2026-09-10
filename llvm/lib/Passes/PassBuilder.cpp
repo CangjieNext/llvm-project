@@ -155,6 +155,7 @@
 #include "llvm/Transforms/Scalar/BDCE.h"
 #include "llvm/Transforms/Scalar/CJBarrierOpt.h"
 #include "llvm/Transforms/Scalar/CJBarrierSplit.h"
+#include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Scalar/CJDevirtualOpt.h"
 #include "llvm/Transforms/Scalar/CJGCInstrReplace.h"
 #include "llvm/Transforms/Scalar/CJGCInstrRestore.h"
@@ -170,6 +171,7 @@
 #include "llvm/Transforms/Scalar/CJAllocationSizeCheck.h"
 #include "llvm/Transforms/Scalar/CJIRVerifier.h"
 #include "llvm/Transforms/Scalar/CJSpecificOpt.h"
+#include "llvm/Transforms/Scalar/CJStringPoolMerge.h"
 #include "llvm/Transforms/Scalar/ConstantHoisting.h"
 #include "llvm/Transforms/Scalar/ConstraintElimination.h"
 #include "llvm/Transforms/Scalar/CorrelatedValuePropagation.h"
@@ -178,7 +180,6 @@
 #include "llvm/Transforms/Scalar/DeadStoreElimination.h"
 #include "llvm/Transforms/Scalar/DivRemPairs.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
-#include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Scalar/FlattenCFG.h"
 #include "llvm/Transforms/Scalar/Float2Int.h"
 #include "llvm/Transforms/Scalar/GVN.h"
@@ -1257,6 +1258,18 @@ Error PassBuilder::parseModulePass(ModulePassManager &MPM,
 
       if (EnableCJPtrAuthBackwardCFI)
         MPM.addPass(PtrAuthBackwardCFI());
+
+      // Merge per-string cjstring buffers once per linked unit. With LTO
+      // the per-module pre-opt pipeline has CangjieLTOPreOpt set and the
+      // merge runs in LTOBackend instead; without LTO this is the only run.
+      if (!CangjieLTOPreOpt) {
+        // Drop globals that are dead in IR (their cjstring bytes would
+        // otherwise be frozen into the merged pool). O0 is excluded, in line
+        // with the O0 pipelines carrying no GlobalDCE historically.
+        if (L != OptimizationLevel::O0)
+          MPM.addPass(GlobalDCEPass());
+        MPM.addPass(CJStringPoolMerge());
+      }
     }
     auto addCangjiePasses = [&]() {
       if (CJPipeline && L.getSpeedupLevel() == 2 && EnableCJGCInstrTransform) {
