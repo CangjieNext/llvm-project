@@ -1,0 +1,14 @@
+llvm/lib/CodeGen/SelectionDAG/StatepointLowering.cpp
+  h_f08a759313bce8 1172-1174,1180-1206,1590-1602
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "4cffe26acf2b3152fc48f8ebffc581cc7fd426ae",
+  "prompts": {},
+  "humans": {
+    "h_f08a759313bce8": {
+      "author": "yuqiaoyu <yujunqiang1@h-partners.com>"
+    }
+  }
+}
