@@ -169,35 +169,12 @@ Function *getFinalizerMethod(GlobalVariable *Klass, Module *M) {
   return nullptr;
 }
 
-// ~init may omit nounwind even when its body cannot throw (typical for
-// user-written ObjC wrappers that only call C functions). Scan the CFG
-// instead of trusting the attribute alone. Invoke/resume/throw means the
-// destructor is unsafe to insert as a regular call.
-static bool finalizerDoesNotThrow(const Function *F) {
-  if (F->doesNotThrow())
-    return true;
-  if (F->isDeclaration())
-    return false;
-  for (const BasicBlock &BB : *F) {
-    const Instruction *T = BB.getTerminator();
-    if (isa<InvokeInst>(T) || isa<ResumeInst>(T) || isa<CleanupReturnInst>(T) ||
-        isa<CatchSwitchInst>(T))
-      return false;
-    for (const Instruction &I : BB) {
-      const auto *CB = dyn_cast<CallBase>(&I);
-      if (!CB)
-        continue;
-      const Function *Callee = CB->getCalledFunction();
-      if (!Callee)
-        continue;
-      if (Callee->getIntrinsicID() == Intrinsic::cj_throw_exception)
-        return false;
-      if (Callee->getName() == "CJ_MCC_ThrowException")
-        return false;
-    }
-  }
-  return true;
-}
+// The language spec states that an uncaught exception escaping a finalizer
+// (~init) is undefined behavior. We therefore do not prove that the finalizer
+// cannot throw: if a promoted finalizer throws, the exception simply surfaces
+// synchronously at the insertion point instead of being swallowed on the GC
+// finalizer thread. This keeps the legality check deterministic instead of
+// depending on whether the inliner happened to expose a hidden throw.
 
 // True if some path from CreateBB reaches a function exit that is not a
 // normal return (unreachable / resume). Invoke itself is not an exit: both
@@ -431,7 +408,7 @@ static bool canStackAllocateFinalizer(CallBase *CB, Module *M, LoopInfo *LI) {
   if (Klass == nullptr)
     return false;
   Function *FinalizerMethod = getFinalizerMethod(Klass, M);
-  if (FinalizerMethod == nullptr || !finalizerDoesNotThrow(FinalizerMethod))
+  if (FinalizerMethod == nullptr)
     return false;
   BasicBlock *BB = CB->getParent();
   DominatorTree DT(*BB->getParent());
@@ -471,7 +448,7 @@ public:
     FinalizerKlass = getNewKlass(CB);
     FinalizerMethod = getFinalizerMethod(FinalizerKlass, M);
     FinalizerInsertBB = CB->getParent();
-    if (FinalizerMethod == nullptr || !finalizerDoesNotThrow(FinalizerMethod))
+    if (FinalizerMethod == nullptr)
       return false;
     const bool InLoop = LI && LI->getLoopFor(FinalizerInsertBB);
     if (!InLoop && hasNonReturnExitPath(FinalizerInsertBB))
