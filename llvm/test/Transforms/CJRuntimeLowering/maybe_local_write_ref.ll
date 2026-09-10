@@ -12,15 +12,15 @@
 ;     unconditionally, and CJBarrierLowering's fast path would replace the barrier with a plain
 ;     store whenever the GC phase is idle, silently dropping that registration.
 
-declare void @llvm.cj.maybe.local.write.ref(i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*, i8 addrspace(1)*)
+declare void @llvm.cj.maybe.local.write.ref(i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*)
 declare void @llvm.cj.gcwrite.ref(i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*)
 
 define void @maybe_local_write(i8 addrspace(1)* %obj, i8 addrspace(1)* addrspace(1)* %field, i8 addrspace(1)* %value) gc "cangjie" {
 ; CHECK-LABEL: define void @maybe_local_write
-; CHECK: call void @CJ_MCC_MaybeLocalWriteRef(i8 addrspace(1)* %obj, i8 addrspace(1)* addrspace(1)* %field, i8 addrspace(1)* %value)
+; CHECK: call void @CJ_MCC_MaybeLocalWriteRef(i8 addrspace(1)* %value, i8 addrspace(1)* %obj, i8 addrspace(1)* addrspace(1)* %field)
 ; CHECK-NOT: llvm.cj.maybe.local.write.ref
 entry:
-  call void @llvm.cj.maybe.local.write.ref(i8 addrspace(1)* %obj, i8 addrspace(1)* addrspace(1)* %field, i8 addrspace(1)* %value)
+  call void @llvm.cj.maybe.local.write.ref(i8 addrspace(1)* %value, i8 addrspace(1)* %obj, i8 addrspace(1)* addrspace(1)* %field)
   ret void
 }
 
@@ -36,5 +36,5 @@ entry:
 
 ; The runtime function must be declared as a GC leaf: CJ_MCC_MaybeLocalWriteRef is exported as
 ; a plain alias without a callee-saved-register stub, so it cannot act as a safepoint.
-; CHECK: declare void @CJ_MCC_MaybeLocalWriteRef(i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*, i8 addrspace(1)*) #[[ATTR:[0-9]+]]
+; CHECK: declare void @CJ_MCC_MaybeLocalWriteRef(i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*) #[[ATTR:[0-9]+]]
 ; CHECK: attributes #[[ATTR]] = {{{.*}}"gc-leaf-function"{{.*}}}
