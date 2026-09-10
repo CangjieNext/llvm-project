@@ -1689,7 +1689,14 @@ processGlobal(GlobalValue &GV,
   if (!GVar)
     return Changed;
 
-  if (GVar->isConstant() || !GVar->hasInitializer())
+  // cjstring literal records are deliberately emitted as non-constant
+  // globals whose fields are placeholders: only CJStringPoolMerge at link
+  // time fixes the final pool layout and rewrites the initializer. Folding
+  // loads of such a global into immediates here would bake the placeholders
+  // into consumers, so leave it completely alone (no scalarization,
+  // const-fold, or any other rewrite).
+  if (GVar->isConstant() || !GVar->hasInitializer() ||
+      GVar->hasAttribute("cjstring_literal"))
     return Changed;
 
   return processInternalGlobal(GVar, GS, GetTTI, GetTLI, LookupDomTree) ||
@@ -2123,7 +2130,8 @@ static bool EvaluateStaticConstructor(Function *F, const DataLayout &DL,
     for (const auto &Pair : NewInitializers)
       Pair.first->setInitializer(Pair.second);
     for (GlobalVariable *GV : Eval.getInvariants())
-      GV->setConstant(true);
+      if (!GV->hasAttribute("cjstring_literal"))
+        GV->setConstant(true);
   }
 
   return EvalSuccess;
