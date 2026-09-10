@@ -1305,6 +1305,7 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
   SI.NumPatchBytes = I.getNumPatchBytes();
   SI.EHPadBB = EHPadBB;
   const Triple &TT = DAG.getTarget().getTargetTriple();
+  Function *CalleeFunc = I.getActualCalledFunction();
   SI.IsTailCall =
       I.isTailCall() && I.getNumPatchBytes() == 0 &&
       (TT.isAArch64() || TT.isX86()) &&
@@ -1318,9 +1319,12 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
       // jumps and are unaffected, so only allow tail statepoints for direct
       // callees until indirect targets are lowered to a caller-saved
       // register after the epilogue.
-      I.getActualCalledFunction() != nullptr;
+      CalleeFunc != nullptr &&
+      // C2N/N2C stubs create a full runtime frame, and the runtime
+      // unwinder/GC/EH still rely on the managed caller frame being present.
+      !CalleeFunc->isCangjieNativeStub(*I.getFunction());
 
-  SI.ActualCalledFunction = I.getActualCalledFunction();
+  SI.ActualCalledFunction = CalleeFunc;
 
   SDValue ReturnValue = LowerAsSTATEPOINT(SI);
   if (CJPipeline) {
