@@ -184,13 +184,6 @@ Function *getFinalizerMethod(GlobalVariable *Klass, Module *M) {
   return nullptr;
 }
 
-// The language spec states that an uncaught exception escaping a finalizer
-// (~init) is undefined behavior. We therefore do not prove that the finalizer
-// cannot throw: if a promoted finalizer throws, the exception simply surfaces
-// synchronously at the insertion point instead of being swallowed on the GC
-// finalizer thread. This keeps the legality check deterministic instead of
-// depending on whether the inliner happened to expose a hidden throw.
-
 // True if some path from CreateBB reaches a function exit that is not a
 // normal return (unreachable / resume). Invoke itself is not an exit: both
 // the normal and unwind successors are followed. Post-loop invokes therefore
@@ -235,50 +228,64 @@ static bool instPostDominates(const PostDominatorTree &PDT,
 //         result cannot prove the destructor point.
 enum class FinalizerUseKind { Follow, Stop, Reject };
 
+// Loads and stores around the object. Storing through a pointer derived
+// from the object writes a field (stop: a real use, no new alias). Storing
+// the object pointer elsewhere or loading the GC pointer back publishes an
+// alias PEA cannot track (reject). Loading a non-GC pointer (e.g. the
+// native handle) is a plain use (stop).
+static FinalizerUseKind classifyFinalizerMemUse(Instruction *I,
+                                                Value *NewFinalizer) {
+  if (auto *SI = dyn_cast<StoreInst>(I))
+    return findMemoryBasePointer(SI->getPointerOperand()) == NewFinalizer
+               ? FinalizerUseKind::Stop
+               : FinalizerUseKind::Reject;
+  auto *Load = dyn_cast<LoadInst>(I);
+  if (!Load)
+    return FinalizerUseKind::Reject;
+  return isGCPointerType(Load->getType()) ? FinalizerUseKind::Reject
+                                          : FinalizerUseKind::Stop;
+}
+
+// Call-like uses. cj_gc_result re-materializes the same object pointer
+// (follow it). A GC field write whose base is the object (arg1) keeps the
+// object alive until the write (stop); storing the object pointer into some
+// other base publishes an alias (reject). Every other callee, intrinsic or
+// declared, is an ordinary call: escape analysis decides capture, this walk
+// only needs a destructor point that post-dominates the call.
+static FinalizerUseKind classifyFinalizerCallUse(CallBase *CB, Value *Cur,
+                                                 Value *NewFinalizer) {
+  const Function *Callee = CB->getCalledFunction();
+  if (!Callee)
+    return FinalizerUseKind::Stop;
+  const Intrinsic::ID Id = Callee->getIntrinsicID();
+  if (Id == Intrinsic::cj_gc_result && CB->arg_size() == 1 &&
+      CB->getArgOperand(0) == Cur)
+    return FinalizerUseKind::Follow;
+  if (Id == Intrinsic::cj_gcwrite_ref) {
+    // arg0 = stored value, arg1 = base object.
+    if (findMemoryBasePointer(CB->getArgOperand(1)) == NewFinalizer)
+      return FinalizerUseKind::Stop;
+    return FinalizerUseKind::Reject;
+  }
+  return FinalizerUseKind::Stop;
+}
+
 static FinalizerUseKind classifyFinalizerUse(Instruction *I, Value *Cur,
                                              Instruction *NewFinalizer) {
+  // Publishing the pointer via PHI / select / aggregate ops / return, or
+  // reading the GC pointer back, creates an alias whose destructor point
+  // PEA's escape result cannot prove.
   if (isa<PHINode>(I) || isa<SelectInst>(I) || isa<ReturnInst>(I) ||
       isa<InsertValueInst>(I) || isa<ExtractValueInst>(I))
     return FinalizerUseKind::Reject;
-
+  // A pointer derived from the object: keep walking.
   if (isa<BitCastInst>(I) || isa<AddrSpaceCastInst>(I) ||
       isa<GetElementPtrInst>(I))
     return FinalizerUseKind::Follow;
-
-  if (auto *SI = dyn_cast<StoreInst>(I)) {
-    if (findMemoryBasePointer(SI->getPointerOperand()) == NewFinalizer)
-      return FinalizerUseKind::Stop;
-    return FinalizerUseKind::Reject;
-  }
-
-  if (auto *Load = dyn_cast<LoadInst>(I)) {
-    if (!isGCPointerType(Load->getType()))
-      return FinalizerUseKind::Stop;
-    return FinalizerUseKind::Reject;
-  }
-
-  if (auto *CB = dyn_cast<CallBase>(I)) {
-    const Function *Callee = CB->getCalledFunction();
-    if (Callee) {
-      const Intrinsic::ID Id = Callee->getIntrinsicID();
-      if (Id == Intrinsic::cj_gc_result && CB->arg_size() == 1 &&
-          CB->getArgOperand(0) == Cur)
-        return FinalizerUseKind::Follow;
-      if (Id == Intrinsic::cj_gcwrite_ref) {
-        // arg0 = stored value, arg1 = base object.
-        if (findMemoryBasePointer(CB->getArgOperand(1)) == NewFinalizer)
-          return FinalizerUseKind::Stop;
-        return FinalizerUseKind::Reject;
-      }
-      if (Id == Intrinsic::lifetime_start || Id == Intrinsic::lifetime_end ||
-          Id == Intrinsic::memset || Id == Intrinsic::cj_memset)
-        return FinalizerUseKind::Stop;
-    }
-    // Ordinary call. Escape analysis decides capture; this walk only needs
-    // a destructor point that post-dominates the call.
-    return FinalizerUseKind::Stop;
-  }
-
+  if (isa<StoreInst>(I) || isa<LoadInst>(I))
+    return classifyFinalizerMemUse(I, NewFinalizer);
+  if (auto *CB = dyn_cast<CallBase>(I))
+    return classifyFinalizerCallUse(CB, Cur, NewFinalizer);
   return FinalizerUseKind::Reject;
 }
 
@@ -322,7 +329,7 @@ collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
 
   SmallVector<Value *, 16> Worklist;
   SmallPtrSet<Value *, 16> VisitedValues;
-  SmallVector<Instruction *, 16> UseInsts;
+  SmallVector<Instruction *> UseInsts;
   Worklist.push_back(NewFinalizer);
   while (!Worklist.empty()) {
     Value *V = Worklist.pop_back_val();
@@ -337,27 +344,23 @@ collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
       if (isa<DbgInfoIntrinsic>(I))
         continue;
 
-      switch (classifyFinalizerUse(I, V, NewFinalizer)) {
-      case FinalizerUseKind::Follow:
-        UseInsts.push_back(I);
-        Worklist.push_back(I);
-        break;
-      case FinalizerUseKind::Stop:
-        UseInsts.push_back(I);
-        break;
-      case FinalizerUseKind::Reject:
+      const FinalizerUseKind Kind = classifyFinalizerUse(I, V, NewFinalizer);
+      if (Kind == FinalizerUseKind::Reject)
         return false;
-      }
+      // Stop and Follow are both real uses that must happen before ~init;
+      // only Follow keeps deriving new pointers from the object.
+      UseInsts.push_back(I);
+      if (Kind == FinalizerUseKind::Follow)
+        Worklist.push_back(I);
     }
   }
 
   for (Instruction *U : UseInsts) {
+    // The latch terminator itself may be a use (an invoke on the object):
+    // inserting ~init before it would destroy the object before that use.
     if (U == InsertPoint)
       return false;
     if (!instPostDominates(PDT, InsertPoint, U))
-      return false;
-    // InsertPoint dominating U means U happens after destruction.
-    if (DT.dominates(InsertPoint, U))
       return false;
   }
 
@@ -425,6 +428,16 @@ static bool canStackAllocateFinalizer(CallBase *CB, Module *M, LoopInfo *LI) {
   Function *FinalizerMethod = getFinalizerMethod(Klass, M);
   if (FinalizerMethod == nullptr)
     return false;
+  // The finalizer is deliberately not required to be nounwind. The Cangjie
+  // language specification ("class 终结器" rules) states that an uncaught
+  // exception escaping a finalizer (~init) is undefined behavior, so if a
+  // promoted finalizer throws, surfacing the exception synchronously at the
+  // insertion point instead of on the GC finalizer thread is a legal — and
+  // deterministic — realization of that UB. The specification also leaves
+  // the timing of finalizer execution undetermined and contemplates cases
+  // where it does not run at all, so unwinding past the insertion point via
+  // a may-throw plain call between the last use and the destructor (which
+  // skips ~init) stays within language semantics as well.
   BasicBlock *BB = CB->getParent();
   DominatorTree DT(*BB->getParent());
   // Loop-local objects: the latch post-dominator check already rejects paths
