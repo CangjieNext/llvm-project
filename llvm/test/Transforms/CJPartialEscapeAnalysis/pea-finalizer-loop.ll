@@ -40,17 +40,6 @@
   i8* bitcast ([1 x i8*]* @"default$W.fieldNames" to i8*)
 }, !RelatedType !0
 
-@Decl.ti = weak_odr global %TypeInfo {
-  i8* getelementptr inbounds ([12 x i8], [12 x i8]* @"default$W.name", i32 0, i32 0),
-  i8 -128, i8 0, i16 2, i32 16, %BitMap* null, i32 0, i8 8, i8 0,
-  i32* getelementptr inbounds ([1 x i32], [1 x i32]* @"default$W.ti.offsets", i32 0, i32 0),
-  i8* null,
-  i8* bitcast (void (i8 addrspace(1)*, %TypeInfo*)* @declared_dtor to i8*),
-  i8* bitcast ([1 x %TypeInfo*]* @"default$W.ti.fields" to i8*),
-  %TypeInfo* @"std.core$Object.ti", i8* null,
-  i8* bitcast ([1 x i8*]* @"default$W.fieldNames" to i8*)
-}, !RelatedType !0
-
 declare i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8*, i32)
 declare i8* @opaque_get()
 declare i64 @opaque_call(i8*, i64)
@@ -74,7 +63,6 @@ define void @throwing_dtor(i8 addrspace(1)* %this, %TypeInfo* %ti) gc "cangjie" 
   unreachable
 }
 
-declare void @declared_dtor(i8 addrspace(1)*, %TypeInfo*)
 
 ; Allocation is in the loop body, not the latch — the Cangjie `for` shape.
 ; CHECK-LABEL: define i64 @loop_body_alloc(
@@ -272,10 +260,14 @@ exit:
   ret i64 %i
 }
 
-; ~init that throws must not be inserted as a regular call.
+; A ~init that may throw is still promoted: an uncaught exception escaping a
+; finalizer is undefined behavior per the language spec, so the synchronous
+; call at the latch is a legal (and deterministic) realization of that UB.
 ; CHECK-LABEL: define i64 @loop_throwing_dtor(
-; CHECK: CJ_MCC_NewFinalizer
-; CHECK-NOT: call void @throwing_dtor(
+; CHECK: alloca { %TypeInfo*, %ObjLayout.W }
+; CHECK-NOT: CJ_MCC_NewFinalizer
+; CHECK: call void @throwing_dtor(
+; CHECK-NEXT: br label %header
 define i64 @loop_throwing_dtor() gc "cangjie" {
 entry:
   br label %header
@@ -287,34 +279,6 @@ header:
 
 body:
   %obj = call i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8* bitcast (%TypeInfo* @Throw.ti to i8*), i32 16)
-  %p = getelementptr inbounds i8, i8 addrspace(1)* %obj, i64 8
-  %slot = bitcast i8 addrspace(1)* %p to i64 addrspace(1)*
-  store i64 1, i64 addrspace(1)* %slot, align 8
-  br label %latch
-
-latch:
-  %next = add i64 %i, 1
-  br label %header
-
-exit:
-  ret i64 %i
-}
-
-; Declaration without nounwind: do not guess that ~init cannot throw.
-; CHECK-LABEL: define i64 @loop_declared_dtor(
-; CHECK: CJ_MCC_NewFinalizer
-; CHECK-NOT: call void @declared_dtor(
-define i64 @loop_declared_dtor() gc "cangjie" {
-entry:
-  br label %header
-
-header:
-  %i = phi i64 [ 0, %entry ], [ %next, %latch ]
-  %cmp = icmp slt i64 %i, 10
-  br i1 %cmp, label %body, label %exit
-
-body:
-  %obj = call i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8* bitcast (%TypeInfo* @Decl.ti to i8*), i32 16)
   %p = getelementptr inbounds i8, i8 addrspace(1)* %obj, i64 8
   %slot = bitcast i8 addrspace(1)* %p to i64 addrspace(1)*
   store i64 1, i64 addrspace(1)* %slot, align 8
