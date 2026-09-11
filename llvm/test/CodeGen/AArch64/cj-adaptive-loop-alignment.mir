@@ -1,0 +1,493 @@
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=generic -cangjie-pipeline -verify-machineinstrs -run-pass=block-placement %s -o - | FileCheck %s --check-prefix=GENERIC
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=cortex-a53 -cangjie-pipeline -verify-machineinstrs -start-before=block-placement %s -o - | FileCheck %s --check-prefix=ASM
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=cortex-a53 -cangjie-pipeline -verify-machineinstrs -start-before=block-placement -max-bytes-for-alignment=8 %s -o - | FileCheck %s --check-prefix=MAXASM
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=cortex-a53 -verify-machineinstrs -run-pass=block-placement -cangjie-pipeline %s -o - | FileCheck %s --check-prefix=ADAPT
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=cortex-a53 -verify-machineinstrs -run-pass=block-placement %s -o - | FileCheck %s --check-prefix=DEFAULT
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=cortex-a53 -verify-machineinstrs -run-pass=block-placement -cangjie-pipeline -cj-adaptive-loop-alignment=false %s -o - | FileCheck %s --check-prefix=DEFAULT
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=cortex-a53 -verify-machineinstrs -run-pass=block-placement -cangjie-pipeline -align-loops=128 %s -o - | FileCheck %s --check-prefix=EXPLICIT
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=cortex-a53 -verify-machineinstrs -run-pass=block-placement -cangjie-pipeline -align-loops=1 %s -o - | FileCheck %s --check-prefix=NONE
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=cortex-a53 -verify-machineinstrs -run-pass=block-placement -cangjie-pipeline -align-all-blocks=3 %s -o - | FileCheck %s --check-prefix=ALL
+
+# The loop bodies contain 8, 16, 20, 32, 36, 64 and 68 bytes, including
+# the decrement and backedge. Test both sides of each alignment boundary.
+# Meta instructions emit no bytes; inline assembly may contain directives
+# whose size depends on its address and must retain the ordinary policy.
+--- |
+  define void @loop8(i64 %n)  { ret void }
+  define void @loop16(i64 %n)  { ret void }
+  define void @loop20(i64 %n)  { ret void }
+  define void @loop32(i64 %n)  { ret void }
+  define void @loop36(i64 %n)  { ret void }
+  define void @loop64(i64 %n)  { ret void }
+  define void @loop68(i64 %n)  { ret void }
+  define void @minsize_loop(i64 %n) minsize { ret void }
+  define void @optsize_loop(i64 %n) optsize { ret void }
+  define void @meta_loop(i64 %n)  { ret void }
+  define void @inline_asm_loop(i64 %n)  { ret void }
+...
+
+---
+name: loop8
+# GENERIC-LABEL: name: loop8
+# GENERIC: bb.1 (align 16):
+# ASM-LABEL: loop8:
+# MAXASM-LABEL: loop8:
+# ASM: .p2align 4{{$}}
+# MAXASM: .p2align 4, 0x0, 8{{$}}
+# ASM: b.ne
+# MAXASM: b.ne
+tracksRegLiveness: true
+# ADAPT-LABEL: name: loop8
+# ADAPT: bb.1 (align 16):
+# DEFAULT-LABEL: name: loop8
+# DEFAULT: bb.1 (align 16):
+# EXPLICIT-LABEL: name: loop8
+# EXPLICIT: bb.1 (align 128):
+# NONE-LABEL: name: loop8
+# NONE: bb.1:
+# ALL-LABEL: name: loop8
+# ALL: bb.1 (align 8):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...
+
+---
+name: loop16
+# GENERIC-LABEL: name: loop16
+# GENERIC: bb.1 (align 16):
+# ASM-LABEL: loop16:
+# MAXASM-LABEL: loop16:
+# ASM: .p2align 4{{$}}
+# MAXASM: .p2align 4, 0x0, 8{{$}}
+# ASM: b.ne
+# MAXASM: b.ne
+tracksRegLiveness: true
+# ADAPT-LABEL: name: loop16
+# ADAPT: bb.1 (align 16):
+# DEFAULT-LABEL: name: loop16
+# DEFAULT: bb.1 (align 16):
+# EXPLICIT-LABEL: name: loop16
+# EXPLICIT: bb.1 (align 128):
+# NONE-LABEL: name: loop16
+# NONE: bb.1:
+# ALL-LABEL: name: loop16
+# ALL: bb.1 (align 8):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...
+
+---
+name: loop20
+# GENERIC-LABEL: name: loop20
+# GENERIC: bb.1 (align 32):
+# ASM-LABEL: loop20:
+# MAXASM-LABEL: loop20:
+# ASM: .p2align 5{{$}}
+# MAXASM: .p2align 5, 0x0, 8{{$}}
+# ASM: b.ne
+# MAXASM: b.ne
+tracksRegLiveness: true
+# ADAPT-LABEL: name: loop20
+# ADAPT: bb.1 (align 32):
+# DEFAULT-LABEL: name: loop20
+# DEFAULT: bb.1 (align 16):
+# EXPLICIT-LABEL: name: loop20
+# EXPLICIT: bb.1 (align 128):
+# NONE-LABEL: name: loop20
+# NONE: bb.1:
+# ALL-LABEL: name: loop20
+# ALL: bb.1 (align 8):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    HINT 0
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...
+
+---
+name: loop32
+# GENERIC-LABEL: name: loop32
+# GENERIC: bb.1 (align 32):
+# ASM-LABEL: loop32:
+# MAXASM-LABEL: loop32:
+# ASM: .p2align 5{{$}}
+# MAXASM: .p2align 5, 0x0, 8{{$}}
+# ASM: b.ne
+# MAXASM: b.ne
+tracksRegLiveness: true
+# ADAPT-LABEL: name: loop32
+# ADAPT: bb.1 (align 32):
+# DEFAULT-LABEL: name: loop32
+# DEFAULT: bb.1 (align 16):
+# EXPLICIT-LABEL: name: loop32
+# EXPLICIT: bb.1 (align 128):
+# NONE-LABEL: name: loop32
+# NONE: bb.1:
+# ALL-LABEL: name: loop32
+# ALL: bb.1 (align 8):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...
+
+---
+name: loop36
+# GENERIC-LABEL: name: loop36
+# GENERIC: bb.1 (align 64):
+# ASM-LABEL: loop36:
+# MAXASM-LABEL: loop36:
+# ASM: .p2align 6{{$}}
+# MAXASM: .p2align 6, 0x0, 8{{$}}
+# ASM: b.ne
+# MAXASM: b.ne
+tracksRegLiveness: true
+# ADAPT-LABEL: name: loop36
+# ADAPT: bb.1 (align 64):
+# DEFAULT-LABEL: name: loop36
+# DEFAULT: bb.1 (align 16):
+# EXPLICIT-LABEL: name: loop36
+# EXPLICIT: bb.1 (align 128):
+# NONE-LABEL: name: loop36
+# NONE: bb.1:
+# ALL-LABEL: name: loop36
+# ALL: bb.1 (align 8):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...
+
+---
+name: loop64
+# GENERIC-LABEL: name: loop64
+# GENERIC: bb.1 (align 64):
+# ASM-LABEL: loop64:
+# MAXASM-LABEL: loop64:
+# ASM: .p2align 6{{$}}
+# MAXASM: .p2align 6, 0x0, 8{{$}}
+# ASM: b.ne
+# MAXASM: b.ne
+tracksRegLiveness: true
+# ADAPT-LABEL: name: loop64
+# ADAPT: bb.1 (align 64):
+# DEFAULT-LABEL: name: loop64
+# DEFAULT: bb.1 (align 16):
+# EXPLICIT-LABEL: name: loop64
+# EXPLICIT: bb.1 (align 128):
+# NONE-LABEL: name: loop64
+# NONE: bb.1:
+# ALL-LABEL: name: loop64
+# ALL: bb.1 (align 8):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...
+
+---
+name: loop68
+# GENERIC-LABEL: name: loop68
+# GENERIC: bb.1:
+# ASM-LABEL: loop68:
+# MAXASM-LABEL: loop68:
+# ASM: .p2align 4, 0x0, 8{{$}}
+# MAXASM: .p2align 4, 0x0, 8{{$}}
+# ASM: b.ne
+# MAXASM: b.ne
+tracksRegLiveness: true
+# ADAPT-LABEL: name: loop68
+# ADAPT: bb.1 (align 16):
+# DEFAULT-LABEL: name: loop68
+# DEFAULT: bb.1 (align 16):
+# EXPLICIT-LABEL: name: loop68
+# EXPLICIT: bb.1 (align 128):
+# NONE-LABEL: name: loop68
+# NONE: bb.1:
+# ALL-LABEL: name: loop68
+# ALL: bb.1 (align 8):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...
+
+---
+name: minsize_loop
+# GENERIC-LABEL: name: minsize_loop
+# GENERIC: bb.1:
+# ASM-LABEL: minsize_loop:
+# MAXASM-LABEL: minsize_loop:
+# ASM-NOT: .p2align
+# MAXASM-NOT: .p2align
+# ASM: b.ne
+# MAXASM: b.ne
+tracksRegLiveness: true
+# ADAPT-LABEL: name: minsize_loop
+# ADAPT: bb.1:
+# DEFAULT-LABEL: name: minsize_loop
+# DEFAULT: bb.1:
+# EXPLICIT-LABEL: name: minsize_loop
+# EXPLICIT: bb.1:
+# NONE-LABEL: name: minsize_loop
+# NONE: bb.1:
+# ALL-LABEL: name: minsize_loop
+# ALL: bb.1 (align 8):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    HINT 0
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...
+
+---
+name: optsize_loop
+# GENERIC-LABEL: name: optsize_loop
+# GENERIC: bb.1:
+# ASM-LABEL: optsize_loop:
+# MAXASM-LABEL: optsize_loop:
+# ASM-NOT: .p2align
+# MAXASM-NOT: .p2align
+# ASM: b.ne
+# MAXASM: b.ne
+tracksRegLiveness: true
+# ADAPT-LABEL: name: optsize_loop
+# ADAPT: bb.1:
+# DEFAULT-LABEL: name: optsize_loop
+# DEFAULT: bb.1:
+# EXPLICIT-LABEL: name: optsize_loop
+# EXPLICIT: bb.1:
+# NONE-LABEL: name: optsize_loop
+# NONE: bb.1:
+# ALL-LABEL: name: optsize_loop
+# ALL: bb.1 (align 8):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    HINT 0
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...
+
+---
+name: meta_loop
+# GENERIC-LABEL: name: meta_loop
+# GENERIC: bb.1 (align 16):
+# ASM-LABEL: meta_loop:
+# MAXASM-LABEL: meta_loop:
+# ASM: .p2align 4{{$}}
+# MAXASM: .p2align 4, 0x0, 8{{$}}
+# ASM: b.ne
+# MAXASM: b.ne
+tracksRegLiveness: true
+# ADAPT-LABEL: name: meta_loop
+# ADAPT: bb.1 (align 16):
+# DEFAULT-LABEL: name: meta_loop
+# DEFAULT: bb.1 (align 16):
+# EXPLICIT-LABEL: name: meta_loop
+# EXPLICIT: bb.1 (align 128):
+# NONE-LABEL: name: meta_loop
+# NONE: bb.1:
+# ALL-LABEL: name: meta_loop
+# ALL: bb.1 (align 8):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    CFI_INSTRUCTION def_cfa_offset 0
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...
+
+---
+name: inline_asm_loop
+# GENERIC-LABEL: name: inline_asm_loop
+# GENERIC: bb.1:
+# ASM-LABEL: inline_asm_loop:
+# MAXASM-LABEL: inline_asm_loop:
+# ASM: .p2align 4, 0x0, 8{{$}}
+# MAXASM: .p2align 4, 0x0, 8{{$}}
+# ASM: b.ne
+# MAXASM: b.ne
+tracksRegLiveness: true
+# ADAPT-LABEL: name: inline_asm_loop
+# ADAPT: bb.1 (align 16):
+# DEFAULT-LABEL: name: inline_asm_loop
+# DEFAULT: bb.1 (align 16):
+# EXPLICIT-LABEL: name: inline_asm_loop
+# EXPLICIT: bb.1 (align 128):
+# NONE-LABEL: name: inline_asm_loop
+# NONE: bb.1:
+# ALL-LABEL: name: inline_asm_loop
+# ALL: bb.1 (align 8):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    INLINEASM &".p2align 7", 1
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...

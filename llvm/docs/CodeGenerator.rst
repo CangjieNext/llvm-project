@@ -75,6 +75,14 @@ implementing a new `code generation algorithm`_, it should only depend on the
 target-description and machine code representation classes, ensuring that it is
 portable.
 
+The Cangjie pipeline additionally supports
+:doc:`size-dependent AArch64 loop alignment <CangjieLoopAlignment>`.
+
+.. toctree::
+   :hidden:
+
+   CangjieLoopAlignment
+
 Required components in the code generator
 -----------------------------------------
 

@@ -1,4 +1,5 @@
 ; RUN: llc < %s -mtriple=i386-apple-darwin | FileCheck %s
+; RUN: llc < %s -mtriple=x86_64-apple-darwin -cangjie-pipeline -cj-stack-grow=false | FileCheck %s
 
 ; CodeGen should align the top of the loop, which differs from the loop
 ; header in this case.

@@ -1,0 +1,214 @@
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=cortex-a53 -cangjie-pipeline -verify-machineinstrs -force-loop-cold-block -tail-dup-placement=false -branch-fold-placement=false -run-pass=block-placement %s -o - | FileCheck %s
+
+# Include every block of a contiguous loop, retain the hotness filter, and
+# align only the innermost loop in a nest.
+--- |
+  define void @two_blocks(i64 %n, i32 %stop) { ret void }
+  define void @cold_loop(i64 %n, i32 %enter) { ret void }
+  define void @nested_loops(i64 %n, i64 %m) { ret void }
+  define void @padded_blocks(i64 %n, i32 %stop) { ret void }
+  define void @overaligned_block(i64 %n, i32 %stop) { ret void }
+  define void @split_loop(i64 %n, i32 %stop) { ret void }
+...
+---
+name: two_blocks
+tracksRegLiveness: true
+# CHECK-LABEL: name: two_blocks
+# CHECK: bb.1 (align 32):
+# CHECK: bb.2:
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0, $w1
+
+  bb.1:
+    successors: %bb.2(0x7e000000), %bb.3(0x02000000)
+    liveins: $x0, $w1
+
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    CBNZW $w1, %bb.3
+
+  bb.2:
+    successors: %bb.1(0x7c000000), %bb.3(0x04000000)
+    liveins: $x0, $w1
+
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.3:
+    RET undef $lr
+...
+---
+name: cold_loop
+tracksRegLiveness: true
+# CHECK-LABEL: name: cold_loop
+# CHECK: bb.1:
+body: |
+  bb.0:
+    successors: %bb.1(0x00001000), %bb.2(0x7ffff000)
+    liveins: $x0, $w1
+
+    CBNZW $w1, %bb.1
+    B %bb.2
+
+  bb.1:
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+
+    HINT 0
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.2:
+    RET undef $lr
+...
+---
+name: nested_loops
+tracksRegLiveness: true
+# CHECK-LABEL: name: nested_loops
+# CHECK: bb.1 (align 16):
+# CHECK: bb.2 (align 32):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0, $x1
+
+  bb.1:
+    successors: %bb.2(0x80000000)
+    liveins: $x0, $x1
+
+    $x2 = ORRXrs $xzr, $x1, 0
+
+  bb.2:
+    successors: %bb.2(0x7c000000), %bb.3(0x04000000)
+    liveins: $x0, $x1, $x2
+
+    HINT 0
+    HINT 0
+    HINT 0
+    $x2 = SUBSXri $x2, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.2, implicit $nzcv
+
+  bb.3:
+    successors: %bb.1(0x7c000000), %bb.4(0x04000000)
+    liveins: $x0, $x1
+
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.4:
+    RET undef $lr
+...
+
+---
+name: padded_blocks
+tracksRegLiveness: true
+# CHECK-LABEL: name: padded_blocks
+# CHECK: bb.1 (align 64):
+# CHECK: bb.2 (align 32):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0, $w1
+
+  bb.1:
+    successors: %bb.2(0x7e000000), %bb.3(0x02000000)
+    liveins: $x0, $w1
+
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    CBNZW $w1, %bb.3
+
+  bb.2 (align 32):
+    successors: %bb.1(0x7c000000), %bb.3(0x04000000)
+    liveins: $x0, $w1
+
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.3:
+    RET undef $lr
+...
+
+---
+name: overaligned_block
+tracksRegLiveness: true
+# CHECK-LABEL: name: overaligned_block
+# CHECK: bb.1 (align 16):
+# CHECK: bb.2 (align 128):
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0, $w1
+
+  bb.1:
+    successors: %bb.2(0x7e000000), %bb.3(0x02000000)
+    liveins: $x0, $w1
+
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    CBNZW $w1, %bb.3
+
+  bb.2 (align 128):
+    successors: %bb.1(0x7c000000), %bb.3(0x04000000)
+    liveins: $x0, $w1
+
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.3:
+    RET undef $lr
+...
+
+---
+name: split_loop
+tracksRegLiveness: true
+# CHECK-LABEL: name: split_loop
+# CHECK: bb.1 (align 16):
+# CHECK: bb.3:
+# CHECK: bb.4:
+# CHECK: bb.2:
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0, $w1
+
+  bb.1:
+    successors: %bb.2(0x00001000), %bb.3(0x7ffff000)
+    liveins: $x0, $w1
+
+    HINT 0
+    HINT 0
+    HINT 0
+    CBNZW $w1, %bb.2
+    B %bb.3
+
+  bb.2:
+    successors: %bb.1(0x80000000)
+    liveins: $x0, $w1
+
+    HINT 0
+    B %bb.1
+
+  bb.3:
+    successors: %bb.1(0x7c000000), %bb.4(0x04000000)
+    liveins: $x0, $w1
+
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+
+  bb.4:
+    RET undef $lr
+...
