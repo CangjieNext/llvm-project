@@ -1,4 +1,5 @@
 ; RUN: llc -mtriple=thumbv7m-none-eabi %s -mcpu=cortex-m3 -o - | FileCheck %s
+; RUN: llc -mtriple=thumbv7m-none-eabi %s -mcpu=cortex-m3 -cangjie-pipeline -o - | FileCheck %s
 ; RUN: llc -mtriple=thumbv7m-none-eabi %s -mcpu=cortex-m4 -o - | FileCheck %s
 ; RUN: llc -mtriple=thumbv8m-none-eabi %s -mcpu=cortex-m33 -o - | FileCheck %s
 

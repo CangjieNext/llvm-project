@@ -1,0 +1,2 @@
+# RUN: %python %S/Inputs/cj-loop-alignment-layout.py --llc llc --mc llvm-mc --readobj llvm-readobj --output %t | FileCheck %s
+# CHECK: Verified 240 loop layouts: one 64-byte window and unchanged loop instructions.
