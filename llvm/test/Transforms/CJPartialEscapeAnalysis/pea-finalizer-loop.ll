@@ -292,4 +292,116 @@ exit:
   ret i64 %i
 }
 
+; A conditional break from the body makes the body a second exiting block:
+; the break path skips the latch, so no destructor point can be proven.
+; CHECK-LABEL: define i64 @loop_body_break(
+; CHECK: CJ_MCC_NewFinalizer
+; CHECK-NOT: call void @w_dtor(
+define i64 @loop_body_break() gc "cangjie" {
+entry:
+  br label %header
+
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %latch ]
+  %cmp = icmp slt i64 %i, 10
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %obj = call i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8* bitcast (%TypeInfo* @W.ti to i8*), i32 16)
+  %p = getelementptr inbounds i8, i8 addrspace(1)* %obj, i64 8
+  %slot = bitcast i8 addrspace(1)* %p to i64 addrspace(1)*
+  store i64 1, i64 addrspace(1)* %slot, align 8
+  %c = icmp eq i64 %i, 3
+  br i1 %c, label %exit, label %latch
+
+latch:
+  %next = add i64 %i, 1
+  br label %header
+
+exit:
+  ret i64 %i
+}
+
+; An in-loop invoke whose unwind edge bypasses the latch leaves a path from
+; the allocation (and from the store use) that skips the destructor: reject.
+; CHECK-LABEL: define i64 @loop_invoke_unwind_skip(
+; CHECK: CJ_MCC_NewFinalizer
+; CHECK-NOT: call void @w_dtor(
+define i64 @loop_invoke_unwind_skip() gc "cangjie" personality i32 (...)* @__cj_personality_v0 {
+entry:
+  br label %header
+
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %latch ]
+  %cmp = icmp slt i64 %i, 10
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %obj = call i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8* bitcast (%TypeInfo* @W.ti to i8*), i32 16)
+  %p = getelementptr inbounds i8, i8 addrspace(1)* %obj, i64 8
+  %slot = bitcast i8 addrspace(1)* %p to i64 addrspace(1)*
+  store i64 1, i64 addrspace(1)* %slot, align 8
+  invoke void @may_throw() to label %latch unwind label %lpad
+
+latch:
+  %next = add i64 %i, 1
+  br label %header
+
+lpad:
+  %lp = landingpad { i8*, i32 } cleanup
+  resume { i8*, i32 } %lp
+
+exit:
+  ret i64 %i
+}
+
+; A use inside a nested inner loop is still local to the outer loop: every
+; path from the allocation and from the load reaches the outer latch, so
+; promotion is legal and ~init runs once per outer iteration.
+; CHECK-LABEL: define i64 @loop_nested_inner(
+; CHECK: alloca { %TypeInfo*, %ObjLayout.W }
+; CHECK-NOT: CJ_MCC_NewFinalizer
+; CHECK: call void @w_dtor(
+; CHECK-NEXT: br label %header
+define i64 @loop_nested_inner() gc "cangjie" {
+entry:
+  br label %header
+
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %latch ]
+  %sum = phi i64 [ 0, %entry ], [ %add, %latch ]
+  %cmp = icmp slt i64 %i, 10
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %obj = call i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8* bitcast (%TypeInfo* @W.ti to i8*), i32 16)
+  %p = getelementptr inbounds i8, i8 addrspace(1)* %obj, i64 8
+  %slot = bitcast i8 addrspace(1)* %p to i64 addrspace(1)*
+  store i64 1, i64 addrspace(1)* %slot, align 8
+  br label %iheader
+
+iheader:
+  %j = phi i64 [ 0, %body ], [ %jnext, %ilatch ]
+  %vsum = phi i64 [ 0, %body ], [ %vadd, %ilatch ]
+  %jcmp = icmp slt i64 %j, 4
+  br i1 %jcmp, label %ibody, label %latch
+
+ibody:
+  %v = load i64, i64 addrspace(1)* %slot, align 8
+  %vadd = add i64 %vsum, %v
+  br label %ilatch
+
+ilatch:
+  %jnext = add i64 %j, 1
+  br label %iheader
+
+latch:
+  %add = add i64 %sum, %vsum
+  %next = add i64 %i, 1
+  br label %header
+
+exit:
+  ret i64 %sum
+}
+
 !0 = !{!"ObjLayout.W"}

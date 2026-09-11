@@ -169,13 +169,6 @@ Function *getFinalizerMethod(GlobalVariable *Klass, Module *M) {
   return nullptr;
 }
 
-// The language spec states that an uncaught exception escaping a finalizer
-// (~init) is undefined behavior. We therefore do not prove that the finalizer
-// cannot throw: if a promoted finalizer throws, the exception simply surfaces
-// synchronously at the insertion point instead of being swallowed on the GC
-// finalizer thread. This keeps the legality check deterministic instead of
-// depending on whether the inliner happened to expose a hidden throw.
-
 // True if some path from CreateBB reaches a function exit that is not a
 // normal return (unreachable / resume). Invoke itself is not an exit: both
 // the normal and unwind successors are followed. Post-loop invokes therefore
@@ -348,12 +341,11 @@ collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
   }
 
   for (Instruction *U : UseInsts) {
+    // The latch terminator itself may be a use (an invoke on the object):
+    // inserting ~init before it would destroy the object before that use.
     if (U == InsertPoint)
       return false;
     if (!instPostDominates(PDT, InsertPoint, U))
-      return false;
-    // InsertPoint dominating U means U happens after destruction.
-    if (DT.dominates(InsertPoint, U))
       return false;
   }
 
@@ -421,6 +413,16 @@ static bool canStackAllocateFinalizer(CallBase *CB, Module *M, LoopInfo *LI) {
   Function *FinalizerMethod = getFinalizerMethod(Klass, M);
   if (FinalizerMethod == nullptr)
     return false;
+  // The finalizer is deliberately not required to be nounwind. The Cangjie
+  // language specification ("class 终结器" rules) states that an uncaught
+  // exception escaping a finalizer (~init) is undefined behavior, so if a
+  // promoted finalizer throws, surfacing the exception synchronously at the
+  // insertion point instead of on the GC finalizer thread is a legal — and
+  // deterministic — realization of that UB. The specification also leaves
+  // the timing of finalizer execution undetermined and contemplates cases
+  // where it does not run at all, so unwinding past the insertion point via
+  // a may-throw plain call between the last use and the destructor (which
+  // skips ~init) stays within language semantics as well.
   BasicBlock *BB = CB->getParent();
   DominatorTree DT(*BB->getParent());
   // Loop-local objects: the latch post-dominator check already rejects paths
