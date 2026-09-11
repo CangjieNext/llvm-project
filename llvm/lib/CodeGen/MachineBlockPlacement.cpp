@@ -389,7 +389,7 @@ class MachineBlockPlacement : public MachineFunctionPass {
   /// A handle to the post dominator tree.
   MachinePostDominatorTree *MPDT;
 
-  ProfileSummaryInfo *PSI;
+  ProfileSummaryInfo *ProfileSummary;
 
   /// Duplicator used to duplicate tails during placement.
   ///
@@ -2149,7 +2149,7 @@ MachineBlockPlacement::findBestLoopTop(const MachineLoop &L,
   // In practice this never happens though: there always seems to be a preheader
   // that can fallthrough and that is also placed before the header.
   bool OptForSize = F->getFunction().hasOptSize() ||
-                    llvm::shouldOptimizeForSize(L.getHeader(), PSI, MBFI.get());
+                    llvm::shouldOptimizeForSize(L.getHeader(), ProfileSummary, MBFI.get());
   if (OptForSize)
     return L.getHeader();
 
@@ -2891,33 +2891,41 @@ void MachineBlockPlacement::optimizeBranches() {
 
 void MachineBlockPlacement::alignBlocks() {
   if (F->getFunction().hasMinSize() ||
-      (F->getFunction().hasOptSize() && !TLI->alignLoopsWithOptSize()))
+      (F->getFunction().hasOptSize() && !TLI->alignLoopsWithOptSize())) {
     return;
+  }
   BlockChain &FunctionChain = *BlockToChain[&F->front()];
-  if (FunctionChain.begin() == FunctionChain.end())
+  if (FunctionChain.begin() == FunctionChain.end()) {
     return;
+  }
 
   Optional<unsigned> MaxBytesOverride;
-  if (MaxBytesForAlignmentOverride.getNumOccurrences() > 0)
+  if (MaxBytesForAlignmentOverride.getNumOccurrences() > 0) {
     MaxBytesOverride = MaxBytesForAlignmentOverride;
-  MachineLoopAlignment AlignmentPolicy(*TLI, *MBFI, *MBPI, PSI);
+  }
+  MachineLoopAlignment AlignmentPolicy(*TLI, *MBFI, *MBPI, ProfileSummary);
   for (MachineBasicBlock *ChainBB : FunctionChain) {
-    if (ChainBB == *FunctionChain.begin())
+    if (ChainBB == *FunctionChain.begin()) {
       continue;
+    }
     MachineLoop *L = MLI->getLoopFor(ChainBB);
-    if (!L)
+    if (!L) {
       continue;
+    }
     const Align Alignment = TLI->getPrefLoopAlignment(L);
     // A target with no preferred alignment must retain existing block metadata.
-    if (Alignment == 1 || !AlignmentPolicy.shouldAlign(*ChainBB, *L))
+    if (Alignment == 1 || !AlignmentPolicy.shouldAlign(*ChainBB, *L)) {
       continue;
+    }
     ChainBB->setAlignment(Alignment);
     ChainBB->setMaxBytesForAlignment(
         MaxBytesOverride ? *MaxBytesOverride
                          : TLI->getMaxPermittedBytesForAlignment(ChainBB));
   }
-  AlignmentPolicy.alignSmallLoops(
-      *F, *MLI, AlignAllBlock || AlignAllNonFallThruBlocks, MaxBytesOverride);
+  if (CJPipeline) {
+    AlignmentPolicy.alignSmallLoops(
+        *F, *MLI, AlignAllBlock || AlignAllNonFallThruBlocks, MaxBytesOverride);
+  }
 }
 
 /// Tail duplicate \p BB into (some) predecessors if profitable, repeating if
@@ -3261,7 +3269,7 @@ void MachineBlockPlacement::initDupThreshold() {
     return;
 
   // We prefer to use prifile count.
-  uint64_t HotThreshold = PSI->getOrCompHotCountThreshold();
+  uint64_t HotThreshold = ProfileSummary->getOrCompHotCountThreshold();
   if (HotThreshold != UINT64_MAX) {
     UseProfileCount = true;
     DupThreshold = HotThreshold * TailDupProfilePercentThreshold / 100;
@@ -3297,7 +3305,7 @@ bool MachineBlockPlacement::runOnMachineFunction(MachineFunction &MF) {
   TII = MF.getSubtarget().getInstrInfo();
   TLI = MF.getSubtarget().getTargetLowering();
   MPDT = nullptr;
-  PSI = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
+  ProfileSummary = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
 
   initDupThreshold();
 
@@ -3338,11 +3346,11 @@ bool MachineBlockPlacement::runOnMachineFunction(MachineFunction &MF) {
   if (allowTailDupPlacement()) {
     MPDT = &getAnalysis<MachinePostDominatorTree>();
     bool OptForSize = MF.getFunction().hasOptSize() ||
-                      llvm::shouldOptimizeForSize(&MF, PSI, &MBFI->getMBFI());
+                      llvm::shouldOptimizeForSize(&MF, ProfileSummary, &MBFI->getMBFI());
     if (OptForSize)
       TailDupSize = 1;
     bool PreRegAlloc = false;
-    TailDup.initMF(MF, PreRegAlloc, MBPI, MBFI.get(), PSI,
+    TailDup.initMF(MF, PreRegAlloc, MBPI, MBFI.get(), ProfileSummary,
                    /* LayoutMode */ true, TailDupSize);
     precomputeTriangleChains();
   }
@@ -3359,7 +3367,7 @@ bool MachineBlockPlacement::runOnMachineFunction(MachineFunction &MF) {
   if (MF.size() > 3 && EnableTailMerge) {
     unsigned TailMergeSize = TailDupSize + 1;
     BranchFolder BF(/*DefaultEnableTailMerge=*/true, /*CommonHoist=*/false,
-                    *MBFI, *MBPI, PSI, TailMergeSize);
+                    *MBFI, *MBPI, ProfileSummary, TailMergeSize);
 
     if (BF.OptimizeFunction(MF, TII, MF.getSubtarget().getRegisterInfo(), MLI,
                             /*AfterPlacement=*/true)) {

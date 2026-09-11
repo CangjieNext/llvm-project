@@ -27,16 +27,16 @@ class MachineLoopAlignment {
   const TargetLoweringBase &TLI;
   MBFIWrapper &MBFI;
   const MachineBranchProbabilityInfo &MBPI;
-  ProfileSummaryInfo *PSI;
+  ProfileSummaryInfo *ProfileSummary;
 
 public:
   MachineLoopAlignment(const TargetLoweringBase &TLI, MBFIWrapper &MBFI,
                        const MachineBranchProbabilityInfo &MBPI,
-                       ProfileSummaryInfo *PSI);
+                       ProfileSummaryInfo *ProfileSummary);
 
   bool shouldAlign(MachineBasicBlock &MBB, const MachineLoop &Loop) const;
 
-  /// Apply after ordinary alignment and the function size-optimization checks.
+  /// Apply in the Cangjie pipeline after ordinary alignment and size checks.
   void alignSmallLoops(MachineFunction &MF, MachineLoopInfo &MLI,
                        bool HasExplicitBlockAlignment,
                        Optional<unsigned> MaxBytesOverride) const;
