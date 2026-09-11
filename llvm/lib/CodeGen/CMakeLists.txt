@@ -119,6 +119,7 @@ add_llvm_component_library(LLVMCodeGen
   MachineInstrBundle.cpp
   MachineInstr.cpp
   MachineLICM.cpp
+  MachineLoopAlignment.cpp
   MachineLoopInfo.cpp
   MachineLoopUtils.cpp
   MachineModuleInfo.cpp

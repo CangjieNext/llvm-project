@@ -34,7 +34,10 @@ blocks inside the loop. Larger loops, outer loops and split loops retain the
 ordinary policy. Cold loops and functions optimized for size are not newly
 aligned. The adaptive policy permits sufficient padding to realize the chosen
 alignment instead of conditionally skipping it based on preceding code size.
-The maximum extra padding requested by the adaptive policy is 63 bytes.
+The selected 16/32/64-byte alignment requires at most 63 bytes of padding.
+An inherited stronger alignment can require more. When the ordinary target
+policy leaves existing block alignment unchanged, the adaptive policy also
+preserves it, including for loops that are too large or contain inline assembly.
 
 This is a layout heuristic, not a runtime performance guarantee. Instruction
 sizes are target estimates, and transformations after block placement can

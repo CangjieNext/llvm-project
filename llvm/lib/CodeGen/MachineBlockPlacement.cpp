@@ -25,6 +25,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "BranchFolding.h"
+#include "MachineLoopAlignment.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -60,7 +61,6 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Utils/CodeLayout.h"
@@ -103,12 +103,6 @@ static cl::opt<unsigned> MaxBytesForAlignmentOverride(
     cl::desc("Forces the maximum bytes allowed to be emitted when padding for "
              "alignment"),
     cl::init(0), cl::Hidden);
-
-static cl::opt<bool> CJAdaptiveLoopAlignment(
-    "cj-adaptive-loop-alignment",
-    cl::desc("Align small AArch64 loops according to their size in the "
-             "Cangjie pipeline"),
-    cl::init(true), cl::Hidden);
 
 // FIXME: Find a good default for this flag and remove the flag.
 static cl::opt<unsigned> ExitBlockBias(
@@ -2895,148 +2889,35 @@ void MachineBlockPlacement::optimizeBranches() {
   }
 }
 
-/// Choose the smallest alignment that contains a small loop in a 64-byte
-/// window. Called after ordinary block alignment so that padding inside a
-/// multi-block loop is included in its size. AArch64's instruction sizes are
-/// upper bounds; inline assembly can contain layout-dependent directives and
-/// is deliberately excluded.
-static Align getCJSmallLoopAlignment(MachineBasicBlock *Top, MachineLoop *L,
-                                    const TargetInstrInfo *TII) {
-  constexpr unsigned MaxLoopSize = 64;
-  unsigned LoopSize = 0;
-  unsigned NumBlocks = 0;
-  Align MinAlignment(16);
-  for (auto I = Top->getIterator(), E = Top->getParent()->end();
-       I != E && L->contains(&*I); ++I) {
-    if (&*I != Top) {
-      Align BlockAlignment = I->getAlignment();
-      if (BlockAlignment > Align(MaxLoopSize))
-        return Align(1);
-      MinAlignment = std::max(MinAlignment, BlockAlignment);
-      LoopSize = alignTo(LoopSize, BlockAlignment);
-    }
-    for (const MachineInstr &MI : *I) {
-      if (MI.isInlineAsm())
-        return Align(1);
-      unsigned InstSize = TII->getInstSizeInBytes(MI);
-      if (InstSize > MaxLoopSize - LoopSize)
-        return Align(1);
-      LoopSize += InstSize;
-    }
-    ++NumBlocks;
-  }
-  // A split loop can contain unrelated blocks in its physical layout.
-  if (NumBlocks != L->getNumBlocks())
-    return Align(1);
-  return std::max(MinAlignment, Align(PowerOf2Ceil(std::max(16u, LoopSize))));
-}
-
 void MachineBlockPlacement::alignBlocks() {
-  // Walk through the backedges of the function now that we have fully laid out
-  // the basic blocks and align the destination of each backedge. We don't rely
-  // exclusively on the loop info here so that we can align backedges in
-  // unnatural CFGs and backedges that were introduced purely because of the
-  // loop rotations done during this layout pass.
   if (F->getFunction().hasMinSize() ||
       (F->getFunction().hasOptSize() && !TLI->alignLoopsWithOptSize()))
     return;
   BlockChain &FunctionChain = *BlockToChain[&F->front()];
   if (FunctionChain.begin() == FunctionChain.end())
-    return; // Empty chain.
+    return;
 
-  const BranchProbability ColdProb(1, 5); // 20%
-  BlockFrequency EntryFreq = MBFI->getBlockFreq(&F->front());
-  BlockFrequency WeightedEntryFreq = EntryFreq * ColdProb;
-  const bool UseCJAdaptiveAlignment =
-      CJPipeline && CJAdaptiveLoopAlignment &&
-      F->getTarget().getTargetTriple().isAArch64() &&
-      !F->getTarget().Options.LoopAlignment && !AlignAllBlock &&
-      !AlignAllNonFallThruBlocks;
-  SmallVector<std::pair<MachineBasicBlock *, MachineLoop *>, 8> SmallLoops;
+  Optional<unsigned> MaxBytesOverride;
+  if (MaxBytesForAlignmentOverride.getNumOccurrences() > 0)
+    MaxBytesOverride = MaxBytesForAlignmentOverride;
+  MachineLoopAlignment AlignmentPolicy(*TLI, *MBFI, *MBPI, PSI);
   for (MachineBasicBlock *ChainBB : FunctionChain) {
     if (ChainBB == *FunctionChain.begin())
       continue;
-
-    // Don't align non-looping basic blocks. These are unlikely to execute
-    // enough times to matter in practice. Note that we'll still handle
-    // unnatural CFGs inside of a natural outer loop (the common case) and
-    // rotated loops.
     MachineLoop *L = MLI->getLoopFor(ChainBB);
     if (!L)
       continue;
-
-    const Align Align = TLI->getPrefLoopAlignment(L);
-    if (Align == 1 && !UseCJAdaptiveAlignment)
-      continue; // Don't care about loop alignment.
-
-    // If the block is cold relative to the function entry don't waste space
-    // aligning it.
-    BlockFrequency Freq = MBFI->getBlockFreq(ChainBB);
-    if (Freq < WeightedEntryFreq)
+    const Align Alignment = TLI->getPrefLoopAlignment(L);
+    // A target with no preferred alignment must retain existing block metadata.
+    if (Alignment == 1 || !AlignmentPolicy.shouldAlign(*ChainBB, *L))
       continue;
-
-    // If the block is cold relative to its loop header, don't align it
-    // regardless of what edges into the block exist.
-    MachineBasicBlock *LoopHeader = L->getHeader();
-    BlockFrequency LoopHeaderFreq = MBFI->getBlockFreq(LoopHeader);
-    if (Freq < (LoopHeaderFreq * ColdProb))
-      continue;
-
-    // If the global profiles indicates so, don't align it.
-    if (llvm::shouldOptimizeForSize(ChainBB, PSI, MBFI.get()) &&
-        !TLI->alignLoopsWithOptSize())
-      continue;
-
-    // Check for the existence of a non-layout predecessor which would benefit
-    // from aligning this block.
-    MachineBasicBlock *LayoutPred =
-        &*std::prev(MachineFunction::iterator(ChainBB));
-
-    auto DetermineMaxAlignmentPadding = [&]() {
-      // Set the maximum bytes allowed to be emitted for alignment.
-      unsigned MaxBytes;
-      if (MaxBytesForAlignmentOverride.getNumOccurrences() > 0)
-        MaxBytes = MaxBytesForAlignmentOverride;
-      else
-        MaxBytes = TLI->getMaxPermittedBytesForAlignment(ChainBB);
-      ChainBB->setMaxBytesForAlignment(MaxBytes);
-      if (UseCJAdaptiveAlignment && L->isInnermost() &&
-          !L->contains(LayoutPred))
-        SmallLoops.emplace_back(ChainBB, L);
-    };
-
-    // Force alignment if all the predecessors are jumps. We already checked
-    // that the block isn't cold above.
-    if (!LayoutPred->isSuccessor(ChainBB)) {
-      ChainBB->setAlignment(Align);
-      DetermineMaxAlignmentPadding();
-      continue;
-    }
-
-    // Align this block if the layout predecessor's edge into this block is
-    // cold relative to the block. When this is true, other predecessors make up
-    // all of the hot entries into the block and thus alignment is likely to be
-    // important.
-    BranchProbability LayoutProb =
-        MBPI->getEdgeProbability(LayoutPred, ChainBB);
-    BlockFrequency LayoutEdgeFreq = MBFI->getBlockFreq(LayoutPred) * LayoutProb;
-    if (LayoutEdgeFreq <= (Freq * ColdProb)) {
-      ChainBB->setAlignment(Align);
-      DetermineMaxAlignmentPadding();
-    }
+    ChainBB->setAlignment(Alignment);
+    ChainBB->setMaxBytesForAlignment(
+        MaxBytesOverride ? *MaxBytesOverride
+                         : TLI->getMaxPermittedBytesForAlignment(ChainBB));
   }
-
-  for (auto &Loop : SmallLoops) {
-    MachineBasicBlock *Top = Loop.first;
-    Align Alignment = getCJSmallLoopAlignment(Top, Loop.second, TII);
-    if (Alignment == 1)
-      continue;
-    // Keep a stronger target alignment. Unless explicitly limited by the user,
-    // allow enough padding to actually realize it.
-    Top->setAlignment(std::max(Top->getAlignment(), Alignment));
-    if (MaxBytesForAlignmentOverride.getNumOccurrences() == 0)
-      Top->setMaxBytesForAlignment(0);
-  }
+  AlignmentPolicy.alignSmallLoops(
+      *F, *MLI, AlignAllBlock || AlignAllNonFallThruBlocks, MaxBytesOverride);
 }
 
 /// Tail duplicate \p BB into (some) predecessors if profitable, repeating if

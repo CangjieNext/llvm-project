@@ -1,0 +1,73 @@
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=generic -cangjie-pipeline -verify-machineinstrs -run-pass=block-placement %s -o - | FileCheck %s
+# RUN: llc -mtriple=aarch64-linux-gnu -mcpu=generic -cangjie-pipeline -cj-adaptive-loop-alignment=false -verify-machineinstrs -run-pass=block-placement %s -o - | FileCheck %s
+
+# The generic target has no preferred loop alignment. Its ordinary policy
+# leaves existing metadata untouched. Adaptive alignment must not weaken it,
+# including when the loop is too large or contains inline assembly.
+---
+name: large_loop
+# CHECK-LABEL: name: large_loop
+# CHECK: bb.1 (align 64):
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+  bb.1 (align 64):
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    HINT 0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+  bb.2:
+    RET undef $lr
+...
+---
+name: stronger_alignment
+# CHECK-LABEL: name: stronger_alignment
+# CHECK: bb.1 (align 64):
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+  bb.1 (align 64):
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+  bb.2:
+    RET undef $lr
+...
+---
+name: inline_assembly
+# CHECK-LABEL: name: inline_assembly
+# CHECK: bb.1 (align 64):
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1(0x80000000)
+    liveins: $x0
+  bb.1 (align 64):
+    successors: %bb.1(0x7c000000), %bb.2(0x04000000)
+    liveins: $x0
+    INLINEASM &"nop", 1
+    $x0 = SUBSXri $x0, 1, 0, implicit-def $nzcv
+    Bcc 1, %bb.1, implicit $nzcv
+  bb.2:
+    RET undef $lr
+...
