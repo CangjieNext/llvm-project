@@ -91,11 +91,11 @@
 
 // typemap for a char buffer
 %typemap(in) (char *dst, size_t dst_len) {
-  if (!PyInt_Check($input)) {
+  if (!PyLong_Check($input)) {
     PyErr_SetString(PyExc_ValueError, "Expecting an integer");
     return NULL;
   }
-  $2 = PyInt_AsLong($input);
+  $2 = PyLong_AsLong($input);
   if ($2 <= 0) {
     PyErr_SetString(PyExc_ValueError, "Positive integer expected");
     return NULL;
@@ -127,11 +127,11 @@
 
 // typemap for handling an snprintf-like API like SBThread::GetStopDescription.
 %typemap(in) (char *dst_or_null, size_t dst_len) {
-  if (!PyInt_Check($input)) {
+  if (!PyLong_Check($input)) {
     PyErr_SetString(PyExc_ValueError, "Expecting an integer");
     return NULL;
   }
-  $2 = PyInt_AsLong($input);
+  $2 = PyLong_AsLong($input);
   if ($2 <= 0) {
     PyErr_SetString(PyExc_ValueError, "Positive integer expected");
     return NULL;
@@ -193,12 +193,10 @@
 // typemap for an incoming buffer
 // See also SBProcess::ReadMemory.
 %typemap(in) (void *buf, size_t size) {
-  if (PyInt_Check($input)) {
-    $2 = PyInt_AsLong($input);
-  } else if (PyLong_Check($input)) {
+  if (PyLong_Check($input)) {
     $2 = PyLong_AsLong($input);
   } else {
-    PyErr_SetString(PyExc_ValueError, "Expecting an integer or long object");
+    PyErr_SetString(PyExc_ValueError, "Expecting an integer");
     return NULL;
   }
   if ($2 <= 0) {
@@ -246,9 +244,7 @@ template <> int32_t PyLongAsT<int32_t>(PyObject *obj) {
 }
 
 template <class T> bool SetNumberFromPyObject(T &number, PyObject *obj) {
-  if (PyInt_Check(obj))
-    number = static_cast<T>(PyInt_AsLong(obj));
-  else if (PyLong_Check(obj))
+  if (PyLong_Check(obj))
     number = PyLongAsT<T>(obj);
   else
     return false;
@@ -333,7 +329,7 @@ template <> bool SetNumberFromPyObject<double>(double &number, PyObject *obj) {
     count = $2;
   PyObject *list = PyList_New(count);
   for (uint32_t j = 0; j < count; j++) {
-    PyObject *item = PyInt_FromLong($1[j]);
+    PyObject *item = PyLong_FromLong($1[j]);
     int ok = PyList_SetItem(list, j, item);
     if (ok != 0) {
       $result = Py_None;
