@@ -111,12 +111,13 @@ bool isStringLiteral(const GlobalVariable &gv) {
   return gv.hasAttribute(CJSTRING_LITERAL_ATTR);
 }
 
-// A GV holding a String record value (literal record or String-typed global
-// variable initialized from a literal).
+// A GV holding the std.core String record value (literal record or
+// String-typed global variable initialized from a literal). The name is
+// matched exactly: a prefix test would also accept hypothetical std.core
+// structs named String*, and those must not be frozen into read-only memory.
 bool isStringRecordGV(const GlobalVariable &gv) {
   auto *st = dyn_cast<StructType>(gv.getValueType());
-  return st && st->hasName() &&
-         st->getName().startswith("record.std.core:String");
+  return st && st->hasName() && st->getName() == "record.std.core:String";
 }
 
 // Every use of the buffer must bottom out in cjstring literal initializers.

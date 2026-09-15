@@ -25,6 +25,7 @@
 ; CHECK-DAG: @mut_str = global %"record.std.core:String" { i8 addrspace(1)* addrspacecast (i8* bitcast ({ i8*, i64, [8 x i8] }* @"$const_cjstring_data.merged" to i8*) to i8 addrspace(1)*), i32 3, i32 3 }
 ; CHECK-DAG: @"$const_cjstring_data.dupdup" = private constant { i8*, i64, [2 x i8] }
 ; CHECK-DAG: @agg = global [2 x i8*]
+; CHECK-DAG: @sb_like = global %"record.std.core:StringBuilder"
 ; CHECK-DAG: @"$const_cjstring_data.inst" = private constant
 ; CHECK-DAG: @"$const_cjstring_data.badce" = private constant
 ; CHECK-DAG: @"$const_cjstring_data.nongv" = private constant
@@ -35,6 +36,9 @@
 target triple = "aarch64--linux-gnu"
 
 %"record.std.core:String" = type { i8 addrspace(1)*, i32, i32 }
+; A hypothetical std.core struct whose name only *starts with* "String";
+; the pass must match the String record by exact name, not by prefix.
+%"record.std.core:StringBuilder" = type { i8 addrspace(1)*, i32, i32 }
 %TypeInfo = type { i8 }
 @"RawArray<UInt8>.ti" = external global %TypeInfo
 
@@ -59,6 +63,7 @@ target triple = "aarch64--linux-gnu"
 ; A mutable String global (record type, no attribute) is repointed like a
 ; literal but must stay non-constant.
 ; NOMERGE-DAG: @mut_str = global %"record.std.core:String"
+; NOMERGE-DAG: @sb_like = global %"record.std.core:StringBuilder"
 @mut_str = global %"record.std.core:String" { i8 addrspace(1)* addrspacecast (i8* bitcast ({ i8*, i64, [3 x i8] }* @"$const_cjstring_data.bbbb" to i8*) to i8 addrspace(1)*), i32 0, i32 3 }
 
 ; An attribute-marked global that is NOT a String record cannot be repointed
@@ -67,6 +72,10 @@ target triple = "aarch64--linux-gnu"
 ; the de-duplication of the constant-user walk.
 ; WARN: CJStringPoolMerge: $const_cjstring_data.dupdup still has users after merging, kept (duplicate!)
 @agg = global [2 x i8*] [ i8* bitcast ({ i8*, i64, [2 x i8] }* @"$const_cjstring_data.dupdup" to i8*), i8* bitcast ({ i8*, i64, [2 x i8] }* @"$const_cjstring_data.dupdup" to i8*) ] #1
+
+; Attribute-marked but of a non-String-record type: must never be flipped to
+; constant (a prefix match on the type name would wrongly accept it).
+@sb_like = global %"record.std.core:StringBuilder" zeroinitializer #1
 
 ; Buffers with any of these users are not mergeable and stay untouched:
 ; a direct instruction user, a non-cast/GEP constant expression, a
