@@ -225,11 +225,21 @@ std::vector<BufferInfo> collectBuffers(Module &M) {
       if (!cda->isString())
         continue;
       info.bytes = cda->getAsString().str();
-    } else if (isa<ConstantAggregateZero>(data) &&
-               cast<ArrayType>(data->getType())->getNumElements() == 0) {
-      // Constant uniquing folds an empty data array to zeroinitializer;
-      // CodeGen emits empty-string buffers in that form.
-      info.bytes = "";
+    } else if (auto *caz = dyn_cast<ConstantAggregateZero>(data)) {
+      // ConstantAggregateZero is not a ConstantDataArray (both derive from
+      // ConstantData), so the branch above never sees the zero-filled form:
+      // ConstantDataSequential::getImpl returns a zero aggregate directly for
+      // all-zero data, which CodeGen reaches through
+      // ConstantDataArray::getString. The element count is kept, so the empty
+      // string arrives as a 0-element [0 x i8] and a single-NUL-byte literal
+      // as a 1-element [1 x i8]. Their contents are exactly NUL bytes, so they
+      // merge like any other deferred buffer; treating only the 0-element form
+      // as mergeable left the other one behind as a standalone object with a
+      // needless class-info relocation.
+      auto *arr = dyn_cast<ArrayType>(caz->getType());
+      if (!arr || !arr->getElementType()->isIntegerTy(8))
+        continue;
+      info.bytes.assign(arr->getNumElements(), '\0');
     } else {
       continue;
     }
