@@ -44,6 +44,11 @@
 // nonzero start offsets and possibly already-folded consumers, so they are
 // left completely untouched.
 //
+// -cj-string-pool-merge=false turns the merge (and the repoint) off, but it
+// does not undo the CodeGen change: the per-literal buffers stay and every
+// literal keeps start == 0. It is a merge-off switch, not a revert to the
+// legacy per-package pool.
+//
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "cj-string-pool-merge"
@@ -74,7 +79,10 @@ STATISTIC(BytesAfter, "Shared pool bytes after merging");
 
 static cl::opt<bool> CJStringPoolMergeEnable(
     "cj-string-pool-merge", cl::Hidden, cl::init(true),
-    cl::desc("Merge cangjie cjstring data buffers into one shared pool"));
+    cl::desc("Merge cangjie cjstring data buffers into one shared pool. "
+             "Disabling skips the merge but keeps the CodeGen-emitted "
+             "per-literal buffers; it does not restore the legacy "
+             "per-package pool layout"));
 
 static cl::opt<bool> CJStringPoolMergeVerbose(
     "cj-string-pool-merge-verbose", cl::Hidden, cl::init(false),
@@ -394,8 +402,13 @@ uint64_t bufferHeaderBytes(const DataLayout &DL, const BufferInfo &B) {
 
 PreservedAnalyses CJStringPoolMerge::run(Module &M,
                                          ModuleAnalysisManager &) const {
-  // Even with merging disabled, restore constness: CodeGen emitted the
-  // literals as non-constant globals and expects this pass to flip them.
+  // Merging off: CodeGen has already emitted one buffer per string and the
+  // literal records as non-constant globals, so there is nothing to undo here.
+  // Skip the packing/repoint entirely, but still restore constness -- the
+  // literals' "black hole" contract relies on this pass flipping them back.
+  // The result keeps every per-literal buffer and every start == 0 literal:
+  // it is the deferred layout without pooling, not the legacy per-package
+  // pool (which had nonzero start offsets into a single package-wide buffer).
   if (!CJStringPoolMergeEnable) {
     restoreConstantLiterals(M);
     return PreservedAnalyses::none();
