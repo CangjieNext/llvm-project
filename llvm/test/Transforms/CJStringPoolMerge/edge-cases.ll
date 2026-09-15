@@ -12,8 +12,8 @@
 ;    propagates it to the merged pool; a buffer with no users is ignored;
 ;  - a mutable (non-constant, unmarked) String global is repointed but stays
 ;    non-constant;
-;  - with -cj-string-pool-merge=false nothing is merged and black-holed
-;    literals are still flipped back to constant.
+;  - with -cj-string-pool-merge=false nothing is merged and the literal
+;    records are still flipped back to constant.
 ; CHECK-NOT: $const_cjstring_data.aaaa
 ; CHECK-NOT: $const_cjstring_data.bbbb
 ; CHECK-NOT: $const_cjstring_data.empty
@@ -99,7 +99,7 @@ define i8* @ret_ceinst() {
   ret i8* bitcast ({ i8*, i64, [3 x i8] }* @"$const_cjstring_data.ceinst" to i8*)
 }
 
-; With merging disabled, black-holed literals are still flipped back to
+; With merging disabled, the literal records are still flipped back to
 ; constant and every original buffer stays. Non-record globals that merely
 ; carry the cjstring_literal attribute are not flipped in either mode.
 ; NOMERGE-DAG: @agg = global [2 x i8*]

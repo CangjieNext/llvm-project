@@ -11,9 +11,9 @@
 // Attribute and name markers shared by the cangjie CodeGen that emits the
 // cjstring data buffers / literal records and the passes that consume them.
 // CJStringPoolMerge keys the merge on these, and GlobalOpt must recognize
-// CJSTRING_LITERAL_ATTR to leave the non-constant "black hole" literals
-// alone, so the spelling lives in one place instead of per-translation-unit
-// string literals.
+// CJSTRING_LITERAL_ATTR to leave the non-constant literal records alone, so
+// the spelling lives in one place instead of per-translation-unit string
+// literals.
 //
 //===----------------------------------------------------------------------===//
 
@@ -31,9 +31,9 @@ inline constexpr const char *CJSTRING_DATA_PREFIX = "$const_cjstring_data.";
 // buffers carrying this attribute are mergeable; legacy per-package pools are
 // left untouched.
 inline constexpr const char *CJSTRING_DEFERRED_ATTR = "cjstring_deferred";
-// Marks a cjstring literal record. CodeGen emits such globals as
-// non-constant ("black hole") so pre-link optimization cannot fold their
-// placeholder fields; CJStringPoolMerge flips them back to constant once the
+// Marks a cjstring literal record. CodeGen emits such globals as non-constant
+// until CJStringPoolMerge relayouts them, so pre-link optimization cannot fold
+// their placeholder fields; that pass flips them back to constant once the
 // pool layout is final, and GlobalOpt must recognize the attribute to avoid
 // folding them before that.
 inline constexpr const char *CJSTRING_LITERAL_ATTR = "cjstring_literal";

@@ -405,7 +405,8 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
   // Merging off: CodeGen has already emitted one buffer per string and the
   // literal records as non-constant globals, so there is nothing to undo here.
   // Skip the packing/repoint entirely, but still restore constness -- the
-  // literals' "black hole" contract relies on this pass flipping them back.
+  // records are kept non-constant until relayout and rely on this pass
+  // flipping them back.
   // The result keeps every per-literal buffer and every start == 0 literal:
   // it is the deferred layout without pooling, not the legacy per-package
   // pool (which had nonzero start offsets into a single package-wide buffer).

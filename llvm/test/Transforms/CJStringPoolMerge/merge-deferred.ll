@@ -26,7 +26,7 @@ target triple = "aarch64--linux-gnu"
 @"$const_cjstring_data.dddd" = private constant { i8*, i64, [5 x i8] } { i8* bitcast (%TypeInfo* @"RawArray<UInt8>.ti" to i8*), i64 5, [5 x i8] c"world" } #0
 @"$const_cjstring_data.eeee" = private constant { i8*, i64, [3 x i8] } { i8* bitcast (%TypeInfo* @"RawArray<UInt8>.ti" to i8*), i64 3, [3 x i8] c"ell" } #0
 
-; Black-holed literals (non-constant, "cjstring_literal") are repointed and
+; The literal records (non-constant, "cjstring_literal") are repointed and
 ; flipped back to constant.
 ; CHECK-DAG: @"$const_cjstring.l_hello" = private constant %"record.std.core:String" { i8 addrspace(1)* addrspacecast (i8* bitcast ({ i8*, i64, [12 x i8] }* @"$const_cjstring_data.merged" to i8*) to i8 addrspace(1)*), i32 0, i32 5 }
 ; CHECK-DAG: @"$const_cjstring.l_dup" = private constant %"record.std.core:String" { i8 addrspace(1)* addrspacecast (i8* bitcast ({ i8*, i64, [12 x i8] }* @"$const_cjstring_data.merged" to i8*) to i8 addrspace(1)*), i32 0, i32 5 }
