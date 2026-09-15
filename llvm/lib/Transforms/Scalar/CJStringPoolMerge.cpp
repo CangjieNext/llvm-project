@@ -54,6 +54,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
@@ -85,8 +86,6 @@ constexpr unsigned BUFFER_DATA_FIELD = 2; // index of the byte-array field
 // cjstring literal record layout: {i8 addrspace(1)* buffer, i32 start, i32 len}.
 constexpr unsigned LITERAL_FIELD_COUNT = 3;
 constexpr unsigned LITERAL_LEN_FIELD = 2; // index of the length field
-// Bytes of the fixed RawArray header: klass pointer (8B) + length (8B).
-constexpr uint64_t RAWARRAY_HEADER_BYTES = 16;
 
 namespace {
 
@@ -362,6 +361,20 @@ void restoreConstantLiterals(Module &M) {
       gv.setConstant(true);
 }
 
+// Bytes a cjstring buffer spends on its header, i.e. the offset of its
+// byte-array data field. The target DataLayout computes it (16 on LP64 and on
+// 32-bit AAPCS ARM, whose i64 is 8-aligned; 12 for a 4-aligned i64), so the
+// byte statistics are right on every target instead of assuming a 64-bit
+// header. Only the statistics use this: the merge never depends on the header
+// size because it rewrites the content-relative `start` and keeps the
+// literal's first field pointing at a RawArray object start.
+uint64_t bufferHeaderBytes(const DataLayout &DL, const BufferInfo &B) {
+  auto *BufTy = dyn_cast<StructType>(B.gv->getValueType());
+  if (!BufTy)
+    return 0;
+  return DL.getStructLayout(BufTy)->getElementOffset(BUFFER_DATA_FIELD);
+}
+
 } // end anonymous namespace
 
 PreservedAnalyses CJStringPoolMerge::run(Module &M,
@@ -380,10 +393,13 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
 
   uint64_t before = 0;
   for (auto &[b, lits] : mergeable)
-    before += b->bytes.size() + RAWARRAY_HEADER_BYTES;
+    before += b->bytes.size() + bufferHeaderBytes(M.getDataLayout(), *b);
   BytesBefore += before;
+  uint64_t after = 0;
   if (!mergeable.empty())
-    BytesAfter += merged.size() + RAWARRAY_HEADER_BYTES;
+    after = merged.size() +
+            bufferHeaderBytes(M.getDataLayout(), *mergeable.front().first);
+  BytesAfter += after;
 
   if (!mergeable.empty()) {
     auto *mergedGV = emitMergedPool(M, mergeable, merged);
@@ -396,8 +412,6 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
   if (CJStringPoolMergeVerbose)
     errs() << "CJStringPoolMerge: buffers=" << buffers.size()
            << " merged=" << mergeable.size() << " erased=" << numErased
-           << " bytes " << before << " -> "
-           << (mergeable.empty() ? 0 : merged.size() + RAWARRAY_HEADER_BYTES)
-           << "\n";
+           << " bytes " << before << " -> " << after << "\n";
   return PreservedAnalyses::none();
 }
