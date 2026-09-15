@@ -195,6 +195,8 @@ using MergeableList =
 // {klass, length, bytes} initializer.
 std::vector<BufferInfo> collectBuffers(Module &M) {
   std::vector<BufferInfo> buffers;
+  // Class info shared by the buffers merged below; enforced in the loop.
+  Constant *klassInfo = nullptr;
   for (auto &gv : M.globals()) {
     if (!isStringBuffer(gv))
       continue;
@@ -225,6 +227,17 @@ std::vector<BufferInfo> collectBuffers(Module &M) {
     }
     info.gv = &gv;
     info.klass = init->getOperand(0);
+    // Invariant: CodeGen emits every deferred buffer as a RawArray<UInt8> over
+    // one class info object, so a single merged pool can stand in for all of
+    // them. This is deliberately not an assert: if two class info objects do
+    // coexist (e.g. a prebuilt/foreign module merged alongside this one), a
+    // buffer with the other class info is not malformed, it just cannot be
+    // repointed into a pool whose class would then be wrong for its strings;
+    // leaving it unmerged is correct, while aborting would not be.
+    Constant *klass = info.klass->stripPointerCasts();
+    if (klassInfo && klassInfo != klass)
+      continue;
+    klassInfo = klass;
     buffers.push_back(std::move(info));
   }
   return buffers;
@@ -285,6 +298,8 @@ GlobalVariable *emitMergedPool(Module &M, const MergeableList &mergeable,
   auto *data = ConstantDataArray::getString(ctx, merged, false);
   auto *poolTy =
       StructType::get(ctx, {i8PtrTy, Type::getInt64Ty(ctx), data->getType()});
+  // Precondition (enforced by collectBuffers): every mergeable buffer carries
+  // the same class info, so a single pool value is correct for all of them.
   auto *poolInit = ConstantStruct::get(
       poolTy, {mergeable.front().first->klass,
                ConstantInt::getSigned(Type::getInt64Ty(ctx),
