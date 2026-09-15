@@ -91,7 +91,9 @@ define i8* @ret_ceinst() {
 }
 
 ; With merging disabled, black-holed literals are still flipped back to
-; constant and every original buffer stays.
+; constant and every original buffer stays. Non-record globals that merely
+; carry the cjstring_literal attribute are not flipped in either mode.
+; NOMERGE-DAG: @agg = global [2 x i8*]
 ; NOMERGE-DAG: @"$const_cjstring.l_a" = private constant %"record.std.core:String"
 ; NOMERGE-DAG: @"$const_cjstring.l_b" = private constant %"record.std.core:String"
 ; NOMERGE-DAG: @"$const_cjstring.l_empty" = private constant %"record.std.core:String"

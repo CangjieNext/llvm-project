@@ -355,11 +355,13 @@ unsigned eraseMergedBuffers(MergeableList &mergeable) {
 
 // Constness restore: literal records that were emitted as non-constant
 // (marked with cjstring_literal) become constant again now that the pool
-// layout is final. With recordsOnly, mutable String globals (no attribute)
-// stay untouched.
-void restoreConstantLiterals(Module &M, bool recordsOnly) {
+// layout is final. Only String-record globals are flipped: any other global
+// that happens to carry the attribute (foreign IR, attribute-marked
+// aggregates) is left untouched, so a store to such a global can never be
+// turned into a store to read-only memory.
+void restoreConstantLiterals(Module &M) {
   for (auto &gv : M.globals())
-    if (isStringLiteral(gv) && (!recordsOnly || isStringRecordGV(gv)))
+    if (isStringLiteral(gv) && isStringRecordGV(gv))
       gv.setConstant(true);
 }
 
@@ -370,7 +372,7 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
   // Even with merging disabled, restore constness: CodeGen emitted the
   // literals as non-constant globals and expects this pass to flip them.
   if (!CJStringPoolMergeEnable) {
-    restoreConstantLiterals(M, false);
+    restoreConstantLiterals(M);
     return PreservedAnalyses::none();
   }
 
@@ -392,7 +394,7 @@ PreservedAnalyses CJStringPoolMerge::run(Module &M,
     NumMerged += mergeable.size();
   }
   unsigned numErased = eraseMergedBuffers(mergeable);
-  restoreConstantLiterals(M, true);
+  restoreConstantLiterals(M);
 
   if (CJStringPoolMergeVerbose)
     errs() << "CJStringPoolMerge: buffers=" << buffers.size()
