@@ -1,5 +1,5 @@
 ; RUN: opt -passes=cj-string-pool-merge -S < %s | FileCheck %s
-; RUN: opt -passes=cj-string-pool-merge -disable-output %s 2>&1 | FileCheck %s --check-prefix=WARN
+; RUN: opt -passes=cj-string-pool-merge -cj-string-pool-merge-verbose -disable-output %s 2>&1 | FileCheck %s --check-prefix=WARN
 ; RUN: opt -passes=cj-string-pool-merge -cj-string-pool-merge=false -S < %s | FileCheck %s --check-prefix=NOMERGE
 ;
 ; Edge cases around buffer collection and repointing:

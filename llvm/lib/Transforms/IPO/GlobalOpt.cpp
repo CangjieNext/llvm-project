@@ -62,6 +62,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/IPO.h"
+#include "llvm/Transforms/Utils/CJStringAttrs.h"
 #include "llvm/Transforms/Utils/CtorUtils.h"
 #include "llvm/Transforms/Utils/Evaluator.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
@@ -1696,7 +1697,7 @@ processGlobal(GlobalValue &GV,
   // into consumers, so leave it completely alone (no scalarization,
   // const-fold, or any other rewrite).
   if (GVar->isConstant() || !GVar->hasInitializer() ||
-      GVar->hasAttribute("cjstring_literal"))
+      GVar->hasAttribute(CJSTRING_LITERAL_ATTR))
     return Changed;
 
   return processInternalGlobal(GVar, GS, GetTTI, GetTLI, LookupDomTree) ||
@@ -2130,7 +2131,7 @@ static bool EvaluateStaticConstructor(Function *F, const DataLayout &DL,
     for (const auto &Pair : NewInitializers)
       Pair.first->setInitializer(Pair.second);
     for (GlobalVariable *GV : Eval.getInvariants())
-      if (!GV->hasAttribute("cjstring_literal"))
+      if (!GV->hasAttribute(CJSTRING_LITERAL_ATTR))
         GV->setConstant(true);
   }
 

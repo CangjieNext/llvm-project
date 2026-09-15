@@ -59,6 +59,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Utils/CJStringAttrs.h"
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -77,11 +78,6 @@ static cl::opt<bool> CJStringPoolMergeEnable(
 static cl::opt<bool> CJStringPoolMergeVerbose(
     "cj-string-pool-merge-verbose", cl::Hidden, cl::init(false),
     cl::desc("Print CJStringPoolMerge merge statistics"));
-
-static const char *CJSTRING_DATA_ATTR = "cjstring_data";
-static const char *CJSTRING_DATA_PREFIX = "$const_cjstring_data.";
-static const char *CJSTRING_DEFERRED_ATTR = "cjstring_deferred";
-static const char *CJSTRING_LITERAL_ATTR = "cjstring_literal";
 
 // RawArray buffer layout: {i8* klass, i64 length, [N x i8] data}.
 constexpr unsigned BUFFER_FIELD_COUNT = 3;
@@ -346,7 +342,7 @@ unsigned eraseMergedBuffers(MergeableList &mergeable) {
     if (b->gv->use_empty()) {
       b->gv->eraseFromParent();
       ++numErased;
-    } else {
+    } else if (CJStringPoolMergeVerbose) {
       errs() << "CJStringPoolMerge: " << b->gv->getName()
              << " still has users after merging, kept (duplicate!)\n";
     }
