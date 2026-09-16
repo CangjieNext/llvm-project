@@ -42,7 +42,8 @@
 
 declare i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8*, i32)
 declare i8* @opaque_get()
-declare i64 @opaque_call(i8*, i64)
+declare i64 @opaque_call(i8*, i64) nounwind
+declare i64 @may_throw_call(i8*, i64)
 declare void @opaque_release(i8*)
 declare void @CJ_MCC_ThrowException(i8 addrspace(1)*)
 declare void @may_throw()
@@ -397,6 +398,39 @@ ilatch:
 
 latch:
   %add = add i64 %sum, %vsum
+  %next = add i64 %i, 1
+  br label %header
+
+exit:
+  ret i64 %sum
+}
+
+; A may-throw plain call in the loop body unwinds out of the function on an
+; edge the CFG does not model, so the latch ~init would be skipped
+; (issue #204). Calls in loops are not converted to invokes (LoopInfo would
+; go stale), so the promotion is rejected instead.
+; CHECK-LABEL: define i64 @loop_maythrow_call(
+; CHECK: CJ_MCC_NewFinalizer
+; CHECK-NOT: call void @w_dtor(
+define i64 @loop_maythrow_call() gc "cangjie" {
+entry:
+  br label %header
+
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %latch ]
+  %sum = phi i64 [ 0, %entry ], [ %add, %latch ]
+  %cmp = icmp slt i64 %i, 10
+  br i1 %cmp, label %latch, label %exit
+
+latch:
+  %handle = call i8* @opaque_get()
+  %obj = call i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8* bitcast (%TypeInfo* @W.ti to i8*), i32 16)
+  %p = getelementptr inbounds i8, i8 addrspace(1)* %obj, i64 8
+  %hslot = bitcast i8 addrspace(1)* %p to i8* addrspace(1)*
+  store i8* %handle, i8* addrspace(1)* %hslot, align 8
+  %h = load i8*, i8* addrspace(1)* %hslot, align 8
+  %v = call i64 @may_throw_call(i8* %h, i64 0)
+  %add = add i64 %sum, %v
   %next = add i64 %i, 1
   br label %header
 
