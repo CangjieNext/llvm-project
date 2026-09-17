@@ -546,7 +546,7 @@ public:
     CallBase *AllocCall;
     // The inserted normal-path ~init calls, used to tell whether the object
     // was already destructed before a given point.
-    SmallVector<CallInst *, 4> DtorCalls;
+    SmallVector<CallInst *> DtorCalls;
   };
 
   bool prepareFinalizer(SmallVectorImpl<Instruction *> &InsertPoints) {
@@ -582,7 +582,7 @@ public:
     FinalizerMethod = nullptr;
     FinalizerInsertBB = nullptr;
     FinalizerKlass = nullptr;
-    SmallVector<Instruction *, 4> InsertPoints;
+    SmallVector<Instruction *> InsertPoints;
     if (!prepareFinalizer(InsertPoints)) {
       return false;
     }
@@ -677,7 +677,7 @@ public:
   // too: LoopInfo is not queried after this point, and the pad runs ~init
   // once for the current iteration's object, which is exactly the
   // per-iteration destructor semantics. See runFinalizerUnwindProtection.
-  using HazardSite = std::pair<CallInst *, SmallVector<PromotedFinalizer *, 4>>;
+  using HazardSite = std::pair<CallInst *, SmallVector<PromotedFinalizer *>>;
 
   // Collect the may-throw plain calls of F that can execute while any of the
   // promoted finalizers is live, together with the live set of each. This
@@ -700,7 +700,7 @@ public:
         auto *CI = dyn_cast<CallInst>(&I);
         if (CI == nullptr || !CI->mayThrow() || DeadAllocs.count(CI))
           continue;
-        SmallVector<PromotedFinalizer *, 4> Live;
+        SmallVector<PromotedFinalizer *> Live;
         CollectLive(CI, Live);
         if (Live.empty())
           continue;
@@ -725,7 +725,7 @@ public:
   bool runFinalizerUnwindProtection() {
     if (PromotedFinalizers.empty())
       return false;
-    MapVector<Function *, SmallVector<PromotedFinalizer *, 4>> ByFunc;
+    MapVector<Function *, SmallVector<PromotedFinalizer *>> ByFunc;
     for (PromotedFinalizer &PF : PromotedFinalizers)
       ByFunc[PF.AllocCall->getFunction()].push_back(&PF);
 
@@ -733,7 +733,7 @@ public:
     for (auto &Entry : ByFunc) {
       Function *F = Entry.first;
       DominatorTree DT(*F);
-      SmallVector<HazardSite, 8> Sites;
+      SmallVector<HazardSite> Sites;
       collectFinalizerHazardSites(F, Entry.second, DT, Sites);
       if (Sites.empty())
         continue;
@@ -779,7 +779,7 @@ public:
 
     // Hazard sites with the same live set share one pad.
     SmallVector<
-        std::pair<BasicBlock *, SmallVector<PromotedFinalizer *, 4>>, 4>
+        std::pair<BasicBlock *, SmallVector<PromotedFinalizer *>>>
         Pads;
     auto FindPad = [&](const SmallVectorImpl<PromotedFinalizer *> &Live) {
       for (auto &Existing : Pads)
@@ -1174,8 +1174,8 @@ private:
   Function *FinalizerMethod = nullptr;
   BasicBlock *FinalizerInsertBB = nullptr;
   GlobalVariable *FinalizerKlass = nullptr;
-  SmallVector<PromotedFinalizer, 4> PromotedFinalizers;
-  SmallVector<Instruction *, 4> DeferredFinalizerAllocs;
+  SmallVector<PromotedFinalizer> PromotedFinalizers;
+  SmallVector<Instruction *> DeferredFinalizerAllocs;
   // The earliest ~init call placed at each insert point, so a later
   // candidate's ~init is inserted before it (reverse allocation order).
   DenseMap<Instruction *, CallInst *> FirstDtorCallAtPoint;
