@@ -18,6 +18,8 @@
 #include "queue"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/CallGraph.h"
@@ -203,6 +205,67 @@ static bool hasNonReturnExitPath(BasicBlock *CreateBB) {
     for (BasicBlock *Succ : successors(BB))
       if (VisitedBB.count(Succ) == 0)
         Stack.push_back(Succ);
+  }
+  return false;
+}
+
+// True if some may-throw plain call that can execute while the promoted
+// finalizer object is live cannot be converted to an invoke unwinding to a
+// finalizer pad. The unwind protection (runFinalizerUnwindProtection)
+// converts every such call, so unwinding cannot skip the inserted ~init
+// (issue #204). The gate must reject exactly the candidates whose hazards
+// are not convertible: a rejected candidate is marked escaped during the
+// analysis phase so that escape propagates to the objects the finalizer
+// references, and the rewrite must reach the same verdict (see the
+// pre-flight comment in EADepthImpl). A hazard is convertible iff the
+// allocation dominates it (the pad then always runs after construction),
+// it is not a musttail call, and the function has a personality fn to
+// attach the pad to.
+static bool hasUnconvertibleUnwindHazard(CallBase *CB, BasicBlock *CreateBB,
+                                         LoopInfo *LI, DominatorTree &DT) {
+  Function *F = CreateBB->getParent();
+  auto Unconvertible = [F](CallInst *CI) {
+    return CI->isMustTailCall() || !F->hasPersonalityFn();
+  };
+  if (Loop *L = LI ? LI->getLoopFor(CreateBB) : nullptr) {
+    // An approved loop candidate is live only between the allocation and the
+    // latch terminator: the approval checks (the allocation dominates the
+    // latch, the latch post-dominates the allocation, single exiting block)
+    // imply that such a call is dominated by the allocation, and that every
+    // path from the allocation to a function exit crosses the latch (and its
+    // ~init) first. Calls outside the loop, or not dominated by the
+    // allocation, never observe a live object.
+    auto IsLoopHazard = [&](Instruction &I) {
+      auto *CI = dyn_cast<CallInst>(&I);
+      return CI && CI != CB && CI->mayThrow() && DT.dominates(CB, CI) &&
+             Unconvertible(CI);
+    };
+    for (BasicBlock *BB : L->blocks())
+      if (llvm::any_of(*BB, IsLoopHazard))
+        return true;
+    return false;
+  }
+  SmallDenseSet<BasicBlock *> VisitedBB2;
+  SmallVector<BasicBlock *> Stack2;
+  Stack2.push_back(CreateBB);
+  while (!Stack2.empty()) {
+    BasicBlock *BB = Stack2.pop_back_val();
+    if (!VisitedBB2.insert(BB).second)
+      continue;
+    auto Begin = BB->begin();
+    if (BB == CreateBB)
+      Begin = std::next(CB->getIterator());
+    for (auto It = Begin, End = BB->end(); It != End; ++It) {
+      auto *CI = dyn_cast<CallInst>(&*It);
+      if (CI == nullptr || CI == CB || !CI->mayThrow())
+        continue;
+      if (!DT.dominates(CB, CI) || CI->isMustTailCall() ||
+          !F->hasPersonalityFn())
+        return true;
+    }
+    for (BasicBlock *Succ : successors(BB))
+      if (VisitedBB2.count(Succ) == 0)
+        Stack2.push_back(Succ);
   }
   return false;
 }
@@ -433,11 +496,15 @@ static bool canStackAllocateFinalizer(CallBase *CB, Module *M, LoopInfo *LI) {
   // exception escaping a finalizer (~init) is undefined behavior, so if a
   // promoted finalizer throws, surfacing the exception synchronously at the
   // insertion point instead of on the GC finalizer thread is a legal — and
-  // deterministic — realization of that UB. The specification also leaves
-  // the timing of finalizer execution undetermined and contemplates cases
-  // where it does not run at all, so unwinding past the insertion point via
-  // a may-throw plain call between the last use and the destructor (which
-  // skips ~init) stays within language semantics as well.
+  // deterministic — realization of that UB. A may-throw plain call between
+  // the allocation and the destructor point unwinds out of the function on
+  // an edge the CFG does not model, skipping the inserted ~init (issue #204);
+  // NonEscapeRewriter::runFinalizerUnwindProtection converts such calls to
+  // invokes unwinding to a catch-all pad that runs the pending ~init calls
+  // and rethrows. Shapes that cannot be converted safely are rejected here
+  // (hasUnconvertibleUnwindHazard), so this gate verdict always matches the
+  // rewrite outcome — required for the escape pre-flight (see the call
+  // sites).
   BasicBlock *BB = CB->getParent();
   DominatorTree DT(*BB->getParent());
   // Loop-local objects: the latch post-dominator check already rejects paths
@@ -447,6 +514,8 @@ static bool canStackAllocateFinalizer(CallBase *CB, Module *M, LoopInfo *LI) {
   if (!InLoop && hasNonReturnExitPath(BB))
     return false;
   if (!hasFinalizerInsertPoints(CB, BB, LI, &DT))
+    return false;
+  if (hasUnconvertibleUnwindHazard(CB, BB, LI, DT))
     return false;
   return true;
 }
@@ -464,6 +533,21 @@ public:
   }
 
   void setLoopInfo(LoopInfo *LoopInfo) { LI = LoopInfo; }
+
+  // A finalizer object stack-promoted in this run, awaiting the
+  // function-level unwind protection (runFinalizerUnwindProtection).
+  struct PromotedFinalizer {
+    AllocaInst *Alloca;
+    GlobalVariable *Klass;
+    Function *Method;
+    // The original CJ_MCC_NewFinalizer call. It is dead (RAUW'ed to the
+    // alloca) but not erased until the unwind protection ran: it is the
+    // dominance anchor marking where the object gets constructed.
+    CallBase *AllocCall;
+    // The inserted normal-path ~init calls, used to tell whether the object
+    // was already destructed before a given point.
+    SmallVector<CallInst *> DtorCalls;
+  };
 
   bool prepareFinalizer(SmallVectorImpl<Instruction *> &InsertPoints) {
     CallBase *CB = dyn_cast<CallBase>(OldInst);
@@ -484,6 +568,10 @@ public:
     collectFinalizerInsertPoints(InsertPoints);
     if (InsertPoints.empty())
       return false;
+    // No unwind-hazard rejection here: the escape-analysis gate
+    // (canStackAllocateFinalizer) already rejected candidates whose hazards
+    // are not convertible, and convertible hazards are handled after all
+    // rewrites of this run by runFinalizerUnwindProtection.
     return true;
   }
 
@@ -494,7 +582,7 @@ public:
     FinalizerMethod = nullptr;
     FinalizerInsertBB = nullptr;
     FinalizerKlass = nullptr;
-    SmallVector<Instruction *, 4> InsertPoints;
+    SmallVector<Instruction *> InsertPoints;
     if (!prepareFinalizer(InsertPoints)) {
       return false;
     }
@@ -514,23 +602,230 @@ public:
                                      Points);
   }
 
-  void insertFinalizerCall(SmallVectorImpl<Instruction *> &InsertPoints) {
+  // Emit an explicit ~init call for the given stack object at Builder's
+  // current position.
+  CallInst *emitFinalizerCall(IRBuilder<> &Builder, Instruction *Alloca,
+                              GlobalVariable *Klass, Function *Method) {
     Type *PI8AS1Ty = Type::getInt8PtrTy(M->getContext(), 1);
-    for (Instruction *InsertPoint : InsertPoints) {
-      IRBuilder<> Builder(InsertPoint);
-      Value *ObjPtr = Builder.CreateAddrSpaceCast(NewInst, PI8AS1Ty);
-      SmallVector<Value *, 4> Args;
-      Args.push_back(ObjPtr);
-      if (FinalizerMethod->getFunctionType()->getNumParams() > 1) {
-        Value *OuterTI = Builder.CreateBitCast(
-            FinalizerKlass,
-            FinalizerMethod->getFunctionType()->getParamType(1));
-        Args.push_back(OuterTI);
-      }
-      Builder.CreateCall(FinalizerMethod, Args);
+    Value *ObjPtr = Builder.CreateAddrSpaceCast(Alloca, PI8AS1Ty);
+    SmallVector<Value *> Args;
+    Args.push_back(ObjPtr);
+    if (Method->getFunctionType()->getNumParams() > 1) {
+      Value *OuterTI = Builder.CreateBitCast(
+          Klass, Method->getFunctionType()->getParamType(1));
+      Args.push_back(OuterTI);
     }
+    return Builder.CreateCall(Method, Args);
+  }
+
+  void insertFinalizerCall(SmallVectorImpl<Instruction *> &InsertPoints) {
+    PromotedFinalizer PF;
+    PF.Alloca = NewInst;
+    PF.Klass = FinalizerKlass;
+    PF.Method = FinalizerMethod;
+    PF.AllocCall = cast<CallBase>(OldInst);
+    for (Instruction *InsertPoint : InsertPoints) {
+      // Several promoted objects may share one insert point: destruct in
+      // reverse allocation order, like scope-exit destructors, matching the
+      // unwind pads (runFinalizerUnwindProtection). Insert before the
+      // earliest ~init already placed at this point.
+      CallInst *&FirstDtor = FirstDtorCallAtPoint[InsertPoint];
+      IRBuilder<> Builder(FirstDtor != nullptr ? FirstDtor : InsertPoint);
+      // Without a debug location, inlining the finalizer at this call site
+      // leaves callee instructions whose !dbg scope chain does not reach the
+      // caller's subprogram, and the module verifier rejects it.
+      Builder.SetCurrentDebugLocation(InsertPoint->getDebugLoc());
+      CallInst *Dtor =
+          emitFinalizerCall(Builder, NewInst, FinalizerKlass, FinalizerMethod);
+      PF.DtorCalls.push_back(Dtor);
+      FirstDtor = Dtor;
+    }
+    PromotedFinalizers.push_back(std::move(PF));
     if (CGUpdater && !InsertPoints.empty())
       CGUpdater->reanalyzeFunction(*FinalizerInsertBB->getParent());
+  }
+
+  // True if the promoted object is live at I: constructed on every path to I
+  // (the allocation dominates I) and not yet destructed (no inserted ~init
+  // call dominates I). For an invoke allocation the object exists only on
+  // the normal edge, so the normal destination block is the anchor.
+  static bool finalizerLiveAt(const PromotedFinalizer &PF, Instruction *I,
+                              DominatorTree &DT) {
+    bool Constructed;
+    if (auto *II = dyn_cast<InvokeInst>(PF.AllocCall))
+      Constructed = DT.dominates(II->getNormalDest(), I->getParent());
+    else
+      Constructed = DT.dominates(PF.AllocCall, I);
+    if (!Constructed)
+      return false;
+    for (CallInst *Dtor : PF.DtorCalls)
+      // dominates() is not reflexive for two instructions in one block (it
+      // uses comesBefore), so compare explicitly: a finalizer throwing while
+      // it is running is UB per the language spec, and must not re-enter
+      // itself through the pad.
+      if (Dtor == I || DT.dominates(Dtor, I))
+        return false;
+    return true;
+  }
+
+  // Runs after ALL promotions of the run: no approval check
+  // (hasNonReturnExitPath / latch post-dominance) can ever observe a pad,
+  // and a hazard shared by several promoted objects is converted once with a
+  // pad running every live ~init (per-candidate conversion would have to
+  // reject all but one candidate in such shapes, a verdict the
+  // escape-analysis gate cannot predict). Hazards inside loops are converted
+  // too: LoopInfo is not queried after this point, and the pad runs ~init
+  // once for the current iteration's object, which is exactly the
+  // per-iteration destructor semantics. See runFinalizerUnwindProtection.
+  using HazardSite = std::pair<CallInst *, SmallVector<PromotedFinalizer *>>;
+
+  // Collect the may-throw plain calls of F that can execute while any of the
+  // promoted finalizers is live, together with the live set of each. This
+  // runs before any conversion: conversions mutate the CFG, and the live-set
+  // computation must see the pre-conversion IR.
+  void collectFinalizerHazardSites(
+      Function *F, const SmallVectorImpl<PromotedFinalizer *> &Promoted,
+      DominatorTree &DT, SmallVectorImpl<HazardSite> &Sites) {
+    SmallPtrSet<Instruction *, 8> DeadAllocs;
+    for (PromotedFinalizer *PF : Promoted)
+      DeadAllocs.insert(PF->AllocCall);
+    auto CollectLive = [&](CallInst *CI,
+                           SmallVectorImpl<PromotedFinalizer *> &Live) {
+      for (PromotedFinalizer *PF : Promoted)
+        if (finalizerLiveAt(*PF, CI, DT))
+          Live.push_back(PF);
+    };
+    for (BasicBlock &BB : *F) {
+      for (Instruction &I : BB) {
+        auto *CI = dyn_cast<CallInst>(&I);
+        if (CI == nullptr || !CI->mayThrow() || DeadAllocs.count(CI))
+          continue;
+        SmallVector<PromotedFinalizer *> Live;
+        CollectLive(CI, Live);
+        if (Live.empty())
+          continue;
+        // The gate rejected candidates whose live hazards are not
+        // convertible, so a live hazard here is always convertible.
+        assert(!CI->isMustTailCall() && F->hasPersonalityFn() &&
+               "live unwind hazard the gate should have rejected");
+        if (CI->isMustTailCall() || !F->hasPersonalityFn())
+          continue;
+        Sites.push_back({CI, std::move(Live)});
+      }
+    }
+  }
+
+  // Convert every may-throw plain call that can execute while a promoted
+  // finalizer object is live into an invoke unwinding to a catch-all pad
+  // that runs the pending ~init calls and rethrows, so unwinding can no
+  // longer skip the destructors (issue #204). A cleanup pad + resume would
+  // be the textbook shape, but the Cangjie runtime EH only transfers control
+  // to a pad whose catch clause matches the exception, so catch-all +
+  // rethrow is the supported equivalent.
+  bool runFinalizerUnwindProtection() {
+    if (PromotedFinalizers.empty())
+      return false;
+    MapVector<Function *, SmallVector<PromotedFinalizer *>> ByFunc;
+    for (PromotedFinalizer &PF : PromotedFinalizers)
+      ByFunc[PF.AllocCall->getFunction()].push_back(&PF);
+
+    bool Changed = false;
+    for (auto &Entry : ByFunc) {
+      Function *F = Entry.first;
+      DominatorTree DT(*F);
+      SmallVector<HazardSite> Sites;
+      collectFinalizerHazardSites(F, Entry.second, DT, Sites);
+      if (Sites.empty())
+        continue;
+      convertFinalizerHazards(F, Sites);
+      Changed = true;
+      if (CGUpdater)
+        CGUpdater->reanalyzeFunction(*F);
+    }
+    // The deferred allocation calls are dead (RAUW'ed to the allocas); remove
+    // them now that no dominance query needs them anymore.
+    for (Instruction *I : DeferredFinalizerAllocs) {
+      if (auto *II = dyn_cast<InvokeInst>(I)) {
+        IRBuilder<> BrIRB(II);
+        BrIRB.CreateBr(II->getNormalDest());
+        II->getUnwindDest()->removePredecessor(II->getParent());
+      }
+      I->eraseFromParent();
+    }
+    DeferredFinalizerAllocs.clear();
+    return Changed;
+  }
+
+  static bool sameLiveSet(const SmallVectorImpl<PromotedFinalizer *> &A,
+                          const SmallVectorImpl<PromotedFinalizer *> &B) {
+    return A.size() == B.size() && std::equal(A.begin(), A.end(), B.begin());
+  }
+
+  void convertFinalizerHazards(Function *F,
+                               SmallVectorImpl<HazardSite> &Sites) {
+    LLVMContext &Ctx = M->getContext();
+    Type *PI8Ty = Type::getInt8PtrTy(Ctx);
+    Type *PI8AS1Ty = Type::getInt8PtrTy(Ctx, 1);
+    Function *GetWrapper = M->declareCJRuntimeFunc(
+        "CJ_MCC_GetExceptionWrapper", FunctionType::get(PI8Ty, {}), true);
+    GetWrapper->addFnAttr(Attribute::NoUnwind);
+    Function *PostThrow = M->declareCJRuntimeFunc(
+        "CJ_MCC_PostThrowException",
+        FunctionType::get(PI8AS1Ty, {PI8Ty}, false), true);
+    PostThrow->addFnAttr(Attribute::NoUnwind);
+    Function *ThrowEx = M->declareCJRuntimeFunc(
+        "CJ_MCC_ThrowException",
+        FunctionType::get(Type::getVoidTy(Ctx), {PI8AS1Ty}, false), true);
+
+    // Hazard sites with the same live set share one pad.
+    SmallVector<
+        std::pair<BasicBlock *, SmallVector<PromotedFinalizer *>>>
+        Pads;
+    auto FindPad = [&](const SmallVectorImpl<PromotedFinalizer *> &Live) {
+      for (auto &Existing : Pads)
+        if (sameLiveSet(Existing.second, Live))
+          return Existing.first;
+      return static_cast<BasicBlock *>(nullptr);
+    };
+    for (auto &Site : Sites) {
+      BasicBlock *Pad = FindPad(Site.second);
+      if (Pad == nullptr) {
+        Pad = createFinalizerUnwindPad(F, Site.second,
+                                       Site.first->getDebugLoc(), GetWrapper,
+                                       PostThrow, ThrowEx);
+        Pads.push_back({Pad, Site.second});
+      }
+      CallInst *CI = Site.first;
+      CI->setTailCallKind(CallInst::TCK_None);
+      changeToInvokeAndSplitBasicBlock(CI, Pad);
+    }
+  }
+
+  BasicBlock *
+  createFinalizerUnwindPad(Function *F,
+                           const SmallVectorImpl<PromotedFinalizer *> &Live,
+                           DebugLoc DL, Function *GetWrapper,
+                           Function *PostThrow, Function *ThrowEx) {
+    LLVMContext &Ctx = M->getContext();
+    BasicBlock *Pad = BasicBlock::Create(Ctx, "cj.finalizer.unwind", F);
+    IRBuilder<> Builder(Pad);
+    LandingPadInst *LP =
+        Builder.CreateLandingPad(Type::getTokenTy(Ctx), 1, "finalizer.lp");
+    // catch i8* null: the runtime matches every exception type against a
+    // null clause, i.e. catch-all.
+    LP->addClause(ConstantPointerNull::get(
+        cast<PointerType>(Type::getInt8PtrTy(Ctx))));
+    // Give the pad instructions a debug location (see insertFinalizerCall).
+    Builder.SetCurrentDebugLocation(DL);
+    Value *Wrapper = Builder.CreateCall(GetWrapper);
+    Value *Ex = Builder.CreateCall(PostThrow, {Wrapper});
+    // Destruct in reverse allocation order (discovery order is program
+    // order).
+    for (PromotedFinalizer *PF : reverse(Live))
+      emitFinalizerCall(Builder, PF->Alloca, PF->Klass, PF->Method);
+    Builder.CreateCall(ThrowEx, {Ex});
+    Builder.CreateUnreachable();
+    return Pad;
   }
 
   bool handleStructAS1Cast(AllocaInst *Old) {
@@ -822,6 +1117,14 @@ private:
     Type *PI8AS1Ty = Type::getInt8PtrTy(I->getContext(), 1);
     Value *BI = IRB.CreateAddrSpaceCast(NewInst, PI8AS1Ty);
     OldInst->replaceAllUsesWith(BI);
+    if (IsFinalizer) {
+      // Defer removing the original allocation call: it is the dominance
+      // anchor for the unwind-protection live-set computation, so it must
+      // stay until runFinalizerUnwindProtection() ran. It is dead (RAUW'ed
+      // to the alloca) and the hazard scan excludes it.
+      DeferredFinalizerAllocs.push_back(OldInst);
+      return;
+    }
     if (auto II = dyn_cast<InvokeInst>(OldInst)) {
       IRBuilder BrIRB(OldInst);
       BrIRB.CreateBr(II->getNormalDest());
@@ -871,6 +1174,11 @@ private:
   Function *FinalizerMethod = nullptr;
   BasicBlock *FinalizerInsertBB = nullptr;
   GlobalVariable *FinalizerKlass = nullptr;
+  SmallVector<PromotedFinalizer> PromotedFinalizers;
+  SmallVector<Instruction *> DeferredFinalizerAllocs;
+  // The earliest ~init call placed at each insert point, so a later
+  // candidate's ~init is inserted before it (reverse allocation order).
+  DenseMap<Instruction *, CallInst *> FirstDtorCallAtPoint;
   bool StructAS1Replace = false;
   LoopInfo *LI = nullptr;
   static DenseMap<PHINode *, SmallSetVector<Instruction *, 8>> RewritePhiIncoming;
@@ -1406,6 +1714,7 @@ public:
     for (unsigned i = 0; i < StructCastToAS1.size(); i++) {
       Changed |= Rewriter.handleStructAS1Cast(StructCastToAS1[i]);
     }
+    Changed |= Rewriter.runFinalizerUnwindProtection();
 
     for (unsigned i = 0; i < AllLocations.size(); i++) {
       delete AllLocations[i];
@@ -3211,6 +3520,7 @@ public:
         LLVM_DEBUG(dbgs() << "  " << *Partial.first << "\n");
       }
     }
+    Changed |= Rewriter.runFinalizerUnwindProtection();
 
     cleanupAnalysisState();
     return Changed;
