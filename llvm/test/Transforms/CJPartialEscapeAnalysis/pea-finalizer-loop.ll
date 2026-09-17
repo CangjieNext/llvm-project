@@ -407,8 +407,9 @@ exit:
 
 ; A may-throw plain call in the loop body unwinds out of the function on an
 ; edge the CFG does not model, so the latch ~init would be skipped
-; (issue #204). Calls in loops are not converted to invokes (LoopInfo would
-; go stale), so the promotion is rejected instead.
+; (issue #204). The fix converts such calls to invokes unwinding to a pad
+; that runs ~init — but that needs a personality fn, which this function
+; lacks, so the gate (escape-analysis pre-flight) rejects the promotion.
 ; CHECK-LABEL: define i64 @loop_maythrow_call(
 ; CHECK: CJ_MCC_NewFinalizer
 ; CHECK-NOT: call void @w_dtor(
@@ -440,3 +441,41 @@ exit:
 }
 
 !0 = !{!"ObjLayout.W"}
+
+; Same as loop_maythrow_call, but with a personality fn: the in-loop
+; may-throw call is converted to an invoke unwinding to a pad that runs the
+; current iteration's ~init and rethrows, and the loop promotion proceeds.
+; CHECK-LABEL: define i64 @loop_maythrow_call_personality(
+; CHECK: alloca { %TypeInfo*, %ObjLayout.W }
+; CHECK-NOT: call {{.*}}@CJ_MCC_NewFinalizer
+; CHECK: invoke i64 @may_throw_call(
+; CHECK: call void @w_dtor(
+; CHECK: cj.finalizer.unwind:
+; CHECK: call void @w_dtor(
+; CHECK: call void @CJ_MCC_ThrowException(
+define i64 @loop_maythrow_call_personality() gc "cangjie" personality i32 (...)* @__cj_personality_v0 {
+entry:
+  br label %header
+
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %latch ]
+  %sum = phi i64 [ 0, %entry ], [ %add, %latch ]
+  %cmp = icmp slt i64 %i, 10
+  br i1 %cmp, label %latch, label %exit
+
+latch:
+  %handle = call i8* @opaque_get()
+  ; 16 = 8-byte object head + 8-byte payload (ObjLayout {i64}).
+  %obj = call i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8* bitcast (%TypeInfo* @W.ti to i8*), i32 16)
+  %p = getelementptr inbounds i8, i8 addrspace(1)* %obj, i64 8
+  %hslot = bitcast i8 addrspace(1)* %p to i8* addrspace(1)*
+  store i8* %handle, i8* addrspace(1)* %hslot, align 8
+  %h = load i8*, i8* addrspace(1)* %hslot, align 8
+  %v = call i64 @may_throw_call(i8* %h, i64 0)
+  %add = add i64 %sum, %v
+  %next = add i64 %i, 1
+  br label %header
+
+exit:
+  ret i64 %sum
+}
