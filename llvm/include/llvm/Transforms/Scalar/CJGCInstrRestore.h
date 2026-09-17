@@ -18,8 +18,11 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/ValueHandle.h"
 
 namespace llvm {
+
+class DominatorTree;
 
 class CJGCInstrRestore : public PassInfoMixin<CJGCInstrRestore> {
 public:
@@ -27,16 +30,16 @@ public:
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
 
 private:
-  bool runImpl(Function &F);
+  bool runImpl(Function &F, DominatorTree &DT);
   void collectLSInstr(Function &F);
   void dispatchLSInstr(Instruction *Instr);
-  bool restoreLSInstrToGCInstr();
+  bool restoreLSInstrToGCInstr(DominatorTree &DT);
   void initContainer();
   SmallVector<Instruction *, 4> LoadForGCReadRefs;
   SmallVector<Instruction *, 4> StoreForGCWriteRefs;
   SmallDenseMap<Intrinsic::ID, SmallVector<Instruction *, 4> *>
       LSInstrDispatchMap;
-  SmallDenseMap<Value *, Value *, 4> ValueToBasePointer;
+  SmallDenseMap<WeakVH, Value *, 4> ValueToBasePointer;
 };
 
 } // end namespace llvm

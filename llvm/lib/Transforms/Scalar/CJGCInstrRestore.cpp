@@ -16,6 +16,7 @@
 
 #include "llvm/Transforms/Scalar/CJGCInstrRestore.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -24,6 +25,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/Scalar.h"
 
 using namespace llvm;
@@ -32,18 +34,19 @@ using namespace llvm;
 
 PreservedAnalyses CJGCInstrRestore::run(Function &F,
                                         FunctionAnalysisManager &FAM) {
-  if (runImpl(F)) {
+  auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+  if (runImpl(F, DT)) {
     return PreservedAnalyses::none();
   }
   return PreservedAnalyses::all();
 }
 
-bool CJGCInstrRestore::runImpl(Function &F) {
+bool CJGCInstrRestore::runImpl(Function &F, DominatorTree &DT) {
   LLVM_DEBUG(dbgs() << "CJGCInstrRestore: " << F.getName().str() << " start."
                     << "\n");
   initContainer();
   collectLSInstr(F);
-  bool changed = restoreLSInstrToGCInstr();
+  bool changed = restoreLSInstrToGCInstr(DT);
 
   LLVM_DEBUG({
     if (changed) {
@@ -167,8 +170,26 @@ inline Value *castToI8AddrSpace1PtrTypeAddrSpace1PtrType(Value *V, IRBuilder<> &
       V, IRB, PointerType::get(PointerType::get(Type::getInt8Ty(Ctx), 1), 1));
 }
 
+// Verify that a GC base pointer is available at its use site. A base that
+// fails this check means the base-pointer cache handed out a stale entry.
+// Emitting the use anyway would produce non-dominating IR - or worse,
+// a semantically wrong base that happens to dominate - so fail fast
+// with a precise diagnostic instead.
+void checkBasePointerDominance(DominatorTree &DT, Value *Base,
+                               Instruction *User) {
+  if (DT.dominates(Base, User)) {
+    return;
+  }
+  LLVM_DEBUG(dbgs() << "CJGCInstrRestore: base " << *Base
+                    << " does not dominate its use " << *User << "\n");
+  report_fatal_error(
+      "CJGCInstrRestore: GC base pointer does not dominate its use site; "
+      "the base-pointer cache returned a stale entry");
+}
+
 Value *getBasePointer(Value *V, Function *F,
-                      SmallDenseMap<Value *, Value *> &ValueToBasePointer) {
+                      SmallDenseMap<WeakVH, Value *, 4> &ValueToBasePointer,
+                      DominatorTree &DT) {
   assert(V->getType()->isPointerTy() &&
          "Unexpected operand type in getBasePointer!");
   if (ValueToBasePointer.count(V)) {
@@ -193,8 +214,13 @@ Value *getBasePointer(Value *V, Function *F,
   ValueToBasePointer[V] = AddPhiNode;
   SmallVector<Value *, 4> IncomingValues;
 
-  for (Value *IncValue : PhiInstr->incoming_values()) {
-    auto *BasePoint = getBasePointer(IncValue, F, ValueToBasePointer);
+  for (unsigned I = 0, E = PhiInstr->getNumIncomingValues(); I != E; ++I) {
+    Value *IncValue = PhiInstr->getIncomingValue(I);
+    auto *BasePoint = getBasePointer(IncValue, F, ValueToBasePointer, DT);
+    // The incoming value of the new base PHI is read on the edge from the
+    // incoming block, so its base must be available at the end of that block.
+    checkBasePointerDominance(
+        DT, BasePoint, PhiInstr->getIncomingBlock(I)->getTerminator());
     IRBuilder<> IncValueCastBuilder(Ctx);
     if (auto *DefInstr = dyn_cast<Instruction>(BasePoint)) {
       BasicBlock *BB = DefInstr->getParent();
@@ -226,7 +252,9 @@ void addMetadataToGCInstr(CallBase *RestoreGCInstr, Instruction *Inst) {
   }
 }
 
-bool restoreGCReadRef(SmallVector<Instruction *, 4> *Instrs, SmallDenseMap<Value *, Value *> &ValueToBasePointer) {
+bool restoreGCReadRef(SmallVector<Instruction *, 4> *Instrs,
+                      SmallDenseMap<WeakVH, Value *, 4> &ValueToBasePointer,
+                      DominatorTree &DT) {
   bool Changed = false;
   SmallVector<Instruction *, 4> ToBeErased;
   for (auto *LI : *Instrs) {
@@ -236,8 +264,10 @@ bool restoreGCReadRef(SmallVector<Instruction *, 4> *Instrs, SmallDenseMap<Value
       Module *M = IRB.GetInsertBlock()->getModule();
       Function *IntrinsicFunc =
           Intrinsic::getDeclaration(M, Intrinsic::cj_gcread_ref);
-      auto *BasePtr = castToI8AddrSpace1PtrType(
-          getBasePointer(LI->getOperand(0), LI->getFunction(), ValueToBasePointer), IRB);
+      auto *BaseRaw = getBasePointer(LI->getOperand(0), LI->getFunction(),
+                                     ValueToBasePointer, DT);
+      checkBasePointerDominance(DT, BaseRaw, LI);
+      auto *BasePtr = castToI8AddrSpace1PtrType(BaseRaw, IRB);
       auto *DerivedPtr =
           castToI8AddrSpace1PtrTypeAddrSpace1PtrType(LI->getOperand(0), IRB);
       auto *GCInstr = IRB.CreateCall(IntrinsicFunc, {BasePtr, DerivedPtr});
@@ -256,7 +286,9 @@ bool restoreGCReadRef(SmallVector<Instruction *, 4> *Instrs, SmallDenseMap<Value
   return Changed;
 }
 
-bool restoreGCWriteRef(SmallVector<Instruction *, 4> *Instrs, SmallDenseMap<Value *, Value *> &ValueToBasePointer) {
+bool restoreGCWriteRef(SmallVector<Instruction *, 4> *Instrs,
+                       SmallDenseMap<WeakVH, Value *, 4> &ValueToBasePointer,
+                       DominatorTree &DT) {
   bool Changed = false;
   SmallVector<Instruction *, 4> ToBeErased;
   for (auto *SI : *Instrs) {
@@ -266,8 +298,10 @@ bool restoreGCWriteRef(SmallVector<Instruction *, 4> *Instrs, SmallDenseMap<Valu
       Module *M = IRB.GetInsertBlock()->getModule();
       Function *IntrinsicFunc =
           Intrinsic::getDeclaration(M, Intrinsic::cj_gcwrite_ref);
-      auto *BasePtr = castToI8AddrSpace1PtrType(
-          getBasePointer(SI->getOperand(1), SI->getFunction(), ValueToBasePointer), IRB);
+      auto *BaseRaw = getBasePointer(SI->getOperand(1), SI->getFunction(),
+                                     ValueToBasePointer, DT);
+      checkBasePointerDominance(DT, BaseRaw, SI);
+      auto *BasePtr = castToI8AddrSpace1PtrType(BaseRaw, IRB);
       auto *ValuePtr = castToI8AddrSpace1PtrType(SI->getOperand(0), IRB);
       auto *DerivedPtr =
           castToI8AddrSpace1PtrTypeAddrSpace1PtrType(SI->getOperand(1), IRB);
@@ -285,15 +319,15 @@ bool restoreGCWriteRef(SmallVector<Instruction *, 4> *Instrs, SmallDenseMap<Valu
 
 } // namespace
 
-bool CJGCInstrRestore::restoreLSInstrToGCInstr() {
+bool CJGCInstrRestore::restoreLSInstrToGCInstr(DominatorTree &DT) {
   bool Changed = false;
   for (auto [IID, Instrs] : LSInstrDispatchMap) {
     switch (IID) {
     case Intrinsic::cj_gcread_ref:
-      Changed |= restoreGCReadRef(Instrs, ValueToBasePointer);
+      Changed |= restoreGCReadRef(Instrs, ValueToBasePointer, DT);
       break;
     case Intrinsic::cj_gcwrite_ref:
-      Changed |= restoreGCWriteRef(Instrs, ValueToBasePointer);
+      Changed |= restoreGCWriteRef(Instrs, ValueToBasePointer, DT);
       break;
     default:
       break;
