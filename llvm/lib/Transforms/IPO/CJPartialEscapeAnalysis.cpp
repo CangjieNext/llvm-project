@@ -27,6 +27,7 @@
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/LazyCallGraph.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
@@ -236,10 +237,96 @@ static bool finalizerLiveAt(const Instruction *Alloc, Instruction *I,
   return true;
 }
 
-// Find one point that executes once per natural-loop iteration after every
-// supported use. Values that cross a PHI, memory, aggregate, or loop boundary
-// are deliberately rejected: PEA's escape result alone cannot prove where the
-// finalizer must run for those flows.
+static bool instPostDominates(const PostDominatorTree &PDT,
+                              const Instruction *Later,
+                              const Instruction *Earlier) {
+  if (Later == Earlier)
+    return true;
+  const BasicBlock *LB = Later->getParent();
+  const BasicBlock *EB = Earlier->getParent();
+  if (LB == EB)
+    return Earlier->comesBefore(Later);
+  return PDT.dominates(const_cast<BasicBlock *>(LB),
+                       const_cast<BasicBlock *>(EB));
+}
+
+// Classify a user of a NewFinalizer-derived value.
+// Follow: pointer derived from the object (keep walking).
+// Stop: a real use that must happen before ~init, but does not create a new
+//       alias of the object pointer.
+// Reject: PHI / memory / GC-field / publishing the pointer — PEA's escape
+//         result cannot prove the destructor point.
+enum class FinalizerUseKind { Follow, Stop, Reject };
+
+// Loads and stores around the object. Storing through a pointer derived
+// from the object writes a field (stop: a real use, no new alias). Storing
+// the object pointer elsewhere or loading the GC pointer back publishes an
+// alias PEA cannot track (reject). Loading a non-GC pointer (e.g. the
+// native handle) is a plain use (stop).
+static FinalizerUseKind classifyFinalizerMemUse(Instruction *I,
+                                                Value *NewFinalizer) {
+  if (auto *SI = dyn_cast<StoreInst>(I))
+    return findMemoryBasePointer(SI->getPointerOperand()) == NewFinalizer
+               ? FinalizerUseKind::Stop
+               : FinalizerUseKind::Reject;
+  auto *Load = dyn_cast<LoadInst>(I);
+  if (!Load)
+    return FinalizerUseKind::Reject;
+  return isGCPointerType(Load->getType()) ? FinalizerUseKind::Reject
+                                          : FinalizerUseKind::Stop;
+}
+
+// Call-like uses. cj_gc_result re-materializes the same object pointer
+// (follow it). A GC field write whose base is the object (arg1) keeps the
+// object alive until the write (stop); storing the object pointer into some
+// other base publishes an alias (reject). Every other callee, intrinsic or
+// declared, is an ordinary call: escape analysis decides capture, this walk
+// only needs a destructor point that post-dominates the call.
+static FinalizerUseKind classifyFinalizerCallUse(CallBase *CB, Value *Cur,
+                                                 Value *NewFinalizer) {
+  const Function *Callee = CB->getCalledFunction();
+  if (!Callee)
+    return FinalizerUseKind::Stop;
+  const Intrinsic::ID Id = Callee->getIntrinsicID();
+  if (Id == Intrinsic::cj_gc_result && CB->arg_size() == 1 &&
+      CB->getArgOperand(0) == Cur)
+    return FinalizerUseKind::Follow;
+  if (Id == Intrinsic::cj_gcwrite_ref) {
+    // arg0 = stored value, arg1 = base object.
+    if (findMemoryBasePointer(CB->getArgOperand(1)) == NewFinalizer)
+      return FinalizerUseKind::Stop;
+    return FinalizerUseKind::Reject;
+  }
+  return FinalizerUseKind::Stop;
+}
+
+static FinalizerUseKind classifyFinalizerUse(Instruction *I, Value *Cur,
+                                             Instruction *NewFinalizer) {
+  // Publishing the pointer via PHI / select / aggregate ops / return, or
+  // reading the GC pointer back, creates an alias whose destructor point
+  // PEA's escape result cannot prove.
+  if (isa<PHINode>(I) || isa<SelectInst>(I) || isa<ReturnInst>(I) ||
+      isa<InsertValueInst>(I) || isa<ExtractValueInst>(I))
+    return FinalizerUseKind::Reject;
+  // A pointer derived from the object: keep walking.
+  if (isa<BitCastInst>(I) || isa<AddrSpaceCastInst>(I) ||
+      isa<GetElementPtrInst>(I))
+    return FinalizerUseKind::Follow;
+  if (isa<StoreInst>(I) || isa<LoadInst>(I))
+    return classifyFinalizerMemUse(I, NewFinalizer);
+  if (auto *CB = dyn_cast<CallBase>(I))
+    return classifyFinalizerCallUse(CB, Cur, NewFinalizer);
+  return FinalizerUseKind::Reject;
+}
+
+// Insert ~init at the unique latch terminator if:
+// - the allocation is in this loop (any block, not only the latch);
+// - every modeled use is in the loop and happens before that terminator;
+// - the terminator post-dominates the allocation and every use, so no path
+//   (including unwind/unreachable) can skip destruction.
+// PHI, GC-field loads, and stores of the object pointer elsewhere stay
+// rejected: those were miscompiled when the first PEA-finalizer patch
+// inserted at the allocation-block terminator.
 static bool
 collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
                                 LoopInfo &LI, DominatorTree &DT,
@@ -262,14 +349,17 @@ collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
     if (isa<ReturnInst>(BB->getTerminator()))
       return false;
 
-  // Restrict promotion to the canonical shape emitted for a for-loop: the
-  // allocation and all of its modeled uses are in the latch. Inserting at the
-  // latch terminator then preserves the order of the complete iteration.
-  if (CreateBB != Latch)
+  Instruction *InsertPoint = Latch->getTerminator();
+  if (!DT.dominates(NewFinalizer, InsertPoint))
+    return false;
+
+  PostDominatorTree PDT(*CreateBB->getParent());
+  if (!instPostDominates(PDT, InsertPoint, NewFinalizer))
     return false;
 
   SmallVector<Value *, 16> Worklist;
   SmallPtrSet<Value *, 16> VisitedValues;
+  SmallVector<Instruction *> UseInsts;
   Worklist.push_back(NewFinalizer);
   while (!Worklist.empty()) {
     Value *V = Worklist.pop_back_val();
@@ -277,50 +367,32 @@ collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
       continue;
     for (User *U : V->users()) {
       Instruction *I = dyn_cast<Instruction>(U);
-      if (!I || I->getParent() != Latch)
+      if (!I || !L->contains(I->getParent()))
         return false;
-
-      if (isa<BitCastInst>(I) || isa<AddrSpaceCastInst>(I) ||
-          isa<GetElementPtrInst>(I)) {
-        Worklist.push_back(I);
+      // Debug uses must not block a proven destructor point; they are not
+      // semantically live uses of the object.
+      if (isa<DbgInfoIntrinsic>(I))
         continue;
-      }
-
-      if (auto *SI = dyn_cast<StoreInst>(I)) {
-        if (SI->getPointerOperand() == V) {
-          continue;
-        }
+      const FinalizerUseKind Kind = classifyFinalizerUse(I, V, NewFinalizer);
+      if (Kind == FinalizerUseKind::Reject)
         return false;
-      }
-
-      if (auto *Load = dyn_cast<LoadInst>(I)) {
-        if (!isGCPointerType(Load->getType())) {
-          continue;
-        }
-        return false;
-      }
-
-      if (auto *CB = dyn_cast<CallBase>(I)) {
-        const Function *Callee = CB->getCalledFunction();
-        if (Callee && Callee->getIntrinsicID() == Intrinsic::cj_gc_result &&
-            CB->arg_size() == 1 && CB->getArgOperand(0) == V) {
-          Worklist.push_back(CB);
-          continue;
-        }
-        if (Callee && Callee->getIntrinsicID() == Intrinsic::cj_gcwrite_ref &&
-            findMemoryBasePointer(CB->getArgOperand(1)) == NewFinalizer) {
-          continue;
-        }
-        return false;
-      }
-
-      return false;
+      // Stop and Follow are both real uses that must happen before ~init;
+      // only Follow keeps deriving new pointers from the object.
+      UseInsts.push_back(I);
+      if (Kind == FinalizerUseKind::Follow)
+        Worklist.push_back(I);
     }
   }
 
-  Instruction *InsertPoint = Latch->getTerminator();
-  if (!DT.dominates(NewFinalizer, InsertPoint))
-    return false;
+  for (Instruction *U : UseInsts) {
+    // The latch terminator itself may be a use (an invoke on the object):
+    // inserting ~init before it would destroy the object before that use.
+    if (U == InsertPoint)
+      return false;
+    if (!instPostDominates(PDT, InsertPoint, U))
+      return false;
+  }
+
   Points.push_back(InsertPoint);
   return true;
 }
@@ -405,7 +477,11 @@ static bool canStackAllocateFinalizer(CallBase *CB, Module *M, LoopInfo *LI) {
   // runFinalizerUnwindProtection converts those calls to invokes.
   BasicBlock *BB = CB->getParent();
   DominatorTree DT(*BB->getParent());
-  if (hasNonReturnExitPath(BB))
+  // Loop-local objects: the latch post-dominator check already rejects paths
+  // that skip ~init. A function-wide walk would also see post-loop unwind
+  // exits and wrongly refuse the inner-loop allocation.
+  const bool InLoop = LI && LI->getLoopFor(BB);
+  if (!InLoop && hasNonReturnExitPath(BB))
     return false;
   if (!hasFinalizerInsertPoints(CB, BB, LI, &DT))
     return false;
@@ -441,7 +517,11 @@ public:
     FinalizerInsertBB = CB->getParent();
     if (FinalizerMethod == nullptr)
       return false;
-    if (hasNonReturnExitPath(FinalizerInsertBB))
+    // Same loop exemption as canStackAllocateFinalizer: the analysis gate
+    // and this rewrite gate must reach the same verdict (see the escape
+    // pre-flight comment in EADepthImpl).
+    const bool InLoop = LI && LI->getLoopFor(FinalizerInsertBB);
+    if (!InLoop && hasNonReturnExitPath(FinalizerInsertBB))
       return false;
     collectFinalizerInsertPoints(InsertPoints);
     if (InsertPoints.empty())
