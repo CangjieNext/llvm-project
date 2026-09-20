@@ -1444,10 +1444,6 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   if (EnableIROutliner)
     MPM.addPass(IROutlinerPass());
 
-  // Merge functions if requested.
-  if (PTO.MergeFunctions)
-    MPM.addPass(MergeFunctionsPass());
-
   if (!LTOPreLink && CJPipeline) {
     MPM.addPass(EliminateAvailableExternallyPass());
   }
@@ -1458,6 +1454,13 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   // ordering here.
   MPM.addPass(GlobalDCEPass());
   MPM.addPass(ConstantMergePass());
+
+  // Merge functions if requested (opt-in via -enable-merge-functions). It must
+  // stay after GlobalDCE (which performs Cangjie VFE); otherwise the VFE
+  // analysis would run on already merged functions/thunks. This mirrors the
+  // GlobalDCE -> MergeFunctions ordering used by the LTO pipeline.
+  if (PTO.MergeFunctions)
+    MPM.addPass(MergeFunctionsPass());
 
   if (PTO.CallGraphProfile && !LTOPreLink)
     MPM.addPass(CGProfilePass());
