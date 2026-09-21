@@ -27,6 +27,7 @@
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/LazyCallGraph.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
@@ -236,10 +237,170 @@ static bool finalizerLiveAt(const Instruction *Alloc, Instruction *I,
   return true;
 }
 
-// Find one point that executes once per natural-loop iteration after every
-// supported use. Values that cross a PHI, memory, aggregate, or loop boundary
-// are deliberately rejected: PEA's escape result alone cannot prove where the
-// finalizer must run for those flows.
+// Classify a user of a NewFinalizer-derived value.
+// Follow: pointer derived from the object (keep walking).
+// Stop: a real use that must happen before ~init, but does not create a new
+//       alias of the object pointer.
+// Reject: PHI / memory / GC-field / publishing the pointer — PEA's escape
+//         result cannot prove the destructor point.
+enum class FinalizerUseKind { Follow, Stop, Reject };
+
+// Loads and stores around the object. Memory ops never extend the SSA
+// alias chain, so this returns only Stop or Reject: a load result is
+// either a GC-typed alias of whatever is in memory (reject) or plain
+// non-GC data (stop), and a store through an object-derived pointer
+// writes a field (stop). The store's VALUE is the dangerous direction:
+// if it aliases the object — SSA-derived from it, or one of the followed
+// aliases passed as Cur (e.g. a return-argument call result, where
+// findMemoryBasePointer stops at the call) — storing it anywhere, even
+// into the object's own non-GC field, plants the alias where a later
+// non-GC load reads it back off the SSA chain, and its uses are not
+// constrained to precede ~init. That publishes an alias like
+// cj_gcwrite_ref's arg0 (untrackedAliasArgs), so reject it the same way.
+// The same invariant (object aliases never enter memory) is what makes
+// aggregate loads containing GC pointers safe to stop at: any such alias
+// store is rejected, so none exists to be loaded.
+static FinalizerUseKind classifyFinalizerMemUse(Instruction *I, Value *Cur,
+                                                Value *NewFinalizer) {
+  if (auto *SI = dyn_cast<StoreInst>(I)) {
+    if (SI->getValueOperand() == Cur ||
+        findMemoryBasePointer(SI->getValueOperand()) == NewFinalizer)
+      return FinalizerUseKind::Reject;
+    return findMemoryBasePointer(SI->getPointerOperand()) == NewFinalizer
+               ? FinalizerUseKind::Stop
+               : FinalizerUseKind::Reject;
+  }
+  auto *Load = dyn_cast<LoadInst>(I);
+  if (!Load)
+    return FinalizerUseKind::Reject;
+  return isGCPointerType(Load->getType()) ? FinalizerUseKind::Reject
+                                          : FinalizerUseKind::Stop;
+}
+
+// Operand indices through which a GC intrinsic may hand this walk an
+// untracked alias of the object: reads (the result may alias the object
+// through a self-referential field), writes that store a GC reference
+// into memory, and copies whose destination is untracked memory. The
+// object on a destination side instead is a plain write (stop). Positions
+// follow the intrinsic definitions in Intrinsics.td; note EA groups
+// cj_copy_struct_field under handleGCWriteAgg (op0/op1), do not "align"
+// these indices with it.
+static ArrayRef<unsigned> untrackedAliasArgs(Intrinsic::ID Id) {
+  // Backing arrays must be static: ArrayRef only views them.
+  static constexpr unsigned Arg0[] = {0};
+  static constexpr unsigned Arg1[] = {1};
+  static constexpr unsigned Arg2[] = {2};
+  static constexpr unsigned Args12[] = {1, 2};
+  static constexpr unsigned Args23[] = {2, 3};
+  switch (Id) {
+  case Intrinsic::cj_gcwrite_ref:
+    return Arg0; // arg0 = stored value (arg2 = field address)
+  case Intrinsic::cj_gcread_static_ref:
+    return Arg0; // arg0 = address read
+  case Intrinsic::cj_gcwrite_static_ref:
+    // arg0 = value published to a static. Escape analysis already rejects
+    // this flow; stay defensive in case the gate order changes.
+    return Arg0;
+  case Intrinsic::cj_gcread_ref:
+  case Intrinsic::cj_gcread_weakref:
+    return Arg1; // arg1 = field address
+  case Intrinsic::cj_gcwrite_static_struct:
+  case Intrinsic::cj_gcread_static_struct:
+  case Intrinsic::cj_assign_generic:
+    return Arg1; // arg1 = source
+  case Intrinsic::memcpy:
+  case Intrinsic::memmove:
+    // The plain-IR form of the same content-copy hazard: arg1 = source.
+    return Arg1;
+  case Intrinsic::cj_gcwrite_struct:
+    return Arg2; // arg2 = source
+  case Intrinsic::cj_gcread_struct:
+    return Args12; // arg1/arg2 = source side
+  case Intrinsic::cj_array_copy_ref:
+  case Intrinsic::cj_array_copy_struct:
+  case Intrinsic::cj_copy_struct_field:
+    // 5-arg copies (DstObj/DstPtr/SrcObj/SrcPtr/Size): arg2/arg3 = source.
+    return Args23;
+  default:
+    return {};
+  }
+}
+
+// Call-like uses. cj_gc_result re-materializes the same object pointer
+// (follow it). GC intrinsics that read the object or copy its contents out
+// produce an alias this walk cannot track: the read result / copy target
+// may alias the object through a self-referential field, and its uses are
+// not constrained to precede ~init. They are rejected like the GC-pointer
+// load in classifyFinalizerMemUse (at cj-pea time field accesses are still
+// these intrinsics, so the load rule alone does not fire). An intrinsic
+// whose untracked-alias operands do not involve the object is a plain
+// use. Ordinary (non-intrinsic) calls need more than EA's no-capture
+// verdict — see the memory-effect gate in the body.
+static FinalizerUseKind classifyFinalizerCallUse(CallBase *CB, Value *Cur,
+                                                 Value *NewFinalizer) {
+  const Function *Callee = CB->getCalledFunction();
+  const Intrinsic::ID Id =
+      Callee ? Callee->getIntrinsicID() : Intrinsic::not_intrinsic;
+  if (Id == Intrinsic::cj_gc_result && CB->arg_size() == 1 &&
+      CB->getArgOperand(0) == Cur)
+    return FinalizerUseKind::Follow;
+  for (unsigned Idx : untrackedAliasArgs(Id)) {
+    if (Idx < CB->arg_size() &&
+        (CB->getArgOperand(Idx) == Cur ||
+         findMemoryBasePointer(CB->getArgOperand(Idx)) == NewFinalizer))
+      return FinalizerUseKind::Reject;
+  }
+  // The object appears on no untracked-alias operand. GC intrinsics that
+  // reach here use it on a destination side, and memset & co. write
+  // non-pointer data: neither plants an alias of the object into memory.
+  if (Id != Intrinsic::not_intrinsic)
+    return CB->getType()->isPointerTy() ? FinalizerUseKind::Follow
+                                        : FinalizerUseKind::Stop;
+  // An ordinary or indirect call taking the object. EA's no-capture
+  // verdict is blind to stores of non-GC values (visitStoreInst returns
+  // early), so even a nocapture callee can plant an argument-derived
+  // alias into the object's own non-GC field, where a later non-GC load
+  // reads it back off the SSA chain. Trust only a memory-effect proof
+  // that the call cannot write at all (function attrs are inferred
+  // before cj-pea in the cangjie pipeline). A pointer result of such a
+  // call may still alias the object (a return-this / return-argument
+  // callee), so it is followed like a derived pointer: a PHI or store on
+  // it then hits the rejects in classifyFinalizerUse /
+  // classifyFinalizerMemUse. A non-pointer result cannot alias the
+  // object and is a plain use.
+  if (!CB->doesNotAccessMemory() && !CB->onlyReadsMemory())
+    return FinalizerUseKind::Reject;
+  return CB->getType()->isPointerTy() ? FinalizerUseKind::Follow
+                                      : FinalizerUseKind::Stop;
+}
+
+static FinalizerUseKind classifyFinalizerUse(Instruction *I, Value *Cur,
+                                             Instruction *NewFinalizer) {
+  // Publishing the pointer via PHI / select / aggregate ops / return, or
+  // reading the GC pointer back, creates an alias whose destructor point
+  // PEA's escape result cannot prove.
+  if (isa<PHINode>(I) || isa<SelectInst>(I) || isa<ReturnInst>(I) ||
+      isa<InsertValueInst>(I) || isa<ExtractValueInst>(I))
+    return FinalizerUseKind::Reject;
+  // A pointer derived from the object: keep walking.
+  if (isa<BitCastInst>(I) || isa<AddrSpaceCastInst>(I) ||
+      isa<GetElementPtrInst>(I))
+    return FinalizerUseKind::Follow;
+  if (isa<StoreInst>(I) || isa<LoadInst>(I))
+    return classifyFinalizerMemUse(I, Cur, NewFinalizer);
+  if (auto *CB = dyn_cast<CallBase>(I))
+    return classifyFinalizerCallUse(CB, Cur, NewFinalizer);
+  return FinalizerUseKind::Reject;
+}
+
+// Insert ~init at the unique latch terminator if:
+// - the allocation is in this loop (any block, not only the latch);
+// - every modeled use is in the loop and happens before that terminator;
+// - the terminator post-dominates the allocation and every use, so no path
+//   (including unwind/unreachable) can skip destruction.
+// PHI, GC-field loads, and stores of the object pointer elsewhere stay
+// rejected: those were miscompiled when the first PEA-finalizer patch
+// inserted at the allocation-block terminator.
 static bool
 collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
                                 LoopInfo &LI, DominatorTree &DT,
@@ -262,14 +423,17 @@ collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
     if (isa<ReturnInst>(BB->getTerminator()))
       return false;
 
-  // Restrict promotion to the canonical shape emitted for a for-loop: the
-  // allocation and all of its modeled uses are in the latch. Inserting at the
-  // latch terminator then preserves the order of the complete iteration.
-  if (CreateBB != Latch)
+  Instruction *InsertPoint = Latch->getTerminator();
+  if (!DT.dominates(NewFinalizer, InsertPoint))
+    return false;
+
+  PostDominatorTree PDT(*CreateBB->getParent());
+  if (!PDT.dominates(InsertPoint, NewFinalizer))
     return false;
 
   SmallVector<Value *, 16> Worklist;
   SmallPtrSet<Value *, 16> VisitedValues;
+  SmallVector<Instruction *> UseInsts;
   Worklist.push_back(NewFinalizer);
   while (!Worklist.empty()) {
     Value *V = Worklist.pop_back_val();
@@ -277,50 +441,32 @@ collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
       continue;
     for (User *U : V->users()) {
       Instruction *I = dyn_cast<Instruction>(U);
-      if (!I || I->getParent() != Latch)
+      if (!I || !L->contains(I->getParent()))
         return false;
-
-      if (isa<BitCastInst>(I) || isa<AddrSpaceCastInst>(I) ||
-          isa<GetElementPtrInst>(I)) {
-        Worklist.push_back(I);
+      // Debug and lifetime intrinsics are pseudo uses with no runtime
+      // semantics; they must not block a proven destructor point.
+      if (isa<DbgInfoIntrinsic>(I) || I->isLifetimeStartOrEnd())
         continue;
-      }
-
-      if (auto *SI = dyn_cast<StoreInst>(I)) {
-        if (SI->getPointerOperand() == V) {
-          continue;
-        }
+      const FinalizerUseKind Kind = classifyFinalizerUse(I, V, NewFinalizer);
+      if (Kind == FinalizerUseKind::Reject)
         return false;
-      }
-
-      if (auto *Load = dyn_cast<LoadInst>(I)) {
-        if (!isGCPointerType(Load->getType())) {
-          continue;
-        }
-        return false;
-      }
-
-      if (auto *CB = dyn_cast<CallBase>(I)) {
-        const Function *Callee = CB->getCalledFunction();
-        if (Callee && Callee->getIntrinsicID() == Intrinsic::cj_gc_result &&
-            CB->arg_size() == 1 && CB->getArgOperand(0) == V) {
-          Worklist.push_back(CB);
-          continue;
-        }
-        if (Callee && Callee->getIntrinsicID() == Intrinsic::cj_gcwrite_ref &&
-            findMemoryBasePointer(CB->getArgOperand(1)) == NewFinalizer) {
-          continue;
-        }
-        return false;
-      }
-
-      return false;
+      // Stop and Follow are both real uses that must happen before ~init;
+      // only Follow keeps deriving new pointers from the object.
+      UseInsts.push_back(I);
+      if (Kind == FinalizerUseKind::Follow)
+        Worklist.push_back(I);
     }
   }
 
-  Instruction *InsertPoint = Latch->getTerminator();
-  if (!DT.dominates(NewFinalizer, InsertPoint))
-    return false;
+  for (Instruction *U : UseInsts) {
+    // The latch terminator itself may be a use (an invoke on the object):
+    // inserting ~init before it would destroy the object before that use.
+    if (U == InsertPoint)
+      return false;
+    if (!PDT.dominates(InsertPoint, U))
+      return false;
+  }
+
   Points.push_back(InsertPoint);
   return true;
 }
@@ -405,7 +551,11 @@ static bool canStackAllocateFinalizer(CallBase *CB, Module *M, LoopInfo *LI) {
   // runFinalizerUnwindProtection converts those calls to invokes.
   BasicBlock *BB = CB->getParent();
   DominatorTree DT(*BB->getParent());
-  if (hasNonReturnExitPath(BB))
+  // Loop-local objects: the latch post-dominator check already rejects paths
+  // that skip ~init. A function-wide walk would also see post-loop unwind
+  // exits and wrongly refuse the inner-loop allocation.
+  const bool InLoop = LI && LI->getLoopFor(BB);
+  if (!InLoop && hasNonReturnExitPath(BB))
     return false;
   if (!hasFinalizerInsertPoints(CB, BB, LI, &DT))
     return false;
@@ -441,7 +591,11 @@ public:
     FinalizerInsertBB = CB->getParent();
     if (FinalizerMethod == nullptr)
       return false;
-    if (hasNonReturnExitPath(FinalizerInsertBB))
+    // Same loop exemption as canStackAllocateFinalizer: the analysis gate
+    // and this rewrite gate must reach the same verdict (see the escape
+    // pre-flight comment in EADepthImpl).
+    const bool InLoop = LI && LI->getLoopFor(FinalizerInsertBB);
+    if (!InLoop && hasNonReturnExitPath(FinalizerInsertBB))
       return false;
     collectFinalizerInsertPoints(InsertPoints);
     if (InsertPoints.empty())
