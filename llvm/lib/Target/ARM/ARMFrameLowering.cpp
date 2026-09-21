@@ -1707,20 +1707,36 @@ void ARMFrameLowering::emitPopInst(MachineBasicBlock &MBB,
                         .addReg(ARM::SP)
                         .add(predOps(ARMCC::AL))
                         .setMIFlags(MachineInstr::FrameDestroy);
+        bool AnyLowReg = false;
         for (unsigned i = 0, e = Regs.size(); i < e; ++i)
           if (TRI.getEncodingValue(Regs[i]) <
-              TRI.getEncodingValue(TRI.getFrameRegister(*MF)))
+              TRI.getEncodingValue(TRI.getFrameRegister(*MF))) {
             // r11, lr
             MIB.addReg(Regs[i], getDefRegState(true));
-          else
+            AnyLowReg = true;
+          } else {
             MIB2.addReg(Regs[i], getDefRegState(true));
-        // Empty csr operands
-        if (MIB->getDesc().getNumOperands() > MIB->getNumOperands())
+          }
+        // Erase the low half when it received no registers.
+        if (!AnyLowReg)
           MIB->eraseFromParent();
-      } else {
-        for (unsigned i = 0, e = Regs.size(); i < e; ++i)
-          MIB.addReg(Regs[i], getDefRegState(true));
+        // PC is always split into MIB2, so MIB2 is the folded return and must
+        // carry the old return instruction's implicit operands (return-value
+        // registers); attaching them to MIB would drop the return value.
+        if (DeleteRet) {
+          if (MI != MBB.end()) {
+            MIB2.copyImplicitOps(*MI);
+            MI->eraseFromParent();
+          }
+        }
+        MI = MIB2;
+        Regs.clear();
+        if (MI != MBB.end())
+          ++MI;
+        continue;
       }
+      for (unsigned i = 0, e = Regs.size(); i < e; ++i)
+        MIB.addReg(Regs[i], getDefRegState(true));
       if (DeleteRet) {
         if (MI != MBB.end()) {
           MIB.copyImplicitOps(*MI);
