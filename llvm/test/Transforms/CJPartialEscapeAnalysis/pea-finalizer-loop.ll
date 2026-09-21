@@ -49,6 +49,12 @@ declare void @CJ_MCC_ThrowException(i8 addrspace(1)*)
 declare void @may_throw()
 declare i32 @__cj_personality_v0(...)
 declare void @llvm.memset.p1i8.i64(i8 addrspace(1)* nocapture writeonly, i8, i64, i1 immarg)
+; A defined, non-capturing callee: PEA proves no escape interprocedurally.
+define i64 @use_obj(i8 addrspace(1)* nocapture %p) nounwind {
+  ret i64 0
+}
+declare void @llvm.cj.gcwrite.ref(i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*)
+declare i8 addrspace(1)* @llvm.cj.gcread.ref(i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*)
 
 ; User-written ~init: calls a C release and has no nounwind attribute.
 define void @w_dtor(i8 addrspace(1)* %this, %TypeInfo* %ti) gc "cangjie" {
@@ -441,7 +447,95 @@ exit:
   ret i64 %sum
 }
 
-!0 = !{!"ObjLayout.W"}
+; A GC reference field read via cj.gcread.ref yields an alias the walk
+; cannot track (a self-referential field yields the object itself), and its
+; uses are not constrained to precede ~init: reject, stay on the heap.
+; CHECK-LABEL: define i64 @loop_gcread_ref(
+; CHECK: CJ_MCC_NewFinalizer
+; CHECK-NOT: call void @w_dtor(
+define i64 @loop_gcread_ref() gc "cangjie" personality i32 (...)* @__cj_personality_v0 {
+entry:
+  br label %header
+
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %latch ]
+  %cmp = icmp slt i64 %i, 10
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %obj = call i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8* bitcast (%TypeInfo* @W.ti to i8*), i32 16)
+  %p = getelementptr inbounds i8, i8 addrspace(1)* %obj, i64 8
+  %slot = bitcast i8 addrspace(1)* %p to i8 addrspace(1)* addrspace(1)*
+  %f = call i8 addrspace(1)* @llvm.cj.gcread.ref(i8 addrspace(1)* %obj, i8 addrspace(1)* addrspace(1)* %slot)
+  %v = call i64 @use_obj(i8 addrspace(1)* %f)
+  br label %latch
+
+latch:
+  %next = add i64 %i, 1
+  br label %header
+
+exit:
+  ret i64 %i
+}
+
+; A GC field write via cj.gcwrite.ref whose base is the object is a plain
+; use that keeps the object alive until the write: promote.
+; CHECK-LABEL: define i64 @loop_gcwrite_ref(
+; CHECK: alloca { %TypeInfo*, %ObjLayout.W }
+; CHECK-NOT: CJ_MCC_NewFinalizer
+; CHECK: call void @w_dtor(
+define i64 @loop_gcwrite_ref() gc "cangjie" personality i32 (...)* @__cj_personality_v0 {
+entry:
+  br label %header
+
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %latch ]
+  %cmp = icmp slt i64 %i, 10
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %obj = call i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8* bitcast (%TypeInfo* @W.ti to i8*), i32 16)
+  %p = getelementptr inbounds i8, i8 addrspace(1)* %obj, i64 8
+  %slot = bitcast i8 addrspace(1)* %p to i8 addrspace(1)* addrspace(1)*
+  call void @llvm.cj.gcwrite.ref(i8 addrspace(1)* %obj, i8 addrspace(1)* %obj, i8 addrspace(1)* addrspace(1)* %slot)
+  br label %latch
+
+latch:
+  %next = add i64 %i, 1
+  br label %header
+
+exit:
+  ret i64 %i
+}
+
+; An ordinary non-capturing call on the object is a plain use: promote when
+; the latch destructor point post-dominates the call.
+; CHECK-LABEL: define i64 @loop_call_use_obj(
+; CHECK: alloca { %TypeInfo*, %ObjLayout.W }
+; CHECK-NOT: CJ_MCC_NewFinalizer
+; CHECK: call void @w_dtor(
+define i64 @loop_call_use_obj() gc "cangjie" personality i32 (...)* @__cj_personality_v0 {
+entry:
+  br label %header
+
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %latch ]
+  %cmp = icmp slt i64 %i, 10
+  br i1 %cmp, label %body, label %exit
+
+body:
+  %obj = call i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8* bitcast (%TypeInfo* @W.ti to i8*), i32 16)
+  call void @llvm.memset.p1i8.i64(i8 addrspace(1)* %obj, i8 0, i64 16, i1 false)
+  %v = call i64 @use_obj(i8 addrspace(1)* %obj)
+  br label %latch
+
+latch:
+  %next = add i64 %i, 1
+  br label %header
+
+exit:
+  ret i64 %i
+}
 
 ; Same as loop_maythrow_call, but with a personality fn: the in-loop
 ; may-throw call is converted to an invoke unwinding to a pad that runs the
@@ -480,3 +574,5 @@ latch:
 exit:
   ret i64 %sum
 }
+
+!0 = !{!"ObjLayout.W"}

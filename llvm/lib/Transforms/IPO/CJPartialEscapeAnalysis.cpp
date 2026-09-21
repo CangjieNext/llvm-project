@@ -237,19 +237,6 @@ static bool finalizerLiveAt(const Instruction *Alloc, Instruction *I,
   return true;
 }
 
-static bool instPostDominates(const PostDominatorTree &PDT,
-                              const Instruction *Later,
-                              const Instruction *Earlier) {
-  if (Later == Earlier)
-    return true;
-  const BasicBlock *LB = Later->getParent();
-  const BasicBlock *EB = Earlier->getParent();
-  if (LB == EB)
-    return Earlier->comesBefore(Later);
-  return PDT.dominates(const_cast<BasicBlock *>(LB),
-                       const_cast<BasicBlock *>(EB));
-}
-
 // Classify a user of a NewFinalizer-derived value.
 // Follow: pointer derived from the object (keep walking).
 // Stop: a real use that must happen before ~init, but does not create a new
@@ -277,11 +264,15 @@ static FinalizerUseKind classifyFinalizerMemUse(Instruction *I,
 }
 
 // Call-like uses. cj_gc_result re-materializes the same object pointer
-// (follow it). A GC field write whose base is the object (arg1) keeps the
-// object alive until the write (stop); storing the object pointer into some
-// other base publishes an alias (reject). Every other callee, intrinsic or
-// declared, is an ordinary call: escape analysis decides capture, this walk
-// only needs a destructor point that post-dominates the call.
+// (follow it). GC intrinsics that read the object or copy its contents out
+// produce an alias this walk cannot track: the read result / copy target
+// may alias the object through a self-referential field, and its uses are
+// not constrained to precede ~init. They are rejected like the GC-pointer
+// load in classifyFinalizerMemUse (at cj-pea time field accesses are still
+// these intrinsics, so the load rule alone does not fire). Every other
+// callee, intrinsic or declared, is an ordinary call: escape analysis
+// decides capture, this walk only needs a destructor point that
+// post-dominates the call.
 static FinalizerUseKind classifyFinalizerCallUse(CallBase *CB, Value *Cur,
                                                  Value *NewFinalizer) {
   const Function *Callee = CB->getCalledFunction();
@@ -291,13 +282,56 @@ static FinalizerUseKind classifyFinalizerCallUse(CallBase *CB, Value *Cur,
   if (Id == Intrinsic::cj_gc_result && CB->arg_size() == 1 &&
       CB->getArgOperand(0) == Cur)
     return FinalizerUseKind::Follow;
-  if (Id == Intrinsic::cj_gcwrite_ref) {
+  auto BaseIsObject = [&](unsigned Idx) {
+    return findMemoryBasePointer(CB->getArgOperand(Idx)) == NewFinalizer;
+  };
+  switch (Id) {
+  case Intrinsic::not_intrinsic:
+    return FinalizerUseKind::Stop;
+  case Intrinsic::cj_gcwrite_ref:
     // arg0 = stored value, arg1 = base object.
-    if (findMemoryBasePointer(CB->getArgOperand(1)) == NewFinalizer)
-      return FinalizerUseKind::Stop;
-    return FinalizerUseKind::Reject;
+    return BaseIsObject(1) ? FinalizerUseKind::Stop : FinalizerUseKind::Reject;
+  // Reading a GC reference field of the object: the result is an untracked
+  // GC alias (a self-referential field yields the object itself).
+  // arg1 = field address.
+  case Intrinsic::cj_gcread_ref:
+  case Intrinsic::cj_gcread_weakref:
+    return BaseIsObject(1) ? FinalizerUseKind::Reject : FinalizerUseKind::Stop;
+  // Aggregate copies: the object on the destination side is a plain write
+  // (stop); on the source side its contents (including GC references) flow
+  // into untracked memory (reject). Operand positions match
+  // handleGCReadAgg / handleGCWriteAgg / handleArrayCopyto.
+  case Intrinsic::cj_gcwrite_struct:
+    // arg0/arg1 = destination side, arg2 = source.
+    return BaseIsObject(2) ? FinalizerUseKind::Reject : FinalizerUseKind::Stop;
+  case Intrinsic::cj_gcread_struct:
+    // arg0 = destination, arg1/arg2 = source side.
+    return (BaseIsObject(1) || BaseIsObject(2)) ? FinalizerUseKind::Reject
+                                                : FinalizerUseKind::Stop;
+  case Intrinsic::cj_gcwrite_static_struct:
+    // arg0 = destination, arg1 = source.
+    return BaseIsObject(1) ? FinalizerUseKind::Reject : FinalizerUseKind::Stop;
+  case Intrinsic::cj_array_copy_ref:
+  case Intrinsic::cj_array_copy_struct:
+  case Intrinsic::cj_copy_struct_field:
+    // arg0/arg1 = destination side, arg2/arg3 = source side.
+    return (BaseIsObject(2) || BaseIsObject(3)) ? FinalizerUseKind::Reject
+                                                : FinalizerUseKind::Stop;
+  case Intrinsic::cj_assign_generic:
+    // arg0 = destination, arg1 = source.
+    return BaseIsObject(1) ? FinalizerUseKind::Reject : FinalizerUseKind::Stop;
+  case Intrinsic::cj_gcwrite_static_ref:
+    // arg0 = value published to a static. Escape analysis already rejects
+    // this flow; stay defensive in case the gate order changes.
+    return BaseIsObject(0) ? FinalizerUseKind::Reject : FinalizerUseKind::Stop;
+  case Intrinsic::memcpy:
+  case Intrinsic::memmove:
+    // arg0 = destination, arg1 = source: the plain-IR form of the same
+    // content-copy hazard as the aggregate intrinsics above.
+    return BaseIsObject(1) ? FinalizerUseKind::Reject : FinalizerUseKind::Stop;
+  default:
+    return FinalizerUseKind::Stop;
   }
-  return FinalizerUseKind::Stop;
 }
 
 static FinalizerUseKind classifyFinalizerUse(Instruction *I, Value *Cur,
@@ -354,7 +388,7 @@ collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
     return false;
 
   PostDominatorTree PDT(*CreateBB->getParent());
-  if (!instPostDominates(PDT, InsertPoint, NewFinalizer))
+  if (!PDT.dominates(InsertPoint, NewFinalizer))
     return false;
 
   SmallVector<Value *, 16> Worklist;
@@ -389,7 +423,7 @@ collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
     // inserting ~init before it would destroy the object before that use.
     if (U == InsertPoint)
       return false;
-    if (!instPostDominates(PDT, InsertPoint, U))
+    if (!PDT.dominates(InsertPoint, U))
       return false;
   }
 
