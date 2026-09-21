@@ -1707,20 +1707,32 @@ void ARMFrameLowering::emitPopInst(MachineBasicBlock &MBB,
                         .addReg(ARM::SP)
                         .add(predOps(ARMCC::AL))
                         .setMIFlags(MachineInstr::FrameDestroy);
+        bool AnyLowReg = false;
         for (unsigned i = 0, e = Regs.size(); i < e; ++i)
           if (TRI.getEncodingValue(Regs[i]) <
-              TRI.getEncodingValue(TRI.getFrameRegister(*MF)))
+              TRI.getEncodingValue(TRI.getFrameRegister(*MF))) {
             // r11, lr
             MIB.addReg(Regs[i], getDefRegState(true));
-          else
+            AnyLowReg = true;
+          } else {
             MIB2.addReg(Regs[i], getDefRegState(true));
-        // Empty csr operands
-        if (MIB->getDesc().getNumOperands() > MIB->getNumOperands())
+          }
+        if (!AnyLowReg)
           MIB->eraseFromParent();
-      } else {
-        for (unsigned i = 0, e = Regs.size(); i < e; ++i)
-          MIB.addReg(Regs[i], getDefRegState(true));
+        if (DeleteRet) {
+          if (MI != MBB.end()) {
+            MIB2.copyImplicitOps(*MI);
+            MI->eraseFromParent();
+          }
+        }
+        MI = MIB2;
+        Regs.clear();
+        if (MI != MBB.end())
+          ++MI;
+        continue;
       }
+      for (unsigned i = 0, e = Regs.size(); i < e; ++i)
+        MIB.addReg(Regs[i], getDefRegState(true));
       if (DeleteRet) {
         if (MI != MBB.end()) {
           MIB.copyImplicitOps(*MI);
