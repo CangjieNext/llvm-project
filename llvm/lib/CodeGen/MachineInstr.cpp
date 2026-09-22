@@ -215,7 +215,10 @@ void MachineInstr::addOperand(MachineFunction &MF, const MachineOperand &Op) {
   // RegMask operands go between the explicit and implicit operands.
   Triple ModuleTriple(MF.getFunction().getParent()->getTargetTriple());
   // Cangjie's MRS (cj_get_fp_state) carries extra operands/results beyond the
-  // 2-slot MCID; skip the assert via the target hook (not a hardcoded opcode).
+  // 2-slot MCID; skip the assert for it via the target hook. The hook matches
+  // MRS at opcode level (the MI has no dedicated CJ flag), but excess explicit
+  // operands only ever come from the Cangjie lowering, so the arch+opcode
+  // gate is sufficient.
   const TargetLowering *TLI = MF.getSubtarget().getTargetLowering();
   assert(TLI && "Subtarget must provide a TargetLowering!");
   if (!(ModuleTriple.getArch() == Triple::aarch64 && TLI &&
@@ -642,31 +645,6 @@ bool MachineInstr::isIdenticalTo(const MachineInstr &Other,
   return true;
 }
 
-bool MachineInstr::isCalDerivedPtrInCangjieCopyGC(
-    MachineRegisterInfo *MRI) const {
-  Triple ModuleTriple(getMF()->getFunction().getParent()->getTargetTriple());
-  // 325: X86::ADD64ri8  261: AArch64::ADDXri
-  if ((ModuleTriple.getArch() == Triple::x86_64 && getOpcode() == 325) ||
-      (ModuleTriple.getArch() == Triple::aarch64 && getOpcode() == 261)) {
-    for (const MachineOperand &MO : operands()) {
-      if (!MO.isReg()) {
-        continue;
-      }
-
-      Register Reg = MO.getReg();
-      if (Reg == 0) {
-        continue;
-      }
-      // return true if it's gep from a ref ptr
-      for (auto &U : MRI->use_nodbg_operands(Reg)) {
-        if (isStatepointOpcode(U.getParent()->getOpcode())) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
 const MachineFunction *MachineInstr::getMF() const {
   return getParent()->getParent();
 }

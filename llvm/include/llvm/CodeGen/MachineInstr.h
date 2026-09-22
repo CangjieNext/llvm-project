@@ -1179,8 +1179,6 @@ public:
   bool isIdenticalTo(const MachineInstr &Other,
                      MICheckType Check = CheckDefs) const;
 
-  bool isCalDerivedPtrInCangjieCopyGC(MachineRegisterInfo *MRI) const;
-
   /// Unlink 'this' from the containing basic block, and return it without
   /// deleting it.
   ///
