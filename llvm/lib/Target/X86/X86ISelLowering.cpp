@@ -3021,6 +3021,10 @@ const MCPhysReg *X86TargetLowering::getScratchRegisters(CallingConv::ID) const {
   return ScratchRegs;
 }
 
+bool X86TargetLowering::isCangjieDerivedPtrOpcode(unsigned Opcode) const {
+  return Opcode == X86::ADD64ri8;
+}
+
 /// Lowers masks values (v*i1) to the local register values
 /// \returns DAG node after lowering to register type
 static SDValue lowerMasksToReg(const SDValue &ValArg, const EVT &ValLoc,

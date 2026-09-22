@@ -4331,6 +4331,13 @@ public:
     return false;
   }
 
+  /// Returns true if the given opcode computes a derived pointer from a GC
+  /// ref (Cangjie copy GC must not LICM/CSE it across safepoints).
+  virtual bool
+  isCangjieDerivedPtrOpcode(unsigned Opcode) const {
+    return false;
+  }
+
   /// Returns a 0 terminated array of registers that can be safely used as
   /// scratch registers.
   virtual const MCPhysReg *getScratchRegisters(CallingConv::ID CC) const {

@@ -1647,6 +1647,8 @@ namespace llvm {
 
     const MCPhysReg *getScratchRegisters(CallingConv::ID CC) const override;
 
+    bool isCangjieDerivedPtrOpcode(unsigned Opcode) const override;
+
     TargetLoweringBase::AtomicExpansionKind
     shouldExpandAtomicLoadInIR(LoadInst *LI) const override;
     TargetLoweringBase::AtomicExpansionKind

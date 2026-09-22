@@ -13689,6 +13689,10 @@ bool AArch64TargetLowering::isCangjieGetFPStateInstr(unsigned Opcode) const {
   return Opcode == AArch64::MRS;
 }
 
+bool AArch64TargetLowering::isCangjieDerivedPtrOpcode(unsigned Opcode) const {
+  return Opcode == AArch64::ADDXri;
+}
+
 const MCPhysReg *
 AArch64TargetLowering::getScratchRegisters(CallingConv::ID) const {
   // LR is a callee-save register, but we must treat it as clobbered by any call

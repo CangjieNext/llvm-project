@@ -653,6 +653,8 @@ public:
 
   bool isCangjieGetFPStateInstr(unsigned Opcode) const override;
 
+  bool isCangjieDerivedPtrOpcode(unsigned Opcode) const override;
+
   const MCPhysReg *getScratchRegisters(CallingConv::ID CC) const override;
 
   /// Returns false if N is a bit extraction pattern of (X >> C) & Mask.
