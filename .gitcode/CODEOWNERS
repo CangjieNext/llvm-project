@@ -4,6 +4,12 @@
 
 /compiler-rt/ @duo-duo @wangyang594
 /llvm/ @duo-duo @wangyang594
+/llvm/include/llvm/CodeGen/CangjieStackSizeCheck.h @yanjs
+/llvm/include/llvm/Transforms/IPO/CJPartialEscapeAnalysis.h @yanjs
+/llvm/include/llvm/Transforms/Scalar/CJAllocationSizeCheck.h @yanjs
+/llvm/lib/Transforms/IPO/CJPartialEscapeAnalysis.cpp @yanjs
+/llvm/lib/Transforms/Scalar/CJAllocationSizeCheck.cpp @yanjs
+/llvm/test/Transforms/CJAllocationSizeCheck/ @yanjs
 /lldb/ @zxudong
 /lld/ @duo-duo @wangyang594
 
