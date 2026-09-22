@@ -2299,7 +2299,7 @@ void AArch64AsmPrinter::emitGetCJThreadId() {
   emitGetCJTLSData(getCJThreadOffsetInCJTLS());
   // cbz x9, .L_cjthread_id_end
   MCInst CbzInst;
-  CbzInst.setOpcode(AArch64::CBZW);
+  CbzInst.setOpcode(AArch64::CBZX);
   CbzInst.addOperand(MCOperand::createReg(AArch64::X9));
   CbzInst.addOperand(MCOperand::createExpr(MILabelExpr));
   OutStreamer->emitInstruction(CbzInst, getSubtargetInfo());
