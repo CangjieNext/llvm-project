@@ -2299,7 +2299,11 @@ void AArch64AsmPrinter::emitGetCJThreadId() {
   emitGetCJTLSData(getCJThreadOffsetInCJTLS());
   // cbz x9, .L_cjthread_id_end
   MCInst CbzInst;
-  CbzInst.setOpcode(AArch64::CBZW);
+  // x9 holds a 64-bit CJThread pointer, so test the whole register: with CBZW
+  // only the low 32 bits are checked, and if they are zero (e.g. a thread at
+  // 0x5E00000000) the load below is skipped, storing the raw pointer as the
+  // cjthread id, which later reports IllegalSynchronizationStateException.
+  CbzInst.setOpcode(AArch64::CBZX);
   CbzInst.addOperand(MCOperand::createReg(AArch64::X9));
   CbzInst.addOperand(MCOperand::createExpr(MILabelExpr));
   OutStreamer->emitInstruction(CbzInst, getSubtargetInfo());
