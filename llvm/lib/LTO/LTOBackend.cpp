@@ -48,6 +48,7 @@
 #include "llvm/Transforms/Scalar/CJRuntimeLowering.h"
 #include "llvm/Transforms/Scalar/CJSimpleOpt.h"
 #include "llvm/Transforms/Scalar/CJSpecificOpt.h"
+#include "llvm/Transforms/Scalar/CJLocalAlias.h"
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Scalar/PlaceSafepoints.h"
 #include "llvm/Transforms/Utils/FunctionImportUtils.h"
@@ -356,6 +357,7 @@ static void runNewPMPasses(const Config &Conf, Module &Mod, TargetMachine *TM,
   auto addCangjiePasses = [&]() {
     if (CJPipeline) {
       MPM.addPass(CJSpecificOpt(OptLevel));
+      MPM.addPass(CJLocalAlias());
       MPM.addPass(PlaceSafepoints());
       MPM.addPass(CJBarrierOpt());
       MPM.addPass(CJRewriteStatepoint(OptLevel));
