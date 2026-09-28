@@ -14,11 +14,14 @@
 
 #include "llvm/Transforms/Scalar/CJSpecificOpt.h"
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -33,6 +36,11 @@
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 using namespace llvm;
+
+#define DEBUG_TYPE "cj-specific-opt"
+
+STATISTIC(NumLocalAliases, "Number of local ti/tt aliases created");
+STATISTIC(NumUsesRewritten, "Number of constant uses redirected to aliases");
 
 static cl::opt<bool>
     DisableDeadAllocaElimination("disable-dead-alloca-elimination", cl::Hidden,
@@ -386,49 +394,122 @@ static bool runOnFunction(Function &F, unsigned OptLevel) {
   return Changed;
 }
 
-static bool generateAliasForStaticGI(Module &M) {
-  bool Changed = false;
-  for (GlobalVariable &GV : M.globals()) {
+// Cangjie CodeGen emits every public type's TypeInfo global ("*.ti") and
+// TypeTemplate global ("*.tt") with ExternalLinkage and default visibility,
+// because other packages may reference them by name (cross-package generic
+// instantiation, reflection). In a shared-library link, lld therefore treats
+// these symbols as preemptible, and every pointer to them inside a constant
+// initializer (.cjmetadata type-info fields arrays, super-type fields,
+// extension records, ...) becomes an ABS64 dynamic relocation; code taking
+// their address (cjc passes ti to runtime calls like GCNew as a bitcast
+// ConstantExpr) goes through the GOT.
+//
+// Most of those references are *intra-module*: a library's own metadata
+// pointing at its own ti. For those, preemption is pure overhead: the
+// runtime never interposes ti symbols and compares type identity by UUID,
+// not by pointer. This function rewrites such intra-module constant
+// references to go through an internal alias of the same global:
+//
+//   @pkg:Foo.ti     = global %TypeInfo { ..., %TypeInfo* @pkg:Bar.ti, ... }
+//   @alias_pkg:Foo.ti = internal alias %TypeInfo, %TypeInfo* @pkg:Foo.ti
+//
+// A reference to a non-preemptible (internal) alias is resolved by lld into
+// R_*_RELATIVE (RELR-packable) instead of a 24-byte ABS64/GLOB_DAT entry,
+// and code references bind locally (direct adrp+add / lea instead of a GOT
+// load). The original "*.ti" global keeps ExternalLinkage and stays
+// exported; only intra-module references stop participating in preemption.
+//
+// Escape hatch: --cj-local-alias=false disables the rewriting.
+static cl::opt<bool> EnableCJLocalAlias("cj-local-alias", cl::init(true),
+                                        cl::Hidden);
 
-    if (GV.isCJStaticGenericTI()) {
-      assert(GV.hasInitializer() && "StaticGenericTI has no Initializer!");
+// Name suffixes of Cangjie type metadata globals emitted by CodeGen
+// (CGType::GetNameOfTypeInfoGV / GetNameOfTypeTemplate).
+static bool isTIMetadataName(StringRef name) {
+  return name.endswith(".ti") || name.endswith(".tt");
+}
 
-      Constant *C = GV.getInitializer();
+// A global is worth aliasing iff references to it would otherwise become
+// preemptible dynamic relocations in a -shared link: it must be defined in
+// this module, exported with default visibility, and not already dso_local.
+// Weak/LinkOnceODR definitions (static generic instances) are included: an
+// alias keeps the local definition alive, which is harmless in a
+// single-package dylib link. This drops the runtime interposition dedup of
+// identical weak ti across DSOs (first-loaded-wins); type identity stays
+// UUID-based, so this is semantically safe.
+static bool isAliasableTIMetadata(const GlobalVariable &gv) {
+  if (gv.isDeclarationForLinker() || !gv.hasInitializer())
+    return false;
+  if (gv.isDSOLocal())
+    return false;
+  const auto linkage = gv.getLinkage();
+  const bool linkageOk = linkage == GlobalValue::ExternalLinkage ||
+                         linkage == GlobalValue::WeakODRLinkage ||
+                         linkage == GlobalValue::LinkOnceODRLinkage;
+  if (!linkageOk)
+    return false;
+  return isTIMetadataName(gv.getName());
+}
 
-      SmallVector<Constant *, 16> NewOperands;
-      for (unsigned Idx = 0; Idx < C->getNumOperands(); Idx++) {
-        GlobalVariable *TI = cast<GlobalVariable>(C->getOperand(Idx));
+static bool generateLocalAliasForTIMetadata(Module &M) {
+  if (!EnableCJLocalAlias)
+    return false;
+  // The ABS64 -> RELATIVE conversion is an ELF/lld mechanism; COFF and Mach-O
+  // have different alias and relocation semantics, so restrict to ELF.
+  if (!Triple(M.getTargetTriple()).isOSBinFormatELF())
+    return false;
 
-        // Skip ExternalLinkage symbols to preserve the original declaration in
-        // ThinLTO where non-prevailing linkonce_odr symbols are downgraded by
-        // the 'ElimAvailExtern' pass.
-        if (TI->hasExternalLinkage()) {
-          NewOperands.push_back(TI);
-          continue;
-        }
-
-        // For FullLTO static-library symbols, convert
-        // AvailableExternallyLinkage to InternalLinkage so alias generation
-        // can proceed.
-        if (TI->hasAvailableExternallyLinkage()) {
-          TI->setLinkage(GlobalValue::InternalLinkage);
-        }
-
-        std::string AliasName = "alias_" + TI->getName().str();
-        auto *Alias = GlobalAlias::create(
-            TI->getValueType(), TI->getType()->getPointerAddressSpace(),
-            GlobalValue::PrivateLinkage, AliasName, TI, &M);
-
-        NewOperands.push_back(Alias);
-        Changed = true;
-      }
-
-      ArrayType *ArrayTy = cast<ArrayType>(C->getType());
-      Constant *NewInit = ConstantArray::get(ArrayTy, NewOperands);
-      GV.setInitializer(NewInit);
+  bool changed = false;
+  for (GlobalVariable &gv : M.globals()) {
+    if (!isTIMetadataName(gv.getName()))
+      continue;
+    // FullLTO: a ti whose prevailing definition lives in a static library is
+    // marked available_externally here. ElimAvailExtern keeps the body (it
+    // is referenced by the StaticGenericTI array), but the symbol would not
+    // be emitted; upgrade to internal so the local definition is kept and
+    // binds locally. No alias is needed once the symbol itself is internal.
+    if (gv.hasAvailableExternallyLinkage() && gv.hasInitializer()) {
+      gv.setLinkage(GlobalValue::InternalLinkage);
+      changed = true;
+      continue;
     }
+    if (!isAliasableTIMetadata(gv))
+      continue;
+    // Skip globals with no constant users: nothing to rewrite.
+    if (llvm::none_of(gv.users(),
+                      [](const User *u) { return isa<Constant>(u); }))
+      continue;
+
+    auto *alias = GlobalAlias::create(gv.getValueType(), gv.getAddressSpace(),
+                                      GlobalValue::InternalLinkage,
+                                      "alias_" + gv.getName(), &gv, &M);
+    ++NumLocalAliases;
+
+    // Rewrite only uses inside constant initializers. Note that gv.users()
+    // sees a nested reference through its outermost ConstantExpr/aggregate;
+    // replaceUsesWithIf lets RAUW rebuild those constants (via
+    // Constant::handleOperandChange), so nesting depth is not a concern.
+    // The alias itself is a Constant user of gv (its aliasee operand) and
+    // must be excluded, otherwise it would be repointed to itself.
+    unsigned rewritten = 0;
+    gv.replaceUsesWithIf(alias, [&alias, &rewritten](Use &u) {
+      auto *c = dyn_cast<Constant>(u.getUser());
+      if (!c || c == alias)
+        return false;
+      ++rewritten;
+      return true;
+    });
+    NumUsesRewritten += rewritten;
+    if (rewritten == 0) {
+      // All constant uses were the alias itself (cannot happen with the
+      // exclusion above) or disappeared; drop the pointless alias.
+      alias->eraseFromParent();
+      --NumLocalAliases;
+      continue;
+    }
+    changed = true;
   }
-  return Changed;
+  return changed;
 }
 
 static bool processCangjieIR(Module &M, unsigned OptLevel) {
@@ -452,8 +533,8 @@ static bool processCangjieIR(Module &M, unsigned OptLevel) {
   }
 
   llvm::Triple T(M.getTargetTriple());
-  if (!T.isOSWindows()) {
-    Changed |= generateAliasForStaticGI(M);
+  if (T.isOSBinFormatELF()) {
+    Changed |= generateLocalAliasForTIMetadata(M);
   }
 
   for (Function &F : M) {
