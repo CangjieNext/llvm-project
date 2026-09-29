@@ -36,10 +36,13 @@ Architecture getArchitectureFromName(StringRef Name) {
 #define ARCHINFO(Arch, Type, Subtype, NumBits) .Case(#Arch, AK_##Arch)
 #include "llvm/TextAPI/Architecture.def"
 #undef ARCHINFO
+      .Case("arm64e.x1", AK_arm64e_x1)
       .Default(AK_unknown);
 }
 
 StringRef getArchitectureName(Architecture Arch) {
+  if (Arch == AK_arm64e_x1)
+    return "arm64e.x1";
   switch (Arch) {
 #define ARCHINFO(Arch, Type, Subtype, NumBits)                                 \
   case AK_##Arch:                                                              \
