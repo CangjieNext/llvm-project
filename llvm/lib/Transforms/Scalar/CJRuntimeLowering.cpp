@@ -489,9 +489,14 @@ public:
   }
 
   // llvm.cj.gcmalloc.array(TypeInfo* @Klass.ti, i64 length, i64 elem.size)
-  void replaceNewArray(CallBase *CI) {
+  //
+  // AllowFastPath must be false for llvm.cj.malloc.local.array: the X86/AArch64
+  // NewArrayFast asm path bumps the *heap* TLS allocator and never marks the
+  // object local. Applying it to local arrays produces a heap RawArray that
+  // later rejects local element stores in MaybeLocalWriteRef.
+  void replaceNewArray(CallBase *CI, bool AllowFastPath) {
     uint64_t Size = 0; // 0 is slowpath, others is fastpath.
-    if (EnableCJNewArrayFast && !CangjieJIT) {
+    if (AllowFastPath && EnableCJNewArrayFast && !CangjieJIT) {
       auto *LengthOp = dyn_cast<ConstantInt>(CI->getArgOperand(1));
       auto *ElemSizeOp = dyn_cast<ConstantInt>(CI->getArgOperand(2));
       if (LengthOp && ElemSizeOp) {
@@ -1178,7 +1183,7 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
       Changed = true;
       break;
     case Intrinsic::cj_malloc_array:
-      Lowering.replaceNewArray(CI);
+      Lowering.replaceNewArray(CI, /*AllowFastPath=*/true);
       CI->addRetAttr(Attribute::NoAlias);
       Changed = true;
       break;
@@ -1198,7 +1203,9 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
       Changed = true;
       break;
     case Intrinsic::cj_malloc_local_array:
-      Lowering.replaceNewArray(CI);
+      // Never attach fast_new_array: that path allocates from the heap bump
+      // buffer. Local arrays must call CJ_MCC_NewLocal*Array (slow path).
+      Lowering.replaceNewArray(CI, /*AllowFastPath=*/false);
       CI->addRetAttr(Attribute::NoAlias);
       Changed = true;
       break;
