@@ -165,122 +165,145 @@ static GlobalVariable *getExtensionDef(GlobalVariable *Any,
   return M->getGlobalVariable(ExtensionDefName, true);
 }
 
-static bool isSubType(GlobalVariable *Klass0, GlobalVariable *Klass1) {
+// Result of the subtype inference that is done at compile time. `Unknown` means
+// that the relation can not be decided from the type info metadata that is
+// visible in this module, e.g. when a type info is declared in another module.
+// `Unknown` must never be folded, otherwise the runtime subtype check would be
+// replaced by a wrong answer, while `NotSubType` is a definitive answer.
+enum class SubTypeResult { SubType, NotSubType, Unknown };
+
+static SubTypeResult isSubType(GlobalVariable *Klass0, GlobalVariable *Klass1) {
   if (Klass0 == nullptr)
-    return false;
+    return SubTypeResult::NotSubType;
 
   if (Klass0 == Klass1)
-    return true;
+    return SubTypeResult::SubType;
+
+  // The type info is declared in another module, its kind, fields, type args
+  // and super class are not available here.
+  if (!Klass0->hasInitializer() || !Klass1->hasInitializer())
+    return SubTypeResult::Unknown;
 
   TypeInfo K0(Klass0);
   TypeInfo K1(Klass1);
+
+  // An interface involved in a nested comparison (function parameter/return
+  // type, tuple field, ...) can not be decided here: it depends on the
+  // extension data of the source type, which is only consulted by
+  // `tryInferSubType` for the subtype check itself. Returning `Unknown` keeps
+  // the runtime check instead of aborting or folding a wrong answer.
+  if (K0.isInterface() || K1.isInterface())
+    return SubTypeResult::Unknown;
+
   switch (K0.Kind) {
   case TK_NOTHING:
-    return true;
+    return SubTypeResult::SubType;
   case TK_TUPLE: {
     if (!K1.isTuple())
-      return false;
+      return SubTypeResult::NotSubType;
 
     unsigned K0FieldNum = K0.getFieldNum();
     unsigned K1FieldNum = K1.getFieldNum();
     if (K0FieldNum != K1FieldNum)
-      return false;
+      return SubTypeResult::NotSubType;
 
     for (unsigned i = 0; i < K0FieldNum; ++i) {
-      if (!K0.getField(i)->hasInitializer() ||
-          !K1.getField(i)->hasInitializer()) {
-        return false;
-      }
-      if (!isSubType(K0.getField(i), K1.getField(i))) {
-        return false;
-      }
+      SubTypeResult Result = isSubType(K0.getField(i), K1.getField(i));
+      if (Result != SubTypeResult::SubType)
+        return Result;
     }
-    return true;
+    return SubTypeResult::SubType;
   }
   case TK_FUNC: {
     report_fatal_error("Should not reach here.");
-    return false;
+    return SubTypeResult::NotSubType;
   }
   case TK_CFUNC: {
     if (K1.Kind != TK_CFUNC)
-      return false;
+      return SubTypeResult::NotSubType;
 
     unsigned TypeArgNum = K0.getTypeArgNum();
     if (TypeArgNum != K1.getTypeArgNum())
-      return false;
+      return SubTypeResult::NotSubType;
 
     assert(TypeArgNum > 0 &&
            "The number of the function type arg should be more than 0.");
 
     // Note: the first of TypeArgs is the return type.
     constexpr unsigned ReturnTypeIdx = 0;
-    if (!isSubType(K0.getTypeArg(ReturnTypeIdx), K1.getTypeArg(ReturnTypeIdx)))
-      return false;
+    SubTypeResult Result =
+        isSubType(K0.getTypeArg(ReturnTypeIdx), K1.getTypeArg(ReturnTypeIdx));
+    if (Result != SubTypeResult::SubType)
+      return Result;
 
+    // Note: the parameter type of a function is contra-variant.
     for (unsigned i = ReturnTypeIdx + 1; i < TypeArgNum; ++i) {
-      GlobalVariable *Arg1 = K1.getTypeArg(i);
-      GlobalVariable *Arg0 = K0.getTypeArg(i);
-      if (!Arg1->hasInitializer() || !Arg0->hasInitializer()) {
-        return false;
-      }
-      if (!isSubType(Arg1, Arg0)) {
-        return false;
-      }
+      Result = isSubType(K1.getTypeArg(i), K0.getTypeArg(i));
+      if (Result != SubTypeResult::SubType)
+        return Result;
     }
-    return true;
+    return SubTypeResult::SubType;
   }
   case TK_RAWARRAY:
     // The array type has no subtype relationship.
-    return false;
+    return SubTypeResult::NotSubType;
   case TK_CLASS:
   case TK_TEMP_ENUM: {
     if (!K1.isClass())
-      return false;
+      return SubTypeResult::NotSubType;
 
     GlobalVariable *SuperKlass = K0.getSuperOrComponent();
     while (SuperKlass != nullptr) {
       if (SuperKlass == Klass1)
-        return true;
+        return SubTypeResult::SubType;
 
       if (!SuperKlass->hasInitializer())
-        return false;
+        return SubTypeResult::Unknown;
 
       TypeInfo Super(SuperKlass);
       SuperKlass = Super.getSuperOrComponent();
     }
-    return false;
+    return SubTypeResult::NotSubType;
   }
   default:
     if (K0.isInterface() || K1.isInterface())
       report_fatal_error("The interface type is processed in subtype.!");
 
-    return false;
+    return SubTypeResult::NotSubType;
   }
-  return false;
+  return SubTypeResult::NotSubType;
 }
 
-// Reture true if K0 is subtype of K1, otherwise, return false.
-static bool isFunctionSubType(TypeInfo &K0, TypeInfo &K1) {
+// Return Yes if K0 is a subtype of K1, No if it is not, and Unknown if the
+// relation can not be decided from the metadata visible here.
+static SubTypeResult isFunctionSubType(TypeInfo &K0, TypeInfo &K1) {
   // The function type information is stored in the `SuperClass`
   // of the closure instance. Therefore, having SuperClass and
   // SuperClass->IsFunc are prerequisites for the instance to be
   // of the function type.
   auto Super = K0.getSuperOrComponent();
   if (!Super)
-    return false;
+    return SubTypeResult::NotSubType;
+
+  // The super class can be declared in another module, then its content is
+  // unknown here.
+  if (!Super->hasInitializer())
+    return SubTypeResult::Unknown;
 
   TypeInfo SuperTI(Super);
   if (!SuperTI.isFunction())
-    return false;
+    return SubTypeResult::NotSubType;
 
   // Now, `SuperTI` and `K1` both are Closure type.
   // Get function type from Closure type, i.e., typeArgs[0]:
-  K0.resetTypeInfo(SuperTI.getTypeArg(0));
-  K1.resetTypeInfo(K1.getTypeArg(0));
+  GlobalVariable *K0FuncTI = SuperTI.getTypeArg(0);
+  GlobalVariable *K1FuncTI = K1.getTypeArg(0);
+  K0.resetTypeInfo(K0FuncTI);
+  K1.resetTypeInfo(K1FuncTI);
   // In addition, it is necessary to have the same number of TypeArgNum.
   unsigned TypeArgNum = K0.getTypeArgNum();
   if (TypeArgNum != K1.getTypeArgNum())
-    return false;
+    return SubTypeResult::NotSubType;
 
   return isSubType(K0.GV, K1.GV);
 }
@@ -308,7 +331,7 @@ static bool tryInferSubType(DevirtualCallData &CallData) {
 
     TypeInfo K0(Klass0);
     TypeInfo K1(Klass1);
-    bool Result = true;
+    SubTypeResult Result = SubTypeResult::SubType;
     if (K0.isInterface() || K1.isInterface()) {
       // If it find the extensionDef of klass, the subType is true.
       // Otherwise, the subtype is unknown.
@@ -326,7 +349,13 @@ static bool tryInferSubType(DevirtualCallData &CallData) {
       Result = isSubType(Klass0, Klass1);
     }
 
-    replaceIsSubType(CI, Result);
+    // A relation that could not be decided from the metadata must keep the
+    // runtime subtype check, otherwise -O2 would replace it with a wrong
+    // answer.
+    if (Result == SubTypeResult::Unknown)
+      continue;
+
+    replaceIsSubType(CI, Result == SubTypeResult::SubType);
     Changed = true;
   }
   return Changed;
