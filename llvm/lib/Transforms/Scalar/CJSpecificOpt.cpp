@@ -442,6 +442,10 @@ static bool isAliasableTIMetadata(const GlobalVariable &gv) {
     return false;
   if (gv.isDSOLocal())
     return false;
+  // Hidden/protected symbols are already non-preemptible; aliasing them
+  // would be harmless but pointless.
+  if (!gv.hasDefaultVisibility())
+    return false;
   const auto linkage = gv.getLinkage();
   const bool linkageOk = linkage == GlobalValue::ExternalLinkage ||
                          linkage == GlobalValue::WeakODRLinkage ||
@@ -526,9 +530,12 @@ static bool generateLocalAliasForTIMetadata(Module &M) {
       continue;
     if (!isAliasableTIMetadata(gv))
       continue;
-    // Skip globals with no constant users: nothing to rewrite.
-    if (llvm::none_of(gv.users(),
-                      [](const User *u) { return isa<Constant>(u); }))
+    // Skip globals with no constant users: nothing to rewrite. Aliases
+    // (e.g. from a previous run of this pass) are Constant users but do
+    // not count, keeping the pass idempotent.
+    if (llvm::none_of(gv.users(), [](const User *u) {
+          return isa<Constant>(u) && !isa<GlobalAlias>(u);
+        }))
       continue;
 
     auto *alias = GlobalAlias::create(gv.getValueType(), gv.getAddressSpace(),
@@ -540,12 +547,14 @@ static bool generateLocalAliasForTIMetadata(Module &M) {
     // sees a nested reference through its outermost ConstantExpr/aggregate;
     // replaceUsesWithIf lets RAUW rebuild those constants (via
     // Constant::handleOperandChange), so nesting depth is not a concern.
-    // The alias itself is a Constant user of gv (its aliasee operand) and
-    // must be excluded, otherwise it would be repointed to itself.
+    // Aliases are Constant users of gv (their aliasee operand) and must all
+    // be excluded: the new alias would otherwise be repointed to itself,
+    // and excluding only it would let an old alias from a previous run be
+    // repointed to the new one, forming an alias chain.
     unsigned rewritten = 0;
-    gv.replaceUsesWithIf(alias, [&alias, &rewritten](Use &u) {
+    gv.replaceUsesWithIf(alias, [&rewritten](Use &u) {
       auto *c = dyn_cast<Constant>(u.getUser());
-      if (!c || c == alias)
+      if (!c || isa<GlobalAlias>(c))
         return false;
       ++rewritten;
       return true;

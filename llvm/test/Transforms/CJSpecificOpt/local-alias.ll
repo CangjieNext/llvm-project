@@ -1,5 +1,10 @@
 ; RUN: opt --cangjie-pipeline -passes=cj-specific-opt -S < %s | FileCheck %s
 ; RUN: opt --cangjie-pipeline -passes=cj-specific-opt --cj-local-alias=false -S < %s | FileCheck %s --check-prefix=OFF
+; RUN: opt --cangjie-pipeline -passes='cj-specific-opt,cj-specific-opt' -S < %s | FileCheck %s --check-prefix=TWICE --allow-empty
+;
+; The TWICE run pins idempotency: a second run must not create
+; alias-of-alias chains (aliases are excluded as rewrite targets).
+; TWICE-NOT: alias_alias
 ;
 ; CJSpecificOpt rewrites intra-module constant references to preemptible
 ; Cangjie type metadata globals (*.ti/*.tt) to internal aliases, so that lld
@@ -54,6 +59,11 @@ target triple = "x86_64-unknown-linux-gnu"
 ; --- case 8: a ti global with no constant users needs no alias ---
 @code.ti = global i32 0
 
+; --- case 9: hidden visibility symbols are already non-preemptible ---
+@hidden.ti = hidden global i32 0
+@hidden.user = global ptr @hidden.ti
+; CHECK-DAG: @hidden.user = global ptr @hidden.ti
+
 ; Aliases are emitted after the globals, in creation (module) order. Bar.ti
 ; has no users at all, so nothing needs rewriting and it gets no alias.
 ; CHECK: @alias_pkg.Foo.ti = internal alias ptr, ptr @pkg.Foo.ti
@@ -67,6 +77,7 @@ target triple = "x86_64-unknown-linux-gnu"
 ; CHECK-NOT: @alias_pkg.Other
 ; CHECK-NOT: @alias_ae.ti
 ; CHECK-NOT: @alias_code.ti
+; CHECK-NOT: @alias_hidden.ti
 
 define i32 @load_code_ti() {
   %v = load i32, ptr @code.ti
