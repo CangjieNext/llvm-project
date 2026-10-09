@@ -2,13 +2,14 @@
 ; RUN: opt --cangjie-pipeline -passes=cj-specific-opt --cj-local-alias=false -S < %s | FileCheck %s --check-prefix=OFF
 ; RUN: opt --cangjie-pipeline -passes='cj-specific-opt,cj-specific-opt' -S < %s | FileCheck %s --check-prefix=TWICE --allow-empty
 ;
+; CJSpecificOpt rewrites intra-module references (constant initializers and
+; instruction operands) to preemptible Cangjie type metadata globals
+; (*.ti/*.tt) via internal aliases, so that lld resolves them as
+; R_*_RELATIVE instead of ABS64/GLOB_DAT in -shared links.
+;
 ; The TWICE run pins idempotency: a second run must not create
 ; alias-of-alias chains (aliases are excluded as rewrite targets).
 ; TWICE-NOT: alias_alias
-;
-; CJSpecificOpt rewrites intra-module constant references to preemptible
-; Cangjie type metadata globals (*.ti/*.tt) to internal aliases, so that lld
-; resolves them as R_*_RELATIVE instead of ABS64/GLOB_DAT in -shared links.
 
 target triple = "x86_64-unknown-linux-gnu"
 
@@ -31,7 +32,7 @@ target triple = "x86_64-unknown-linux-gnu"
 @weak.user = global [2 x ptr] [ptr @weak.ti, ptr @linkonce.ti]
 ; CHECK-DAG: @weak.user = global [2 x ptr] [ptr @alias_weak.ti, ptr @alias_linkonce.ti]
 
-; --- case 4 (regression #553): ThinLTO downgrades a non-prevailing
+; --- case 4 (regression !553): ThinLTO downgrades a non-prevailing
 ; linkonce_odr definition to an external declaration; it must be skipped
 ; without crashing (there is no initializer to alias). ---
 @decl.ti = external global i32
@@ -48,7 +49,7 @@ target triple = "x86_64-unknown-linux-gnu"
 @other.user = global ptr @pkg.Other
 ; CHECK-DAG: @other.user = global ptr @pkg.Other
 
-; --- case 7 (regression #290): FullLTO keeps an available_externally ti
+; --- case 7 (regression !290): FullLTO keeps an available_externally ti
 ; body alive (ElimAvailExtern); upgrade it to internal so the local
 ; definition is emitted. No alias is needed for an internal symbol. ---
 @ae.ti = available_externally global i32 0
@@ -56,7 +57,8 @@ target triple = "x86_64-unknown-linux-gnu"
 ; CHECK-DAG: @ae.ti = internal global i32 0
 ; CHECK-DAG: @ae.user = global ptr @ae.ti
 
-; --- case 8: a ti global with no constant users needs no alias ---
+; --- case 8: instruction operands are rewritten too (a load's address
+; operand is not a Constant user, but the alias is bit-identical) ---
 @code.ti = global i32 0
 
 ; --- case 9: hidden visibility symbols are already non-preemptible ---
@@ -64,19 +66,33 @@ target triple = "x86_64-unknown-linux-gnu"
 @hidden.user = global ptr @hidden.ti
 ; CHECK-DAG: @hidden.user = global ptr @hidden.ti
 
-; Aliases are emitted after the globals, in creation (module) order. Bar.ti
-; has no users at all, so nothing needs rewriting and it gets no alias.
+; --- case 10: a StaticGenericTI array operand is aliased even with
+; --cj-local-alias=false (link correctness: the 4-byte table offset must
+; be a link-time constant on ELF) ---
+@sg.ti = global i32 0
+@StaticGenericTIs = private global [1 x ptr] [ptr @sg.ti] #0
+@llvm.used = appending global [1 x ptr] [ptr @StaticGenericTIs], section "llvm.metadata"
+attributes #0 = { "CFileStaticGenericTI" }
+; CHECK-DAG: @StaticGenericTIs = private global [1 x ptr] [ptr @alias_sg.ti]
+
+; --- case 11: a direct call operand (no ConstantExpr) is rewritten ---
+@call.ti = global i32 0
+
+; Aliases are emitted after the globals, in creation (module) order.
+; Bar.ti has no users at all, so it gets no alias.
 ; CHECK: @alias_pkg.Foo.ti = internal alias ptr, ptr @pkg.Foo.ti
 ; CHECK: @alias_pkg.Baz.tt = internal alias ptr, ptr @pkg.Baz.tt
 ; CHECK: @alias_weak.ti = internal alias i32, ptr @weak.ti
 ; CHECK: @alias_linkonce.ti = internal alias i32, ptr @linkonce.ti
+; CHECK: @alias_code.ti = internal alias i32, ptr @code.ti
+; CHECK: @alias_sg.ti = internal alias i32, ptr @sg.ti
+; CHECK: @alias_call.ti = internal alias i32, ptr @call.ti
 ; No aliases for the skipped cases:
 ; CHECK-NOT: @alias_pkg.Bar.ti
 ; CHECK-NOT: @alias_decl.ti
 ; CHECK-NOT: @alias_local.ti
 ; CHECK-NOT: @alias_pkg.Other
 ; CHECK-NOT: @alias_ae.ti
-; CHECK-NOT: @alias_code.ti
 ; CHECK-NOT: @alias_hidden.ti
 
 define i32 @load_code_ti() {
@@ -84,8 +100,32 @@ define i32 @load_code_ti() {
   ret i32 %v
 }
 ; CHECK-LABEL: define i32 @load_code_ti
+; CHECK: %v = load i32, ptr @alias_code.ti
 
-; --- the escape hatch disables alias rewriting (but not the
-; available_externally -> internal upgrade, which is a correctness fix) ---
-; OFF-NOT: alias_
+declare void @use_ti(ptr)
+
+define void @call_use() {
+  call void @use_ti(ptr @call.ti)
+  ret void
+}
+; CHECK-LABEL: define void @call_use
+; CHECK: call void @use_ti(ptr @alias_call.ti)
+
+; --- the escape hatch restricts the rewriting to the correctness-critical
+; StaticGenericTI subset; the available_externally -> internal upgrade is
+; unaffected ---
+; OFF: @pkg.Bar.ti = global { ptr, ptr } { ptr @pkg.Foo.ti, ptr null }
+; OFF: @weak.user = global [2 x ptr] [ptr @weak.ti, ptr @linkonce.ti]
 ; OFF: @ae.ti = internal global i32 0
+; OFF: @StaticGenericTIs = private global [1 x ptr] [ptr @alias_sg.ti]
+; OFF-NOT: @alias_pkg
+; OFF-NOT: @alias_weak
+; OFF-NOT: @alias_linkonce
+; OFF-NOT: @alias_code
+; OFF-NOT: @alias_call
+; OFF: @alias_sg.ti = internal alias i32, ptr @sg.ti
+; OFF: %v = load i32, ptr @code.ti
+; OFF: call void @use_ti(ptr @call.ti)
+; OFF-NOT: @alias_pkg
+; OFF-NOT: @alias_weak
+; OFF-NOT: @alias_code
