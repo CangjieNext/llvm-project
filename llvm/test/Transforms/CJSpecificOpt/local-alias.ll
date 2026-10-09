@@ -67,9 +67,10 @@ target triple = "x86_64-unknown-linux-gnu"
 ; CHECK-DAG: @hidden.user = global ptr @hidden.ti
 
 ; --- case 10: a StaticGenericTI array operand is aliased even with
-; --cj-local-alias=false (link correctness: the 4-byte table offset must
-; be a link-time constant on ELF) ---
-@sg.ti = global i32 0
+; --cj-local-alias=false: the switch falls back to the legacy
+; generateAliasForStaticGI path (private alias), which covers the
+; link-correctness-critical table operands. ---
+@sg.ti = linkonce_odr global i32 0
 @StaticGenericTIs = private global [1 x ptr] [ptr @sg.ti] #0
 @llvm.used = appending global [1 x ptr] [ptr @StaticGenericTIs], section "llvm.metadata"
 attributes #0 = { "CFileStaticGenericTI" }
@@ -111,19 +112,20 @@ define void @call_use() {
 ; CHECK-LABEL: define void @call_use
 ; CHECK: call void @use_ti(ptr @alias_call.ti)
 
-; --- the escape hatch restricts the rewriting to the correctness-critical
-; StaticGenericTI subset; the available_externally -> internal upgrade is
-; unaffected ---
+; --- the escape hatch falls back to the legacy generateAliasForStaticGI
+; path: only StaticGenericTI array operands are aliased (private alias),
+; and the new path's available_externally -> internal upgrade for
+; non-array globals does not run (exactly the pre-feature behavior). ---
 ; OFF: @pkg.Bar.ti = global { ptr, ptr } { ptr @pkg.Foo.ti, ptr null }
 ; OFF: @weak.user = global [2 x ptr] [ptr @weak.ti, ptr @linkonce.ti]
-; OFF: @ae.ti = internal global i32 0
+; OFF: @ae.ti = available_externally global i32 0
 ; OFF: @StaticGenericTIs = private global [1 x ptr] [ptr @alias_sg.ti]
 ; OFF-NOT: @alias_pkg
 ; OFF-NOT: @alias_weak
 ; OFF-NOT: @alias_linkonce
 ; OFF-NOT: @alias_code
 ; OFF-NOT: @alias_call
-; OFF: @alias_sg.ti = internal alias i32, ptr @sg.ti
+; OFF: @alias_sg.ti = private alias i32, ptr @sg.ti
 ; OFF: %v = load i32, ptr @code.ti
 ; OFF: call void @use_ti(ptr @call.ti)
 ; OFF-NOT: @alias_pkg

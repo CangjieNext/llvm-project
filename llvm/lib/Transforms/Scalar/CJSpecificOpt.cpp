@@ -15,7 +15,6 @@
 #include "llvm/Transforms/Scalar/CJSpecificOpt.h"
 
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -420,19 +419,15 @@ static bool runOnFunction(Function &F, unsigned OptLevel) {
 // load). The original "*.ti" global keeps ExternalLinkage and stays
 // exported; only intra-module references stop participating in preemption.
 //
-// Escape hatch: --cj-local-alias=false restricts the rewriting to the
-// correctness-critical subset (StaticGenericTI array operands, whose 4-byte
-// relative offsets must be link-time constants on ELF). The
-// available_externally -> internal upgrade is a correctness fix and is not
-// affected by the switch either.
+// Escape hatch: on ELF, --cj-local-alias=false falls back to the legacy
+// generateAliasForStaticGI path (StaticGenericTI array operands only),
+// i.e. exactly the behavior before this feature.
 static cl::opt<bool>
     EnableCJLocalAlias("cj-local-alias", cl::init(true), cl::Hidden,
                        cl::desc("Rewrite intra-module ti/tt references via "
-                                "local aliases. When disabled, only "
-                                "StaticGenericTI array operands are still "
-                                "aliased (link correctness), and the "
-                                "available_externally->internal upgrade "
-                                "still applies."));
+                                "local aliases. When disabled on ELF, fall "
+                                "back to the legacy StaticGenericTI-only "
+                                "aliasing."));
 
 // Name suffixes of Cangjie type metadata globals emitted by CodeGen
 // (CGType::GetNameOfTypeInfoGV / GetNameOfTypeTemplate).
@@ -515,28 +510,6 @@ static bool generateAliasForStaticGI(Module &M) {
   return Changed;
 }
 
-// Return true if the constant C (transitively) feeds an operand of a
-// StaticGenericTI array. Aliasing those operands is a link-correctness
-// requirement on ELF (the 4-byte table offsets must be link-time
-// constants), so it is kept even when the size-oriented rewriting is
-// switched off.
-static bool feedsStaticGenericTI(Constant *C,
-                                 SmallPtrSetImpl<Constant *> &Visited) {
-  if (!Visited.insert(C).second)
-    return false;
-  for (User *U : C->users()) {
-    if (auto *GV = dyn_cast<GlobalVariable>(U)) {
-      if (GV->isCJStaticGenericTI())
-        return true;
-      continue;
-    }
-    if (auto *CU = dyn_cast<Constant>(U))
-      if (feedsStaticGenericTI(CU, Visited))
-        return true;
-  }
-  return false;
-}
-
 static bool generateLocalAliasForTIMetadata(Module &M) {
   bool changed = false;
   for (GlobalVariable &gv : M.globals()) {
@@ -556,52 +529,35 @@ static bool generateLocalAliasForTIMetadata(Module &M) {
     }
     if (!isAliasableTIMetadata(gv))
       continue;
+    // Every remaining user is rewritten below (the alias is bit-identical
+    // to its aliasee), except GlobalAlias users: the new alias would
+    // otherwise be repointed to itself, and an old alias from a previous
+    // run would form an alias chain. If only aliases are left (e.g. a
+    // second run of this pass), there is nothing to do.
+    if (llvm::none_of(gv.users(),
+                      [](const User *u) { return !isa<GlobalAlias>(u); }))
+      continue;
 
     auto *alias = GlobalAlias::create(gv.getValueType(), gv.getAddressSpace(),
                                       GlobalValue::InternalLinkage,
                                       "alias_" + gv.getName(), &gv, &M);
     ++NumLocalAliases;
 
-    // Rewrite the uses whose resolution must not be preemptible. The alias
-    // is bit-identical to its aliasee, so rewriting any use is safe; the
-    // choice is purely about coverage:
-    //  - with --cj-local-alias (default): constant-initializer users (via
-    //    their outermost ConstantExpr/aggregate; RAUW rebuilds the nested
-    //    constants via Constant::handleOperandChange) and same-module
-    //    instruction operands (IR uses are always in-module);
-    //  - with --cj-local-alias=false: only constants feeding a
-    //    StaticGenericTI array operand (link correctness, see above).
-    // Aliases are Constant users of gv (their aliasee operand) and are
-    // always excluded: the new alias would otherwise be repointed to
-    // itself, and an old alias from a previous run would form a chain.
+    // Note that gv.users() sees a nested constant reference through its
+    // outermost ConstantExpr/aggregate; replaceUsesWithIf lets RAUW rebuild
+    // those constants (via Constant::handleOperandChange), so nesting depth
+    // is not a concern.
     unsigned rewritten = 0;
     gv.replaceUsesWithIf(alias, [&rewritten](Use &u) {
-      User *usr = u.getUser();
-      if (isa<GlobalAlias>(usr))
+      if (isa<GlobalAlias>(u.getUser()))
         return false;
-      if (auto *c = dyn_cast<Constant>(usr)) {
-        if (!EnableCJLocalAlias) {
-          SmallPtrSet<Constant *, 4> visited;
-          if (!feedsStaticGenericTI(c, visited))
-            return false;
-        }
-        ++rewritten;
-        return true;
-      }
-      if (EnableCJLocalAlias && isa<Instruction>(usr)) {
-        ++rewritten;
-        return true;
-      }
-      return false;
+      ++rewritten;
+      return true;
     });
     NumUsesRewritten += rewritten;
-    if (rewritten == 0) {
-      // No rewriteable uses (no users at all, or none in the enabled
-      // subset); drop the pointless alias.
-      alias->eraseFromParent();
-      --NumLocalAliases;
-      continue;
-    }
+    // Guaranteed by the pre-check above: at least one non-alias user exists
+    // and every non-alias user is rewritten.
+    assert(rewritten > 0 && "alias created but no use was rewritten");
     changed = true;
   }
   return changed;
@@ -628,9 +584,12 @@ static bool processCangjieIR(Module &M, unsigned OptLevel) {
   }
 
   llvm::Triple T(M.getTargetTriple());
-  if (T.isOSBinFormatELF()) {
+  if (T.isOSBinFormatELF() && EnableCJLocalAlias) {
     Changed |= generateLocalAliasForTIMetadata(M);
   } else if (!T.isOSWindows()) {
+    // Legacy path: on non-ELF platforms this is the only implementation;
+    // on ELF it serves as the --cj-local-alias=false escape hatch (exactly
+    // the pre-feature behavior).
     Changed |= generateAliasForStaticGI(M);
   }
 
