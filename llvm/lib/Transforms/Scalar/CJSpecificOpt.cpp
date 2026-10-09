@@ -451,6 +451,55 @@ static bool isAliasableTIMetadata(const GlobalVariable &gv) {
   return isTIMetadataName(gv.getName());
 }
 
+// Historical implementation retained for non-ELF (Mach-O) platforms, where
+// the CJLocalAlias-style rewriting is neither needed nor applicable (see the
+// ELF-only note below). Consolidating both paths onto
+// generateLocalAliasForTIMetadata is left to a follow-up change.
+static bool generateAliasForStaticGI(Module &M) {
+  bool Changed = false;
+  for (GlobalVariable &GV : M.globals()) {
+
+    if (GV.isCJStaticGenericTI()) {
+      assert(GV.hasInitializer() && "StaticGenericTI has no Initializer!");
+
+      Constant *C = GV.getInitializer();
+
+      SmallVector<Constant *, 16> NewOperands;
+      for (unsigned Idx = 0; Idx < C->getNumOperands(); Idx++) {
+        GlobalVariable *TI = cast<GlobalVariable>(C->getOperand(Idx));
+
+        // Skip ExternalLinkage symbols to preserve the original declaration in
+        // ThinLTO where non-prevailing linkonce_odr symbols are downgraded by
+        // the 'ElimAvailExtern' pass.
+        if (TI->hasExternalLinkage()) {
+          NewOperands.push_back(TI);
+          continue;
+        }
+
+        // For FullLTO static-library symbols, convert
+        // AvailableExternallyLinkage to InternalLinkage so alias generation
+        // can proceed.
+        if (TI->hasAvailableExternallyLinkage()) {
+          TI->setLinkage(GlobalValue::InternalLinkage);
+        }
+
+        std::string AliasName = "alias_" + TI->getName().str();
+        auto *Alias = GlobalAlias::create(
+            TI->getValueType(), TI->getType()->getPointerAddressSpace(),
+            GlobalValue::PrivateLinkage, AliasName, TI, &M);
+
+        NewOperands.push_back(Alias);
+        Changed = true;
+      }
+
+      ArrayType *ArrayTy = cast<ArrayType>(C->getType());
+      Constant *NewInit = ConstantArray::get(ArrayTy, NewOperands);
+      GV.setInitializer(NewInit);
+    }
+  }
+  return Changed;
+}
+
 static bool generateLocalAliasForTIMetadata(Module &M) {
   // The ABS64 -> RELATIVE conversion is an ELF/lld mechanism; COFF and Mach-O
   // have different alias and relocation semantics, so restrict to ELF.
@@ -537,6 +586,8 @@ static bool processCangjieIR(Module &M, unsigned OptLevel) {
   llvm::Triple T(M.getTargetTriple());
   if (T.isOSBinFormatELF()) {
     Changed |= generateLocalAliasForTIMetadata(M);
+  } else if (!T.isOSWindows()) {
+    Changed |= generateAliasForStaticGI(M);
   }
 
   for (Function &F : M) {
