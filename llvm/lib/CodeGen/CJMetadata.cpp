@@ -493,7 +493,6 @@ void CJMetadataInfo::emitDatas(const MCSymbol *FuncName,
     StringRef PACKAGEID = dyn_cast<MDString>(MD)->getString();
     DescSymbol = Context.getOrCreateSymbol(".Lmethod_desc." + PACKAGEID + "." +
                                            FuncName->getName());
-    OS.emitSymbolAttribute(DescSymbol, MCSA_Global);
   } else {
     DescSymbol =
         Context.getOrCreateSymbol(".Lmethod_desc." + FuncName->getName());

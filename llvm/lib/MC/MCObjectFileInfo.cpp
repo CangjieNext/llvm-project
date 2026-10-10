@@ -358,12 +358,15 @@ void MCObjectFileInfo::initMachOMCObjectFileInfo(const Triple &T) {
   CJReflectGenericTISection = Ctx->getMachOSection(
       "__CJ_METADATA", "__cjref_gi", 0, SectionKind::getReadOnly());
 
-  CJMethodInfoSection = Ctx->getMachOSection("__CJ_METADATA", "__cjmethodinfo",
-                                             0, SectionKind::getReadOnly());
-  CJStackMapSection = Ctx->getMachOSection("__CJ_METADATA", "__cjstackmap", 0,
-                                           SectionKind::getReadOnly());
-  CJGCTibSection = Ctx->getMachOSection("__CJ_METADATA", "__cjgctib", 0,
-                                        SectionKind::getReadOnly());
+  CJMethodInfoSection = Ctx->getMachOSection(
+      "__CJ_METADATA", "__cjmethodinfo", MachO::S_ATTR_NO_DEAD_STRIP,
+      SectionKind::getReadOnly());
+  CJStackMapSection = Ctx->getMachOSection(
+      "__CJ_METADATA", "__cjstackmap", MachO::S_ATTR_NO_DEAD_STRIP,
+      SectionKind::getReadOnly());
+  CJGCTibSection = Ctx->getMachOSection(
+      "__CJ_METADATA", "__cjgctib", MachO::S_ATTR_NO_DEAD_STRIP,
+      SectionKind::getReadOnly());
   CJGCRootSection = Ctx->getMachOSection("__CJ_METADATA", "__cjgcroots",
                                          MachO::S_ATTR_NO_DEAD_STRIP,
                                          SectionKind::getReadOnly());
@@ -375,9 +378,11 @@ void MCObjectFileInfo::initMachOMCObjectFileInfo(const Triple &T) {
                                              MachO::S_ATTR_NO_DEAD_STRIP,
                                              SectionKind::getReadOnly());
   CJStringPoolDictSection = Ctx->getMachOSection(
-      "__CJ_METADATA", "__cjstrpooldict", 0, SectionKind::getReadOnly());
-  CJStringPoolSection = Ctx->getMachOSection("__CJ_METADATA", "__cjstrpool", 0,
-                                             SectionKind::getReadOnly());
+      "__CJ_METADATA", "__cjstrpooldict", MachO::S_ATTR_NO_DEAD_STRIP,
+      SectionKind::getReadOnly());
+  CJStringPoolSection = Ctx->getMachOSection(
+      "__CJ_METADATA", "__cjstrpool", MachO::S_ATTR_NO_DEAD_STRIP,
+      SectionKind::getReadOnly());
   CJGlobalInitFuncSection = Ctx->getMachOSection(
       "__CJ_METADATA", "__cjglobalFunc", MachO::S_ATTR_NO_DEAD_STRIP,
       SectionKind::getReadOnly());
