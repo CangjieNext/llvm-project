@@ -1,0 +1,16 @@
+llvm/include/llvm/ADT/StringRef.h
+  h_f08a759313bce8 908
+llvm/lib/CodeGen/CJBarrierLowering.cpp
+  h_f08a759313bce8 1107,1110-1114,1116,1118-1119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "427ad4aaf38bf58a2478580960755600be2f1104",
+  "prompts": {},
+  "humans": {
+    "h_f08a759313bce8": {
+      "author": "yuqiaoyu <yujunqiang1@h-partners.com>"
+    }
+  }
+}
