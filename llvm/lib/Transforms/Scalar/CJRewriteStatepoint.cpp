@@ -1393,8 +1393,9 @@ static AttributeList legalizeCallAttributes(CallBase *Call,
   // invalid after lowering are stripped in stripNonValidDataFromBody.
   for (unsigned I : llvm::seq<unsigned>(0, Call->arg_size())) {
     AttributeSet AS = OrigAL.getParamAttrs(I);
-    if (AS.hasAttribute(Attribute::ByVal) ||
-        AS.hasAttribute(Attribute::StructRet)) {
+    if (AS.hasAttribute(Attribute::ByVal) || AS.hasAttribute(Attribute::StructRet) ||
+        AS.hasAttribute(Attribute::SExt) || AS.hasAttribute(Attribute::ZExt) ||
+        AS.hasAttribute(Attribute::NoUndef)) {
       StatepointAL = StatepointAL.addParamAttributes(
           Ctx, GCStatepointInst::CallArgsBeginPos + I, AttrBuilder(Ctx, AS));
     }
