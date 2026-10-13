@@ -1,0 +1,14 @@
+lldb/source/Core/FormatEntity.cpp
+  h_f08a759313bce8 1693-1717,1719-1720,1722
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eb1c241c6eb28a1229bd90f80b2a924f7335100c",
+  "prompts": {},
+  "humans": {
+    "h_f08a759313bce8": {
+      "author": "yuqiaoyu <yujunqiang1@h-partners.com>"
+    }
+  }
+}
