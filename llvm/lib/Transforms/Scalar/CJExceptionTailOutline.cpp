@@ -384,8 +384,17 @@ PreservedAnalyses CJExceptionTailOutline::run(Module &M,
 
   CJExceptionTailOutliner Outliner(M);
   bool Changed = false;
-  for (Function &F : M)
+  for (Function &F : M) {
+    // Both of these run when the stack is already exhausted, or after an
+    // implicit check failed, so they cannot afford the extra frame an outlined
+    // tail adds. MergeFunctions' exception outline skips them for the same
+    // reason, and outlining them here would silently reintroduce the failure
+    // that guard exists to prevent.
+    if (F.getName().equals("rt$ThrowStackOverflowError") ||
+        F.getName().equals("rt$ThrowImplicitException"))
+      continue;
     Changed |= Outliner.extractExceptionTails(F);
+  }
 
   if (!Changed)
     return PreservedAnalyses::all();
