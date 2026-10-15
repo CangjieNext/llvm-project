@@ -164,6 +164,7 @@
 #include "llvm/Transforms/Scalar/CJGenericIntrinsicOpt.h"
 #include "llvm/Transforms/Scalar/CJLoopFloatOpt.h"
 #include "llvm/Transforms/Scalar/CJRSSCE.h"
+#include "llvm/Transforms/Scalar/CJExceptionTailOutline.h"
 #include "llvm/Transforms/Scalar/CJRuntimeLowering.h"
 #include "llvm/Transforms/Scalar/CJRewriteStatepoint.h"
 #include "llvm/Transforms/Scalar/CJSimpleRangeAnalysis.h"
