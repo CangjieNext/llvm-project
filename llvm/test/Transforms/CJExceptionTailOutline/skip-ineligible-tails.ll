@@ -164,4 +164,4 @@ r:
 
 declare void @_CMsgCtor2(i8 addrspace(1)*, i8*, %TypeInfo*)
 
-; CHECK-NOT: define internal void @__cj_exception_tail_helper
+; CHECK-NOT: define internal void @"__cj$exception_tail_helper

@@ -64,11 +64,15 @@ cl::opt<bool>
 
 namespace {
 
-const static StringRef ExceptionCtor0MangleStr = "__cj_exception_tail_helper0";
+// The `$` keeps these names out of reach of user code: a Cangjie identifier
+// cannot contain it (only macro quotes produce DOLLAR_IDENTIFIER), and an `@C`
+// export uses the identifier verbatim, so no user declared symbol can ever
+// equal one of them.
+const static StringRef ExceptionCtor0MangleStr = "__cj$exception_tail_helper0";
 const static StringRef ExceptionCtorStringMangleStr =
-    "__cj_exception_tail_helper_string";
+    "__cj$exception_tail_helper_string";
 const static StringRef ExceptionFactoryMangleStr =
-    "__cj_exception_tail_helper_factory";
+    "__cj$exception_tail_helper_factory";
 
 /// Rewrites the cold throw tails of one module to shared helpers.
 class CJExceptionTailOutliner {
@@ -526,13 +530,15 @@ PreservedAnalyses CJExceptionTailOutline::run(Module &M,
   CJExceptionTailOutliner Outliner(M);
   bool Changed = false;
   for (Function &F : M) {
-    // Both of these run when the stack is already exhausted, or after an
-    // implicit check failed, so they cannot afford the extra frame an outlined
-    // tail adds. MergeFunctions' exception outline skips them for the same
-    // reason, and outlining them here would silently reintroduce the failure
-    // that guard exists to prevent.
-    if (F.getName().equals("rt$ThrowStackOverflowError") ||
-        F.getName().equals("rt$ThrowImplicitException"))
+    // This one runs right after an implicit check failed, so it cannot afford
+    // the extra frame an outlined tail adds. MergeFunctions' exception outline
+    // skips it for the same reason, and outlining it here would silently
+    // reintroduce the failure that guard exists to prevent. The stack overflow
+    // entry point is not listed: the standard library stopped defining
+    // `core.throwStackOverflowError`, so `rt$ThrowStackOverflowError` is no
+    // longer emitted, and the overflow path goes through the runtime's
+    // CJ_MCC_ThrowStackOverflowError instead.
+    if (F.getName().equals("rt$ThrowImplicitException"))
       continue;
     Changed |= Outliner.extractExceptionTails(F);
   }
