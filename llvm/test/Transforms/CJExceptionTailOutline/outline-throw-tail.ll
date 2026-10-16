@@ -51,6 +51,43 @@ r:
   ret void
 }
 
+; DeadArgumentElimination rewrites the trailing TypeInfo operand of a
+; constructor it can prove unused to poison. The allocation still carries the
+; object's real type info, so the tail is outlined with the one from there and
+; lands on the same helper as the sites that still pass the type info.
+; CHECK-LABEL: define void @poisonTi(
+; CHECK:         call void @__cj_exception_tail_helper0(%TypeInfo* @TI, void (i8 addrspace(1)*, %TypeInfo*)* @_CExCtor) #[[CALL]]
+; CHECK-NEXT:    unreachable
+define void @poisonTi(i1 %c) gc "cangjie" {
+entry:
+  br i1 %c, label %t, label %r
+t:
+  %obj = call i8 addrspace(1)* @CJ_MCC_NewObject(i8* bitcast (%TypeInfo* @TI to i8*), i32 64)
+  call void @_CExCtor(i8 addrspace(1)* %obj, %TypeInfo* poison)
+  call void @CJ_MCC_ThrowException(i8 addrspace(1)* %obj)
+  unreachable
+r:
+  ret void
+}
+
+; The message is a real operand, only the type info was replaced.
+; CHECK-LABEL: define void @poisonTiStr(
+; CHECK:         %msg = load
+; CHECK-NEXT:    call void @__cj_exception_tail_helper_string(%TypeInfo* @TI, void (i8 addrspace(1)*, %"record.std.core:String"*, %TypeInfo*)* @_CExCtorMsg, %"record.std.core:String"* %msg) #[[CALL]]
+; CHECK-NEXT:    unreachable
+define void @poisonTiStr(i1 %c, %"record.std.core:String"** %msgp) gc "cangjie" {
+entry:
+  br i1 %c, label %t, label %r
+t:
+  %msg = load %"record.std.core:String"*, %"record.std.core:String"** %msgp
+  %obj = call i8 addrspace(1)* @CJ_MCC_NewObject(i8* bitcast (%TypeInfo* @TI to i8*), i32 64)
+  call void @_CExCtorMsg(i8 addrspace(1)* %obj, %"record.std.core:String"* %msg, %TypeInfo* poison)
+  call void @CJ_MCC_ThrowException(i8 addrspace(1)* %obj)
+  unreachable
+r:
+  ret void
+}
+
 ; The message stays an operand of the call site, only the throw itself moves.
 ; CHECK-LABEL: define void @ctorStr(
 ; CHECK:         %msg = load
