@@ -17,7 +17,7 @@ declare i8 addrspace(1)* @"rt$CreateOverflowException_msg"(%"record.std.core:Str
 declare i8 addrspace(1)* @"rt$CreateArithmeticException_msg"(%"record.std.core:String"*)
 
 ; CHECK-LABEL: define void @factoryOverflow(
-; CHECK:         call void @__cj_exception_tail_helper_factory(%"record.std.core:String"* %msg, i8 addrspace(1)* (%"record.std.core:String"*)* @"rt$CreateOverflowException_msg") #[[CALL:[0-9]+]]
+; CHECK:         call void @"__cj$exception_tail_helper_factory"(%"record.std.core:String"* %msg, i8 addrspace(1)* (%"record.std.core:String"*)* @"rt$CreateOverflowException_msg") #[[CALL:[0-9]+]]
 ; CHECK-NEXT:    unreachable
 define void @factoryOverflow(i1 %c, %"record.std.core:String"* %msg) gc "cangjie" {
 entry:
@@ -32,7 +32,7 @@ r:
 
 ; A different factory with the same signature lands on the same helper.
 ; CHECK-LABEL: define void @factoryArithmetic(
-; CHECK:         call void @__cj_exception_tail_helper_factory(%"record.std.core:String"* %msg, i8 addrspace(1)* (%"record.std.core:String"*)* @"rt$CreateArithmeticException_msg") #[[CALL]]
+; CHECK:         call void @"__cj$exception_tail_helper_factory"(%"record.std.core:String"* %msg, i8 addrspace(1)* (%"record.std.core:String"*)* @"rt$CreateArithmeticException_msg") #[[CALL]]
 ; CHECK-NEXT:    unreachable
 define void @factoryArithmetic(i1 %c, %"record.std.core:String"* %msg) gc "cangjie" {
 entry:
@@ -45,7 +45,7 @@ r:
   ret void
 }
 
-; CHECK:       define internal void @__cj_exception_tail_helper_factory(%"record.std.core:String"* %0, i8 addrspace(1)* (%"record.std.core:String"*)* %factory) #[[HELPER:[0-9]+]] gc "cangjie"
+; CHECK:       define internal void @"__cj$exception_tail_helper_factory"(%"record.std.core:String"* %0, i8 addrspace(1)* (%"record.std.core:String"*)* %factory) #[[HELPER:[0-9]+]] gc "cangjie"
 ; CHECK:         %obj = call i8 addrspace(1)* %factory(%"record.std.core:String"* %0)
 ; CHECK-NEXT:    call void @CJ_MCC_ThrowException(i8 addrspace(1)* %obj)
 ; CHECK-NEXT:    unreachable
