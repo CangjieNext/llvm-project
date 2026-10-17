@@ -104,6 +104,8 @@ std::string lld::toString(const Section &sec) {
 SetVector<InputFile *> macho::inputFiles;
 std::unique_ptr<TarWriter> macho::tar;
 int InputFile::idCount = 0;
+uint64_t InputFile::argOrdinalCount = 0;
+uint64_t InputFile::linkerOptionOrdinalCount = 0;
 
 static VersionTuple decodeVersion(uint32_t version) {
   unsigned major = version >> 16;
@@ -2186,7 +2188,19 @@ void DylibFile::checkAppExtensionSafety(bool dylibIsAppExtensionSafe) const {
 
 ArchiveFile::ArchiveFile(std::unique_ptr<object::Archive> &&f, bool forceHidden)
     : InputFile(ArchiveKind, f->getMemoryBufferRef()), file(std::move(f)),
-      forceHidden(forceHidden) {}
+      forceHidden(forceHidden) {
+  // Map each member to its 1-based physical index within the archive so that
+  // members fetched later can be given fixed layout ordinals (memberOrdinal),
+  // mirroring ld64's member handling in archive_file.cpp.
+  Error e = Error::success();
+  uint64_t memberIndex = 1;
+  for (const object::Archive::Child &c :
+       file->children(e, /*SkipInternal=*/true))
+    memberIndices.try_emplace(c.getChildOffset(), memberIndex++);
+  if (e)
+    error(toString(this) + ": failed to iterate archive members: " +
+          toString(std::move(e)));
+}
 
 void ArchiveFile::addLazySymbols() {
   for (const object::Archive::Symbol &sym : file->symbols())
@@ -2233,6 +2247,15 @@ Error ArchiveFile::fetch(const object::Archive::Child &c, StringRef reason) {
 
   if (!file)
     return file.takeError();
+
+  // Give the member a fixed layout ordinal based on its physical position in
+  // the archive (mirroring ld64's archiveOrdinalWithMemberIndex), so that the
+  // final layout follows archive order even though members are extracted in
+  // symbol-resolution order.
+  auto memberIt = memberIndices.find(c.getChildOffset());
+  assert(memberIt != memberIndices.end() &&
+         "fetched archive member missing from member index");
+  (*file)->fileOrdinal = memberOrdinal(memberIt->second);
 
   inputFiles.insert(*file);
   printArchiveMemberLoad(reason, *file);

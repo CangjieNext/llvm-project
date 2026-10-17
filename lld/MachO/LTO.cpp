@@ -212,11 +212,18 @@ std::vector<ObjFile *> BitcodeCompiler::compile() {
       saveBuffer(buf[i], filePath);
       modTime = getModTime(filePath);
     }
-    ret.push_back(make<ObjFile>(
-        MemoryBufferRef(buf[i], saver().save(filePath.str())), modTime, ""));
+    ObjFile *file = make<ObjFile>(
+        MemoryBufferRef(buf[i], saver().save(filePath.str())), modTime, "");
+    // LTO output files always sort after regular input files, mirroring
+    // ld64's LTOOrdinal.
+    file->fileOrdinal = makeLTOOrdinal();
+    ret.push_back(file);
   }
   for (std::unique_ptr<MemoryBuffer> &file : files)
-    if (file)
-      ret.push_back(make<ObjFile>(*file, 0, ""));
+    if (file) {
+      ObjFile *objFile = make<ObjFile>(*file, 0, "");
+      objFile->fileOrdinal = makeLTOOrdinal();
+      ret.push_back(objFile);
+    }
   return ret;
 }

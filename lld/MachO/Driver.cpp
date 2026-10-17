@@ -31,6 +31,7 @@
 #include "lld/Common/Reproduce.h"
 #include "lld/Common/Version.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/BinaryFormat/MachO.h"
@@ -337,6 +338,12 @@ static InputFile *addFile(StringRef path, LoadType loadType,
     return nullptr;
   MemoryBufferRef mbref = *buffer;
   InputFile *newFile = nullptr;
+  // ld64 gives every input file a layout ordinal based on where it came from:
+  // files pulled in by LC_LINKER_OPTIONs get their own partition and sort
+  // after LTO output (see InputFile::fileOrdinal).
+  uint64_t fileOrdinal = loadType == LoadType::LCLinkerOption
+                             ? InputFile::takeLinkerOptionOrdinal()
+                             : InputFile::takeArgOrdinal();
 
   file_magic magic = identify_magic(mbref.getBuffer());
   switch (magic) {
@@ -359,6 +366,7 @@ static InputFile *addFile(StringRef path, LoadType loadType,
       if (!archive->isEmpty() && !archive->hasSymbolTable())
         error(path + ": archive has no index; run ranlib to add one");
       file = make<ArchiveFile>(std::move(archive), isForceHidden);
+      file->fileOrdinal = fileOrdinal;
     } else {
       file = entry->second.file;
       // Command-line loads take precedence. If file is previously loaded via
@@ -426,6 +434,7 @@ static InputFile *addFile(StringRef path, LoadType loadType,
   }
   case file_magic::macho_object:
     newFile = make<ObjFile>(mbref, getModTime(path), "", isLazy);
+    newFile->fileOrdinal = fileOrdinal;
     break;
   case file_magic::macho_dynamically_linked_shared_lib:
   case file_magic::macho_dynamically_linked_shared_lib_stub:
@@ -436,6 +445,7 @@ static InputFile *addFile(StringRef path, LoadType loadType,
     break;
   case file_magic::bitcode:
     newFile = make<BitcodeFile>(mbref, "", 0, isLazy);
+    newFile->fileOrdinal = fileOrdinal;
     break;
   case file_magic::macho_executable:
   case file_magic::macho_bundle:
@@ -1145,7 +1155,18 @@ static void createFiles(const InputArgList &args) {
 static void gatherInputSections() {
   TimeTraceScope timeScope("Gathering input sections");
   int inputOrder = 0;
-  for (const InputFile *file : inputFiles) {
+  // With -archive_order, process files in fileOrdinal order rather than
+  // extraction order. This is the equivalent of ld64's unconditional order
+  // pass: archive members are laid out according to their physical order
+  // within the archive (encoded in InputFile::fileOrdinal at fetch time),
+  // independent of the order in which symbol resolution happened to extract
+  // them.
+  std::vector<InputFile *> sortedFiles(inputFiles.begin(), inputFiles.end());
+  if (config->archiveOrder)
+    llvm::stable_sort(sortedFiles, [](const InputFile *a, const InputFile *b) {
+      return a->fileOrdinal < b->fileOrdinal;
+    });
+  for (const InputFile *file : sortedFiles) {
     for (const Section *section : file->sections) {
       // Compact unwind entries require special handling elsewhere. (In
       // contrast, EH frames are handled like regular ConcatInputSections.)
@@ -1416,6 +1437,8 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
   config->ignoreOptimizationHints = args.hasArg(OPT_ignore_optimization_hints);
   config->callGraphProfileSort = args.hasFlag(
       OPT_call_graph_profile_sort, OPT_no_call_graph_profile_sort, true);
+  config->archiveOrder =
+      args.hasFlag(OPT_archive_order, OPT_no_archive_order, false);
   config->printSymbolOrder = args.getLastArgValue(OPT_print_symbol_order);
   config->forceExactCpuSubtypeMatch =
       getenv("LD_DYLIB_CPU_SUBTYPES_MUST_MATCH");
@@ -1728,14 +1751,19 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
       StringRef sectName = arg->getValue(1);
       StringRef fileName = arg->getValue(2);
       Optional<MemoryBufferRef> buffer = readFile(fileName);
-      if (buffer)
-        inputFiles.insert(make<OpaqueFile>(*buffer, segName, sectName));
+      if (buffer) {
+        InputFile *file = make<OpaqueFile>(*buffer, segName, sectName);
+        file->fileOrdinal = InputFile::takeArgOrdinal();
+        inputFiles.insert(file);
+      }
     }
 
     for (const Arg *arg : args.filtered(OPT_add_empty_section)) {
       StringRef segName = arg->getValue(0);
       StringRef sectName = arg->getValue(1);
-      inputFiles.insert(make<OpaqueFile>(MemoryBufferRef(), segName, sectName));
+      InputFile *file = make<OpaqueFile>(MemoryBufferRef(), segName, sectName);
+      file->fileOrdinal = InputFile::takeArgOrdinal();
+      inputFiles.insert(file);
     }
 
     gatherInputSections();

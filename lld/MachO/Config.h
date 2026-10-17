@@ -185,6 +185,10 @@ struct Configuration {
   bool callGraphProfileSort = false;
   llvm::StringRef printSymbolOrder;
 
+  // Lay out archive members in their physical order within the archive
+  // (-archive_order), like ld64's unconditional order pass does.
+  bool archiveOrder = false;
+
   SectionRenameMap sectionRenameMap;
   SegmentRenameMap segmentRenameMap;
 

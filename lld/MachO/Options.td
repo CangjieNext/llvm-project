@@ -290,6 +290,12 @@ def order_file : Separate<["-"], "order_file">,
     MetaVarName<"<file>">,
     HelpText<"Layout functions and data according to specification in <file>">,
     Group<grp_opts>;
+def archive_order : Flag<["-"], "archive_order">,
+    HelpText<"Lay out archive members in their physical order within the archive, like ld64 does">,
+    Group<grp_opts>;
+def no_archive_order : Flag<["-"], "no_archive_order">,
+    HelpText<"Do not lay out archive members in archive order (default)">,
+    Group<grp_opts>;
 def no_order_inits : Flag<["-"], "no_order_inits">,
     HelpText<"Disable default reordering of initializer and terminator functions">,
     Flags<[HelpHidden]>,

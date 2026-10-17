@@ -16,6 +16,7 @@
 #include "lld/Common/LLVM.h"
 #include "lld/Common/Memory.h"
 #include "llvm/ADT/CachedHashString.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/BinaryFormat/MachO.h"
@@ -101,6 +102,19 @@ struct CallGraphEntry {
       : fromIndex(fromIndex), toIndex(toIndex), count(count) {}
 };
 
+// Mirrors ld64's ld::File::Ordinal: a 64-bit sort key that determines the
+// order in which input files are laid out (see gatherInputSections()).
+//   bits 60-63: partition (arg list = 0, LTO = 1, LC_LINKER_OPTION = 2)
+//   bits 32-59: major index (position of the file/archive on the link line)
+//   bits  0-31: minor index (physical index of the member within an archive)
+inline uint64_t makeArgOrdinal(uint64_t argIndex) {
+  return argIndex << 32;
+}
+inline uint64_t makeLTOOrdinal() { return uint64_t(1) << 60; }
+inline uint64_t makeLinkerOptionOrdinal(uint64_t index) {
+  return (uint64_t(2) << 60) | (index << 32);
+}
+
 class InputFile {
 public:
   enum Kind {
@@ -114,7 +128,17 @@ public:
   virtual ~InputFile() = default;
   Kind kind() const { return fileKind; }
   StringRef getName() const { return name; }
-  static void resetIdCount() { idCount = 0; }
+  static void resetIdCount() {
+    idCount = 0;
+    argOrdinalCount = 0;
+    linkerOptionOrdinalCount = 0;
+  }
+  // Ordinals handed out in the order files are added from the command line /
+  // file lists, and from LC_LINKER_OPTIONs respectively.
+  static uint64_t takeArgOrdinal() { return makeArgOrdinal(argOrdinalCount++); }
+  static uint64_t takeLinkerOptionOrdinal() {
+    return makeLinkerOptionOrdinal(linkerOptionOrdinalCount++);
+  }
 
   MemoryBufferRef mb;
 
@@ -128,6 +152,12 @@ public:
 
   // Provides an easy way to sort InputFiles deterministically.
   const int id;
+
+  // Sort key for laying out this file's input sections, see makeArgOrdinal().
+  // For archive members this is the containing archive's ordinal with the
+  // member's physical index in the minor field, so that members are laid out
+  // in archive order regardless of the order they were extracted in.
+  uint64_t fileOrdinal = 0;
 
   // True if this is a lazy ObjFile or BitcodeFile.
   bool lazy = false;
@@ -144,6 +174,8 @@ private:
   const StringRef name;
 
   static int idCount;
+  static uint64_t argOrdinalCount;
+  static uint64_t linkerOptionOrdinalCount;
 };
 
 struct FDE {
@@ -283,10 +315,18 @@ public:
   // Archive library does, so this is the cleanest way to wrap it.
   Error fetch(const llvm::object::Archive::Child &, StringRef reason);
   const llvm::object::Archive &getArchive() const { return *file; };
+  // The layout ordinal of a member at the given 1-based physical index, i.e.
+  // this archive's ordinal with the member index in the minor field.
+  uint64_t memberOrdinal(uint64_t memberIndex) const {
+    return fileOrdinal | memberIndex;
+  }
   static bool classof(const InputFile *f) { return f->kind() == ArchiveKind; }
 
 private:
   std::unique_ptr<llvm::object::Archive> file;
+  // Maps each member's child offset to its 1-based physical index within the
+  // archive, so that fetched members can be given fixed layout ordinals.
+  llvm::DenseMap<uint64_t, uint64_t> memberIndices;
   // Keep track of children fetched from the archive by tracking
   // which address offsets have been fetched already.
   llvm::DenseSet<uint64_t> seen;
