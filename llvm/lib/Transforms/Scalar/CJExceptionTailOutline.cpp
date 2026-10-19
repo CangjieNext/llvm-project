@@ -1,6 +1,6 @@
 //===- CJExceptionTailOutline.cpp - outline cold throw tails ----*- C++ -*-===//
 //
-// Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 // This source file is part of the Cangjie project, licensed under Apache-2.0
 // with Runtime Library Exception.
 //
@@ -17,6 +17,9 @@
 // a call of one helper shared by every site that uses the same
 // (TypeInfo, ctor) pair, so the hot path keeps a single call and the sequence
 // is emitted once.
+// Only throws that terminate their block in this shape are tails; throws that
+// do not end a block, or whose object comes from another shape, are left
+// untouched.
 //
 // Sites that build the exception through a runtime factory
 //   %obj = call @rt$Create...Exception_msg(msg)
