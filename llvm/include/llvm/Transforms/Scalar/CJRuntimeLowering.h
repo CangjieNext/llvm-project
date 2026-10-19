@@ -26,7 +26,6 @@ class Module;
 struct CJRuntimeLowering : public PassInfoMixin<CJRuntimeLowering> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) const;
 };
-
 } // namespace llvm
 
 enum ClassType : unsigned {
