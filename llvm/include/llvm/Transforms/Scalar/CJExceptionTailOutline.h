@@ -1,6 +1,6 @@
 //===- CJExceptionTailOutline.h - outline cold throw tails ------*- C++ -*-===//
 //
-// Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 // This source file is part of the Cangjie project, licensed under Apache-2.0
 // with Runtime Library Exception.
 //
@@ -21,6 +21,10 @@ namespace llvm {
 class Module;
 
 /// Shares the cold tail of a throw sequence between call sites.
+///
+/// A tail here is a block that ends with CJ_MCC_ThrowException followed by
+/// unreachable. Not every such tail is outlined: the thrown object must also
+/// come from the immediately preceding NewObject/ctor pair or factory call.
 ///
 /// This runs on its own, after inlining, rather than as part of
 /// CJRuntimeLowering. Shrinking a throw tail also shrinks the enclosing

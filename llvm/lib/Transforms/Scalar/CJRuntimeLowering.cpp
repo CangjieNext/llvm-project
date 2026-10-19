@@ -34,7 +34,6 @@
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/CJFillMetadata.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/Transforms/Utils/Local.h"
 #include <unordered_map>
 
 using namespace llvm;
@@ -967,7 +966,6 @@ static void declareRuntimeFunc(Module &M) {
 
 static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
   bool Changed = false;
-
   EscapeScope ES(F);
 
   for (auto I = inst_begin(F); I != inst_end(F);) {
@@ -1094,8 +1092,6 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
     }
   }
   Lowering.finishAll();
-  // Throw-tail extraction deliberately does not run here. It happens after
-  // inlining, in CJExceptionTailOutline.
   return Changed;
 }
 
