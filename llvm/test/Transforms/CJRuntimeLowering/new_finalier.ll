@@ -24,7 +24,7 @@ define void @lower_new_finalier(i8* %ti, i8** %s) {
 ; cj-insert-remove-local-finalizer, so it is not expected here.
 define void @lower_new_local_finalier(i8* %ti) {
 ; CHECK-LABEL: @lower_new_local_finalier(
-; CHECK:         %obj = call noalias i8 addrspace(1)* @CJ_MCC_NewFinalizer(i8* %ti, i32 %{{[0-9]+}})
+; CHECK:         %obj = call noalias i8 addrspace(1)* @CJ_MCC_NewLocalObject(i8* %ti, i32 %{{[0-9]+}})
 ; CHECK-NEXT:    call void @CJ_MCC_AddLocalFinalizer(i8 addrspace(1)* %obj)
 ; CHECK-NEXT:    ret void
 ; CHECK-NOT:     @CJ_MCC_RemoveLocalFinalizer
