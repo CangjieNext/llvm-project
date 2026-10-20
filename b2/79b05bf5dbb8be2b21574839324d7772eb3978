@@ -1,0 +1,30 @@
+llvm/lib/Target/AArch64/AArch64FrameLowering.cpp
+  s_27b4e96e9c7897::t_abad16fd0f9590 194,1554-1556
+  s_27b4e96e9c7897::t_2a16d9f0fc30fd 1557
+llvm/include/llvm/CodeGen/CangjieStackSizeCheck.h
+  s_27b4e96e9c7897::t_fe4eb1d9105be1 1-55,70-74,86-90
+  s_27b4e96e9c7897::t_faf51f7c5913b6 56-65,75-78,80-85
+  s_27b4e96e9c7897::t_a5e37394f3329f 66-69,79
+llvm/test/CodeGen/X86/cangjie-stacksize-wrap.ll
+  s_27b4e96e9c7897::t_3cf33bf24b0103 1-42
+llvm/lib/Target/X86/X86FrameLowering.cpp
+  s_27b4e96e9c7897::t_113b3acdcb02fc 14,1617-1620
+llvm/lib/Target/ARM/ARMFrameLowering.cpp
+  s_27b4e96e9c7897::t_0e67ef347793ce 116,727-730
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "b279b05bf5dbb8be2b21574839324d7772eb3978",
+  "prompts": {},
+  "sessions": {
+    "s_27b4e96e9c7897": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "019ffdd4-8ebf-7d97-b048-c42e6db041af",
+        "model": "k3-256k"
+      },
+      "human_author": null
+    }
+  }
+}
