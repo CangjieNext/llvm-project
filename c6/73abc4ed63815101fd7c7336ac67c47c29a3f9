@@ -1,0 +1,29 @@
+llvm/lib/Target/AArch64/AArch64ISelLowering.cpp
+  s_2b627aaf9f490e::t_eab31f064cde15 6885
+llvm/lib/Target/AArch64/AArch64AsmPrinter.cpp
+  s_2b627aaf9f490e::t_5b364bd911e571 2127
+  s_2b627aaf9f490e::t_c017cfbaaf3430 269
+  s_2b627aaf9f490e::t_2ae9cf19934ae7 1254,1267-1268,1270-1272
+  s_2b627aaf9f490e::t_8d1eaa789566cb 2027-2029
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "c673abc4ed63815101fd7c7336ac67c47c29a3f9",
+  "prompts": {},
+  "humans": {
+    "h_6aa1082f789501": {
+      "author": "jinbohang <jinbohang1@huawei.com>"
+    }
+  },
+  "sessions": {
+    "s_2b627aaf9f490e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0761d2588ffeg2bTgCsNiI2yWE",
+        "model": "GLM-5.2"
+      },
+      "human_author": "jinbohang <jinbohang1@huawei.com>"
+    }
+  }
+}
