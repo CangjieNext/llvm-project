@@ -1,0 +1,19 @@
+llvm/lib/Transforms/Scalar/CJObjectReuseOpt.cpp
+  s_94f33e718b4e84::t_6d6065f59ad895 220-224
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "51a2c8c1fe89ff24e1aba52f60602ad70d79dd7e",
+  "prompts": {},
+  "sessions": {
+    "s_94f33e718b4e84": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "4ddcdc37-889d-4901-bbc7-b8f968c53164",
+        "model": "grok-4.5"
+      },
+      "human_author": "yanjs <yejiasheng3@huawei.com>"
+    }
+  }
+}

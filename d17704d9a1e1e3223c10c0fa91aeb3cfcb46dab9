@@ -1,0 +1,14 @@
+llvm/lib/CodeGen/AsmPrinter/AsmPrinter.cpp
+  h_6aa1082f789501 1530-1548
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "d17704d9a1e1e3223c10c0fa91aeb3cfcb46dab9",
+  "prompts": {},
+  "humans": {
+    "h_6aa1082f789501": {
+      "author": "jinbohang <jinbohang1@huawei.com>"
+    }
+  }
+}
