@@ -1,0 +1,24 @@
+llvm/lib/CodeGen/MachineInstr.cpp
+  s_b31cccb1e90836::t_e647909f1392fd 218-221
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "bd201f065c671e07f102cf895e5d8d9673f7bd6e",
+  "prompts": {},
+  "humans": {
+    "h_6aa1082f789501": {
+      "author": "jinbohang <jinbohang1@huawei.com>"
+    }
+  },
+  "sessions": {
+    "s_b31cccb1e90836": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f43588725ffecNNrqDzvNo5kb6",
+        "model": "GLM-5.3-Flash"
+      },
+      "human_author": "jinbohang <jinbohang1@huawei.com>"
+    }
+  }
+}

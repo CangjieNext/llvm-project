@@ -1,0 +1,16 @@
+llvm/lib/Transforms/Scalar/CJSpecificOpt.cpp
+  h_6aa1082f789501 406
+llvm/lib/CodeGen/CJMetadata.cpp
+  h_6aa1082f789501 180-182,184
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "ecf50fd1ccb447c0cf85553c6d1e8b96c9b00b51",
+  "prompts": {},
+  "humans": {
+    "h_6aa1082f789501": {
+      "author": "jinbohang <jinbohang1@huawei.com>"
+    }
+  }
+}

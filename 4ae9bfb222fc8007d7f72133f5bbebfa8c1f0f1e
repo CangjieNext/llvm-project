@@ -1,0 +1,26 @@
+.gitcode/CODEOWNERS
+  h_29ddb209eb2bc7 1-2,5-8
+  s_5f78a4f970c948::t_312846553d4bb1 9-28
+  s_5f78a4f970c948::t_7159b88cdd83b3 3-4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4ae9bfb222fc8007d7f72133f5bbebfa8c1f0f1e",
+  "prompts": {},
+  "humans": {
+    "h_29ddb209eb2bc7": {
+      "author": "neilliuistaken <liujiajie12@huawei.com>"
+    }
+  },
+  "sessions": {
+    "s_5f78a4f970c948": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "338c4e84-c073-4e1a-b7f4-fda6eb8769dc",
+        "model": "deepseek-v4-pro"
+      },
+      "human_author": null
+    }
+  }
+}
