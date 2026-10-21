@@ -1,0 +1,102 @@
+llvm/lib/Transforms/IPO/PassManagerBuilder.cpp
+  s_3eca102e6d89e0::t_373ad762e6ab2f 627-629
+llvm/lib/Transforms/Scalar/CJInsertRemoveLocalFinalizer.cpp
+  s_3eca102e6d89e0::t_b7f5c58926c39a 1-43,49-83,85-230,233,235-242,244,246,463,486-487
+  s_3eca102e6d89e0::t_750006fc750c60 44-48,84,231-232,234,243,245,247-456,458-462,464-485,488-512
+  h_f08a759313bce8 457
+llvm/lib/Passes/PassRegistry.def
+  s_3eca102e6d89e0::t_373ad762e6ab2f 406
+llvm/include/llvm/Transforms/Scalar/CJInsertRemoveLocalFinalizer.h
+  s_3eca102e6d89e0::t_efb35ce94d6358 1-43
+llvm/test/Transforms/CJRuntimeLowering/maybe_local_write_ref.ll
+  s_9dfa74df2ac78d::t_162d8199bd207f 1-40
+llvm/lib/CodeGen/TargetPassConfig.cpp
+  s_3eca102e6d89e0::t_373ad762e6ab2f 1133-1135
+llvm/include/llvm/IR/Intrinsics.td
+  s_9dfa74df2ac78d::t_41d138edcc8bdf 484-486
+  s_9dfa74df2ac78d::t_670111afcfe207 475-477
+llvm/test/Transforms/CJRuntimeLowering/demode_write_ref.ll
+  s_9dfa74df2ac78d::t_c8e6d30890977b 1-55
+llvm/lib/Transforms/Scalar/CJRuntimeLowering.cpp
+  s_9dfa74df2ac78d::t_677ed125cfc45e 117
+  s_052d5aa0ccbaca::t_e2b52aa43ab2ff 406-410,412-420
+  s_9dfa74df2ac78d::t_860b86ce265356 1216
+  s_9dfa74df2ac78d::t_aa5fa99c2de23c 114
+  s_9dfa74df2ac78d::t_b7f104beeb03b9 1214,1219-1221
+  s_3eca102e6d89e0::t_8f47c2796cf446 1260,1299
+  s_9dfa74df2ac78d::t_32d5dec75d275f 112-113
+  s_9dfa74df2ac78d::t_54df857e5d5158 118
+  s_052d5aa0ccbaca::t_89e339d0b53888 403-405
+  s_052d5aa0ccbaca::t_e8dbbde0a4dd6f 421-423
+  h_f08a759313bce8 402,411
+llvm/lib/Transforms/Scalar/CJGCLiveAnalysis.cpp
+  s_052d5aa0ccbaca::t_34392d35d039b7 1294
+  s_052d5aa0ccbaca::t_04cec5a592064f 787
+  s_052d5aa0ccbaca::t_f412dee21b5299 1263
+llvm/lib/Transforms/Scalar/CMakeLists.txt
+  s_3eca102e6d89e0::t_373ad762e6ab2f 25
+llvm/test/Transforms/CJRuntimeLowering/new_finalier.ll
+  s_3eca102e6d89e0::t_b3b86e15935df3 22-26,30
+  s_3eca102e6d89e0::t_8f47c2796cf446 34,38
+  s_052d5aa0ccbaca::t_052b312ba2866d 5,31-32
+  s_052d5aa0ccbaca::t_287e20bd6ae765 33
+  s_3eca102e6d89e0::t_adfeb35d9242f6 9-10,13-16,27-29,35-37
+llvm/include/llvm/InitializePasses.h
+  s_3eca102e6d89e0::t_373ad762e6ab2f 97
+llvm/lib/Transforms/Scalar/Scalar.cpp
+  s_3eca102e6d89e0::t_373ad762e6ab2f 120
+llvm/lib/Passes/PassBuilder.cpp
+  s_3eca102e6d89e0::t_373ad762e6ab2f 166,1264-1267
+llvm/test/Transforms/CJInsertRemoveLocalFinalizer/control_flow.ll
+  s_3eca102e6d89e0::t_6ee2724c5336af 1-287
+llvm/test/Transforms/CJInsertRemoveLocalFinalizer/exceptions.ll
+  s_3eca102e6d89e0::t_ed65bb5579c6c4 6-9,15-16,23,31,34,44-46,54,60,63,76-78,87,102,118-120
+  s_3eca102e6d89e0::t_0f6f70c2cac064 1-5,10-14,17-22,24-30,32-33,35-43,47-53,55-59,61-62,64-75,79-86,88-101,103-117,121
+llvm/include/llvm/Transforms/Scalar/CJGCLiveAnalysis.h
+  s_052d5aa0ccbaca::t_78cb70c6bf3ea9 284
+  s_052d5aa0ccbaca::t_80f8762f5fb6ae 133
+llvm/include/llvm/Transforms/Scalar.h
+  s_3eca102e6d89e0::t_373ad762e6ab2f 617-622
+  s_3eca102e6d89e0::t_0cee04e676b3f9 616
+llvm/test/Transforms/CJInsertRemoveLocalFinalizer/pipeline.ll
+  s_3eca102e6d89e0::t_94546be2a7472c 16,59,70
+  s_3eca102e6d89e0::t_2ebe260b34d7d1 17,24,50,56,69,71
+  s_3eca102e6d89e0::t_635b8c907bf542 1-15,18-23,25-49,51-55,57-58,60-68,72-74
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "b740b1978c23890de783c1d21061d35af2e4d12c",
+  "prompts": {},
+  "humans": {
+    "h_f08a759313bce8": {
+      "author": "yuqiaoyu <yujunqiang1@h-partners.com>"
+    }
+  },
+  "sessions": {
+    "s_052d5aa0ccbaca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e5049503-ee41-4767-9b6e-f2c580a8630c",
+        "model": "glm-5.2"
+      },
+      "human_author": "yuqiaoyu <yujunqiang1@h-partners.com>"
+    },
+    "s_3eca102e6d89e0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b27b4c75-337c-46d1-9062-4480321e5644",
+        "model": "claude-opus-5"
+      },
+      "human_author": "yuqiaoyu <yujunqiang1@h-partners.com>"
+    },
+    "s_9dfa74df2ac78d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "51fe9a43-da81-4abd-bf54-90b487d23b2c",
+        "model": "claude-opus-5"
+      },
+      "human_author": "yuqiaoyu <yujunqiang1@h-partners.com>"
+    }
+  }
+}
