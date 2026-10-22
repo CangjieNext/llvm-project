@@ -44,6 +44,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/RuntimeLibcalls.h"
 #include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/CodeGen/TargetCallingConv.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
@@ -2522,6 +2523,19 @@ MachineBasicBlock *AArch64TargetLowering::EmitInstrWithCustomInserter(
 
   case TargetOpcode::STATEPOINT:
   case TargetOpcode::STATEPOINT_TAIL_CALL:
+    // The register call target of a tail statepoint must survive the
+    // epilogue: PEI inserts the callee-saved restores right before this
+    // instruction, so a target in X19-X28/FP/LR would be clobbered by its
+    // own restore before the tail jump is emitted (the target is consumed
+    // only at emit time in AArch64AsmPrinter). Restrict the target virtual
+    // register to tcGPR64, which excludes exactly those registers.
+    if (MI.getOpcode() == TargetOpcode::STATEPOINT_TAIL_CALL) {
+      StatepointOpers Opers(&MI);
+      MachineOperand &T = MI.getOperand(Opers.getNCallArgsPos() + 1);
+      if (T.isReg() && T.getReg().isVirtual())
+        MI.getMF()->getRegInfo().setRegClass(T.getReg(),
+                                             &AArch64::tcGPR64RegClass);
+    }
     // STATEPOINT is a pseudo instruction which has no implicit defs/uses
     // while bl call instruction (where statepoint will be lowered at the end)
     // has implicit def. This def is early-clobber as it will be set at
