@@ -1,0 +1,18 @@
+llvm/include/llvm/BinaryFormat/MachO.h
+  h_6aa1082f789501 1524
+llvm/include/llvm/TextAPI/Architecture.def
+  h_6aa1082f789501 40
+llvm/lib/TextAPI/Architecture.cpp
+  h_6aa1082f789501 39,44-45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "7dbe501b338ed9761765e32d9872296cf5d11fa5",
+  "prompts": {},
+  "humans": {
+    "h_6aa1082f789501": {
+      "author": "jinbohang <jinbohang1@huawei.com>"
+    }
+  }
+}
