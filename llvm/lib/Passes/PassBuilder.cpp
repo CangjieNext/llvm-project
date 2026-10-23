@@ -170,6 +170,7 @@
 #include "llvm/Transforms/Scalar/CallSiteSplitting.h"
 #include "llvm/Transforms/Scalar/CJAllocationSizeCheck.h"
 #include "llvm/Transforms/Scalar/CJIRVerifier.h"
+#include "llvm/Transforms/Scalar/CJPrimitiveTILocal.h"
 #include "llvm/Transforms/Scalar/CJSpecificOpt.h"
 #include "llvm/Transforms/Scalar/CJStringPoolMerge.h"
 #include "llvm/Transforms/Scalar/ConstantHoisting.h"
@@ -1277,6 +1278,7 @@ Error PassBuilder::parseModulePass(ModulePassManager &MPM,
       }
       if (CJPipeline && !CangjieLTOPreOpt) {
         MPM.addPass(CJSpecificOpt(L.getSpeedupLevel()));
+        MPM.addPass(CJPrimitiveTILocal());
         MPM.addPass(PlaceSafepoints());
         MPM.addPass(CJBarrierOpt());
         MPM.addPass(CJRewriteStatepoint(L.getSpeedupLevel()));
