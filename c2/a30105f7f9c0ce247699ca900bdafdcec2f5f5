@@ -1,0 +1,14 @@
+llvm/lib/CodeGen/SelectionDAG/StatepointLowering.cpp
+  h_520cfa385ff215 1308,1322-1325,1327
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "c2a30105f7f9c0ce247699ca900bdafdcec2f5f5",
+  "prompts": {},
+  "humans": {
+    "h_520cfa385ff215": {
+      "author": "xushengj <xushengjie9@huawei.com>"
+    }
+  }
+}
