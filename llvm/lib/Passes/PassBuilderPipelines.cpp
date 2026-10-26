@@ -43,6 +43,7 @@
 #include "llvm/Transforms/IPO/ArgumentPromotion.h"
 #include "llvm/Transforms/IPO/Attributor.h"
 #include "llvm/Transforms/IPO/CalledValuePropagation.h"
+#include "llvm/Transforms/IPO/CJEquivalentInstanceMerge.h"
 #include "llvm/Transforms/IPO/CJPartialEscapeAnalysis.h"
 #include "llvm/Transforms/IPO/ConstantMerge.h"
 #include "llvm/Transforms/IPO/CrossDSOCFI.h"
@@ -1444,6 +1445,12 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   if (EnableIROutliner)
     MPM.addPass(IROutlinerPass());
 
+  // Share equivalent primitive-instantiation bodies only in modules where
+  // canonicalization found a candidate. An explicitly requested MergeFunctions
+  // run below performs the merge itself, so do not run it twice.
+  if (CJPipeline && !LTOPreLink)
+    MPM.addPass(CJEquivalentInstanceMerge(!PTO.MergeFunctions));
+
   // Merge functions if requested.
   if (PTO.MergeFunctions)
     MPM.addPass(MergeFunctionsPass());
@@ -2009,6 +2016,9 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
 
   // Now that we have optimized the program, discard unreachable functions.
   MPM.addPass(GlobalDCEPass());
+
+  if (CJPipeline)
+    MPM.addPass(CJEquivalentInstanceMerge(false));
 
   // It will conflict with VFE, so it is necessary to ensure that VFE is not
   // executed after MergeFunction.

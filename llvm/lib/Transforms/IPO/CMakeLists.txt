@@ -7,6 +7,7 @@ add_llvm_component_library(LLVMipo
   BarrierNoopPass.cpp
   BlockExtractor.cpp
   CalledValuePropagation.cpp
+  CJEquivalentInstanceMerge.cpp
   CJPartialEscapeAnalysis.cpp
   ConstantMerge.cpp
   CrossDSOCFI.cpp
