@@ -1247,16 +1247,42 @@ void StackMaps::emitCangjieCompressedStackMaps(MCStreamer &OS) {
   bool IsWindows = TT.isOSWindows();
   OffsetStepSize = TT.isARM() ? 4 : 8;
   FuncPtrSize = TT.isARM() ? 4 : 8;
+  // A function without safepoint records still needs its own stackmap
+  // symbol, but identical headers can share one encoded data block.  The
+  // runtime uses the header through MFuncDesc, so the complete prologue
+  // (stack size, format and callee-saved offsets) is part of the key.
+  std::unordered_map<std::string, MCSymbol *> SharedEmptyHeaders;
   for (auto const &FR : FnInfos) {
     MCSymbol *StackmapFunction =
         OutContext.getOrCreateSymbol(".Lstack_map." + FR.first->getName());
-    OS.emitLabel(StackmapFunction);
     CSIdxEnd = CSIdxStart + FR.second.RecordCount;
     CompressedInfo Data(
         (IsWindows && isX86_64()) ? X86WinCalleeSavedReg
             : isX86_64() ? X86CalleeSavedReg 
             : isAArch64() ? AArch64CalleeSavedReg : ARMCalleeSavedReg);
     prepareCompressedData(Data, FR.second, CSIdxStart, CSIdxEnd);
+    if (FR.second.RecordCount == 0) {
+      std::string Header;
+      raw_string_ostream HeaderOS(Header);
+      HeaderOS << Data.StackSize << ':'
+               << (EnableCompressedBitMap ? Data.FormatType
+                                           : CJ_STACKMAP_BITMAP)
+               << ':' << Data.CalleeSavedReg << ':';
+      for (unsigned Offset : Data.CalleeSavedOffsets)
+        HeaderOS << Offset << ',';
+      HeaderOS.flush();
+
+      auto It = SharedEmptyHeaders.find(Header);
+      if (It != SharedEmptyHeaders.end()) {
+        OS.emitAssignment(
+            StackmapFunction,
+            MCSymbolRefExpr::create(It->second, OutContext));
+        CSIdxStart = CSIdxEnd;
+        continue;
+      }
+      SharedEmptyHeaders.emplace(std::move(Header), StackmapFunction);
+    }
+    OS.emitLabel(StackmapFunction);
     emitCangjieCompressedData(OS, Data);
     CSIdxStart = CSIdxEnd;
   }
@@ -1509,10 +1535,13 @@ void StackMaps::prepareCompressedData(CompressedInfo &Data,
   }
   // stackMapItem, the data width of each column is recorded based on the
   // maximum size.
-  Data.MaxBits.RegIdx = getValidBitNums(Data.RegItems.Items.size());
-  Data.MaxBits.SlotIdx = getValidBitNums(Data.SlotItems.Items.size());
-  Data.MaxBits.LNIdx = getValidBitNums(Data.LNItems.Items.size());
-  Data.MaxBits.DerivedIdx = getValidBitNums(Data.DerivedInfo.size());
+  // Item index zero is the reserved invalid entry.  The largest encoded
+  // index is therefore the number of entries minus one; using the size here
+  // over-allocates one bit whenever the table size is a power of two.
+  Data.MaxBits.RegIdx = getValidBitNums(Data.RegItems.Items.size() - 1);
+  Data.MaxBits.SlotIdx = getValidBitNums(Data.SlotItems.Items.size() - 1);
+  Data.MaxBits.LNIdx = getValidBitNums(Data.LNItems.Items.size() - 1);
+  Data.MaxBits.DerivedIdx = getValidBitNums(Data.DerivedInfo.size() - 1);
   if (EnableStackGrow) {
     Data.MaxBits.SPRegIdx = Data.MaxBits.RegIdx;
     Data.MaxBits.SPSlotIdx = Data.MaxBits.SlotIdx;
