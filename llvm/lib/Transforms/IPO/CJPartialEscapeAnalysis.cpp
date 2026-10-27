@@ -3736,9 +3736,16 @@ public:
         SrcMP = findSrcMP(BaseV, VPOffset, I->getParent());
         SrcMPCache.insert({CacheKey, SrcMP});
       }
-      // The definition of Base is itself, skip it.
+      // The definition of Base is itself, skip it. findSrcMP may have
+      // canonicalized the source offset, so also check the resolved offset.
       if (SrcMP->P == Base && VPOffset == PVOffset)
         continue;
+      if (!SrcMP->isPtr()) {
+        MemPtr *SrcMemPtr = static_cast<MemPtr *>(SrcMP);
+        if (SrcMemPtr->P == Base && SrcMemPtr->Offset >= 0 &&
+            static_cast<uint64_t>(SrcMemPtr->Offset) == PVOffset)
+          continue;
+      }
       MemPtr *MP = MemPtr::create(Base, PVOffset, *this, LI);
       MP->insertDefine(I->getParent(), SrcMP);
       if (!Def[I->getParent()][Base][PVOffset].empty()) {
@@ -3788,9 +3795,14 @@ public:
     if (!Temp)
       return MemPtr::create(BaseV, VPOffset, *this, LI);
     GCPtr *CurP = nullptr;
+    SmallDenseSet<GCPtr *> Visited;
     do {
       CurP = Temp;
       if (CurP->isPtr())
+        return CurP;
+      // Stop at a repeated node instead of walking a cyclic definition chain
+      // forever.
+      if (!Visited.insert(CurP).second)
         return CurP;
       MemPtr *MP = reinterpret_cast<MemPtr *>(CurP);
       VPOffset = MP->Offset;
