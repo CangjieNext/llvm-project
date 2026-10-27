@@ -17,6 +17,7 @@
 
 #include "queue"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/CallGraph.h"
@@ -3025,9 +3026,14 @@ public:
     if (!Temp)
       return MemPtr::create(BaseV, VPOffset, *this, LI);
     GCPtr *CurP = nullptr;
+    SmallDenseSet<GCPtr *> Visited;
     do {
       CurP = Temp;
       if (CurP->isPtr())
+        return CurP;
+      // Stop at a repeated node instead of walking a cyclic definition chain
+      // forever.
+      if (!Visited.insert(CurP).second)
         return CurP;
       MemPtr *MP = reinterpret_cast<MemPtr *>(CurP);
       VPOffset = MP->Offset;
