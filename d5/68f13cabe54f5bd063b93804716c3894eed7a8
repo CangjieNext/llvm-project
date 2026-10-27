@@ -1,0 +1,20 @@
+llvm/test/Transforms/CJRuntimeLowering/local_array_no_fastpath.ll
+  h_f08a759313bce8 1-35
+llvm/test/Transforms/CJRuntimeLowering/maybe_local_write_generic.ll
+  h_f08a759313bce8 1-21
+llvm/test/Transforms/CJRuntimeLowering/new_finalier.ll
+  h_f08a759313bce8 27
+llvm/test/Transforms/TailCallElim/notail.ll
+  h_f08a759313bce8 6-7,26-34,37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d568f13cabe54f5bd063b93804716c3894eed7a8",
+  "prompts": {},
+  "humans": {
+    "h_f08a759313bce8": {
+      "author": "yuqiaoyu <yujunqiang1@h-partners.com>"
+    }
+  }
+}
