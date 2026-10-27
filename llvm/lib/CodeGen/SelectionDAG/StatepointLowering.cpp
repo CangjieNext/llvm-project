@@ -1312,17 +1312,19 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
       !needToDisableTailCall(I, DAG.getTargetLoweringInfo(),
                              I.isMustTailCall()) &&
       isInTailCallPosition(I, DAG.getTarget()) &&
-      // STATEPOINT_TAIL_CALL lowers an indirect call target to a register
-      // jump. If that target must live in a callee-saved register across an
-      // intervening call, the epilogue's callee-saved restore clobbers it
-      // before the tail jump. Direct (symbol) targets use pc-relative tail
-      // jumps and are unaffected, so only allow tail statepoints for direct
-      // callees until indirect targets are lowered to a caller-saved
-      // register after the epilogue.
-      CalleeFunc != nullptr &&
+      // The register call target of a tail statepoint is constrained to
+      // caller-saved-only registers before register allocation (AArch64
+      // tcGPR64, x86 GR64_TC/GR32_TC, see the targets'
+      // EmitInstrWithCustomInserter), so the epilogue's callee-saved
+      // restore can no longer clobber it, and both direct (symbol) and
+      // indirect callees are safe.
       // C2N/N2C stubs create a full runtime frame, and the runtime
-      // unwinder/GC/EH still rely on the managed caller frame being present.
-      !CalleeFunc->isCangjieNativeStub(*I.getFunction());
+      // unwinder/GC/EH still rely on the managed caller frame being
+      // present, so tail-calling them stays forbidden. Indirect callees
+      // cannot be inspected here; the frontend always calls stubs
+      // directly, so a null CalleeFunc is assumed never to be a stub.
+      (CalleeFunc == nullptr ||
+       !CalleeFunc->isCangjieNativeStub(*I.getFunction()));
 
   SI.ActualCalledFunction = CalleeFunc;
 
