@@ -1,0 +1,20 @@
+llvm/include/llvm/Analysis/LazyCallGraph.h
+  h_29ddb209eb2bc7 37,1299-1300
+llvm/include/llvm/IR/PassInstrumentation.h
+  h_29ddb209eb2bc7 63-69
+llvm/lib/Analysis/LazyCallGraph.cpp
+  h_29ddb209eb2bc7 44-45
+llvm/lib/IR/PassInstrumentation.cpp
+  h_29ddb209eb2bc7 20-23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f102bb175f7da2614e047d86d5afcb0d044b8178",
+  "prompts": {},
+  "humans": {
+    "h_29ddb209eb2bc7": {
+      "author": "neilliuistaken <liujiajie12@huawei.com>"
+    }
+  }
+}
