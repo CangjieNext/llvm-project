@@ -1,0 +1,24 @@
+llvm/test/Transforms/CJPartialEscapeAnalysis/pea-cyclic-def.ll
+  s_bfe3c734b8601d::t_ed04d24e9fcb60 4,16-17,20,22-24
+  s_bfe3c734b8601d::t_8d900d346561e7 9,25
+  s_bfe3c734b8601d::t_eaa5fde0331b93 1-3,5-8,10-15,18-19,21,26-29
+llvm/lib/Transforms/IPO/CJPartialEscapeAnalysis.cpp
+  s_bfe3c734b8601d::t_4d184ed11044d5 3799
+  s_bfe3c734b8601d::t_bf22f2935cb923 3791,3796-3798
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "382a92205a231611a69cd2a1c2bb9c053ceb5ba2",
+  "prompts": {},
+  "sessions": {
+    "s_bfe3c734b8601d": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a17d39-269a-7307-98e1-86ccec653795",
+        "model": "k3.1-pro"
+      },
+      "human_author": null
+    }
+  }
+}
