@@ -1,0 +1,65 @@
+# RUN: llc -mtriple=arm64-apple-macosx11.0.0 -run-pass=finalize-isel -o - %s | FileCheck %s
+
+# Unit test for the target register of STATEPOINT_TAIL_CALL on AArch64.
+#
+# The STATEPOINT_TAIL_CALL pseudo is expanded by
+# AArch64TargetLowering::EmitInstrWithCustomInserter, which runs in the
+# finalize-isel pass, right after instruction selection and before register
+# allocation. The expansion must constrain the call-target register to
+# tcGPR64 (x0-x18): PEI later inserts the callee-saved restores right before
+# the tail jump, so a callee-saved target register would be clobbered by the
+# epilogue before the jump.
+#
+# The MIR below feeds a call-target virtual register of class gpr64 (the
+# unconstrained default) into STATEPOINT_TAIL_CALL. The finalize-isel pass
+# must re-classify it as tcgpr64 and add the early-clobber implicit def of
+# $lr.
+#
+# The second function has the "branch-target-enforcement" attribute: the
+# target must be re-classified to rtcgpr64 (x16/x17 only), because an
+# indirect branch under BTI may only land on a "bti c" landing pad through
+# x16 or x17.
+
+# CHECK-LABEL: name: test_statepoint_tail_target
+# CHECK: registers:
+# CHECK-NEXT: - { id: 0, class: tcgpr64, preferred-register: '' }
+# CHECK: STATEPOINT_TAIL_CALL 0, 0, 0, %0:tcgpr64,
+# CHECK: implicit-def dead early-clobber $lr
+
+# CHECK-LABEL: name: test_bti_statepoint_tail_target
+# CHECK: registers:
+# CHECK-NEXT: - { id: 0, class: rtcgpr64, preferred-register: '' }
+# CHECK: STATEPOINT_TAIL_CALL 0, 0, 0, %0:rtcgpr64,
+# CHECK: implicit-def dead early-clobber $lr
+
+--- |
+  target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
+  target triple = "arm64-apple-macosx11.0.0"
+
+  define void @test_statepoint_tail_target() {
+    ret void
+  }
+
+  define void @test_bti_statepoint_tail_target() "branch-target-enforcement"="true" {
+    ret void
+  }
+
+...
+---
+name:            test_statepoint_tail_target
+registers:
+  - { id: 0, class: gpr64 }
+body:             |
+  bb.0:
+    STATEPOINT_TAIL_CALL 0, 0, 0, %0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, csr_darwin_aarch64_aapcs
+
+...
+---
+name:            test_bti_statepoint_tail_target
+registers:
+  - { id: 0, class: gpr64 }
+body:             |
+  bb.0:
+    STATEPOINT_TAIL_CALL 0, 0, 0, %0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, csr_darwin_aarch64_aapcs
+
+...
