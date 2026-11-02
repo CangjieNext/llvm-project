@@ -106,7 +106,16 @@ const static StdMap<unsigned, StringRef> RuntimeMap {
     {Intrinsic::cj_remove_exported_ref, "CJ_MCC_RemoveExportedRef"},
     {Intrinsic::cj_create_export_handle, "CJ_MCC_CreateExportHandle"},
     {Intrinsic::cj_blackhole, "CJ_LLVM_BlackHole"},
-    {Intrinsic::cj_get_lambda_addr, "CJ_MCC_GetJSLambdaAddr"}};
+    {Intrinsic::cj_get_lambda_addr, "CJ_MCC_GetJSLambdaAddr"},
+    {Intrinsic::cj_malloc_local_object, "CJ_MCC_NewLocalObject"},
+    {Intrinsic::cj_alloca_local_generic, "CJ_MCC_NewLocalObject"},
+    {Intrinsic::cj_malloc_local_array, "CJ_MCC_NewLocalArray"},
+    {Intrinsic::cj_malloc_local_array_generic, "CJ_MCC_NewLocalGenericArray"},
+    {Intrinsic::cj_maybe_local_write_ref, "CJ_MCC_MaybeLocalWriteRef"},
+    {Intrinsic::cj_maybe_local_write_generic,
+     "CJ_MCC_MaybeLocalWriteGeneric"},
+    {Intrinsic::cj_demode_write_ref, "CJ_MCC_DemodeWriteRef"},
+  };
 
 struct LowerGetFieldOffset {
   CallBase *CI;
@@ -389,6 +398,30 @@ public:
     CI->setCalledFunction(Func);
   }
 
+  void replaceNewLocalFinalizerFunc(CallBase *CI) {
+    replaceWithRuntimeFunc(CI, false, true);
+
+    IRBuilder<> Bdr(CI->getContext());
+    // CJ_MCC_NewFinalizer returns the newly created finalizer object; pass it
+    // to CJ_MCC_AddLocalFinalizer to register it.
+    Function *AddFunc = M.getFunction("CJ_MCC_AddLocalFinalizer");
+    if (AddFunc == nullptr) {
+      FunctionType *FT = FunctionType::get(Bdr.getVoidTy(), {Bdr.getInt8PtrTy(1)}, false);
+      AddFunc = M.declareCJRuntimeFunc("CJ_MCC_AddLocalFinalizer", FT, false);
+    }
+    if (auto *II = dyn_cast<InvokeInst>(CI)) {
+      // For an InvokeInst the result is only valid on the normal path, so
+      // insert the call at the start of the normal destination.
+      BasicBlock *NormalDest = II->getNormalDest();
+      Bdr.SetInsertPoint(NormalDest, NormalDest->getFirstInsertionPt());
+    } else {
+      // Insert the Add call right after the NewFinalizer call.
+      Bdr.SetInsertPoint(CI->getParent(), std::next(CI->getIterator()));
+    }
+    auto *AddCall = Bdr.CreateCall(AddFunc, {CI});
+    AddCall->setDebugLoc(CI->getDebugLoc());
+  }
+
   void replaceNewWeakRefFunc(CallBase *CI) {
     IRBuilder<> Bdr(CI);
     Function *Func = M.getFunction("CJ_MCC_NewWeakRefObject");
@@ -399,11 +432,28 @@ public:
     CI->setCalledFunction(Func);
   }
 
+  void replaceNewLocalWeakRefFunc(CallBase *CI) {
+    IRBuilder<> Bdr(CI);
+    Function *Func = M.getFunction("CJ_MCC_NewLocalWeakRefObject");
+    if (Func == nullptr) {
+      Func = M.declareCJRuntimeFunc("CJ_MCC_NewLocalWeakRefObject",
+                                    CI->getFunctionType(), false);
+    }
+    CI->setCalledFunction(Func);
+  }
+
   // llvm.cj.alloca.generic(TypeInfo* ti, i64 size)
   void replaceAllocaGeneric(CallBase *CI, EscapeScope &ES) {
     if (replaceWithAlloca(CI, ES)) {
       return;
     }
+    replaceWithRuntimeFunc(CI, false, true);
+    CI->addRetAttr(Attribute::NoAlias);
+    setMetadata(CI, "new_gen");
+  }
+
+  // llvm.cj.alloca.generic(TypeInfo* ti, i64 size)
+  void replaceAllocaLocalGeneric(CallBase *CI, EscapeScope &ES) {
     replaceWithRuntimeFunc(CI, false, true);
     CI->addRetAttr(Attribute::NoAlias);
     setMetadata(CI, "new_gen");
@@ -438,9 +488,18 @@ public:
   }
 
   // llvm.cj.gcmalloc.array(TypeInfo* @Klass.ti, i64 length, i64 elem.size)
-  void replaceNewArray(CallBase *CI) {
+  // IsLocalArray must be true for cj_malloc_local_array: the "fast_new_array"
+  // marker makes the backend inline the NewArrayFast path, which bumps the
+  // *normal* heap AllocBuffer (the one shared with CJ_MCC_NewObjectFast).
+  // A local-mode array allocated there lives in GC-heap memory that the
+  // collector recycles and reuses on the normal schedule, while the
+  // local-object root registries keep referencing it across GCs; concurrent
+  // marking then dereferences the overwritten memory and crashes. Local
+  // arrays therefore always take the slow path into the local-object
+  // allocator (CJ_MCC_NewLocalArray8 -> HeapManager::AllocateLocal).
+  void replaceNewArray(CallBase *CI, bool IsLocalArray = false) {
     uint64_t Size = 0; // 0 is slowpath, others is fastpath.
-    if (EnableCJNewArrayFast && !CangjieJIT) {
+    if (EnableCJNewArrayFast && !IsLocalArray && !CangjieJIT) {
       auto *LengthOp = dyn_cast<ConstantInt>(CI->getArgOperand(1));
       auto *ElemSizeOp = dyn_cast<ConstantInt>(CI->getArgOperand(2));
       if (LengthOp && ElemSizeOp) {
@@ -751,6 +810,30 @@ public:
     CI->addRetAttr(Attribute::NoAlias);
   }
 
+  void loweringMallocLocalObject(CallBase *&CI) {
+    const MDNode *MD = CI->getMetadata("MallocType");
+    if (MD == nullptr) {
+      setHeapMallocSizeAlign(CI);
+      replaceWithRuntimeFunc(CI, false, true);
+    } else {
+      StringRef Ty = dyn_cast<MDString>(MD->getOperand(0).get())->getString();
+      if (Ty.equals("HasFinalizer")) {
+        setHeapMallocSizeAlign(CI);
+        replaceNewLocalFinalizerFunc(CI);
+      } else if (Ty.equals("Future") || Ty.equals("Mutex") ||
+                 Ty.equals("Monitor") || Ty.equals("WaitQueue")) {
+        replaceFixedNewObject(CI);
+      } else if (Ty.equals("WeakRef")) {
+        setHeapMallocSizeAlign(CI);
+        replaceNewLocalWeakRefFunc(CI);
+      } else {
+        setHeapMallocSizeAlign(CI);
+        replaceWithRuntimeFunc(CI, false, true);
+      }
+    }
+    CI->addRetAttr(Attribute::NoAlias);
+  }
+
 private:
   Module &M;
   LLVMContext &C;
@@ -763,6 +846,8 @@ private:
     Intrinsic::ID IID = CI->getIntrinsicID();
     if (IID == Intrinsic::cj_malloc_array) {
       return getMallocArrayFuncName(CI);
+    } else if (IID == Intrinsic::cj_malloc_local_array) {
+      return getMallocLocalArrayFuncName(CI);
     } else {
       auto Itr = RuntimeMap.find(IID);
       assert(Itr != RuntimeMap.end() && "Runtime function don`t exist.");
@@ -794,6 +879,38 @@ private:
         return "CJ_MCC_NewArray32";
       case 8:
         return "CJ_MCC_NewArray64";
+      default:
+        break;
+      }
+    }
+    report_fatal_error("Unsupported element klass type for gc.malloc.array!");
+    return "";
+  }
+
+  StringRef getMallocLocalArrayFuncName(CallBase *CI) const {
+    Value *Arg0 = CI->getOperand(0);
+    // gc.malloc.array(i64, bitcast arg1 to i8*)
+    auto *CastExpr = dyn_cast<ConstantExpr>(Arg0);
+    auto *KlassGV = dyn_cast<GlobalVariable>(CastExpr->getOperand(0));
+    TypeInfo ArrayKlass(KlassGV);
+
+    Type *ET = ArrayKlass.getArrayElementType();
+    if (ET->isPointerTy()) {
+      return "CJ_MCC_NewLocalObjArray";
+    } else if (ET->isStructTy() || ET->isArrayTy()) {
+      return "CJ_MCC_NewLocalArray";
+    } else {
+      unsigned Size =
+          static_cast<unsigned>(DL.getTypeAllocSize(ET).getFixedSize());
+      switch (Size) {
+      case 1:
+        return "CJ_MCC_NewLocalArray8";
+      case 2:
+        return "CJ_MCC_NewLocalArray16";
+      case 4:
+        return "CJ_MCC_NewLocalArray32";
+      case 8:
+        return "CJ_MCC_NewLocalArray64";
       default:
         break;
       }
@@ -1078,8 +1195,39 @@ static bool runtimeLoweringFunc(Function &F, CJIntrinsicLowering &Lowering) {
       CI->addRetAttr(Attribute::NoAlias);
       Changed = true;
       break;
+    case Intrinsic::cj_malloc_local_object: {
+      Lowering.loweringMallocLocalObject(CI);
+      Changed = true;
+      break;
+    }
+    case Intrinsic::cj_alloca_local_generic:
+      Lowering.setHeapMallocSizeAlign(CI);
+      Lowering.replaceAllocaLocalGeneric(CI, ES);
+      Changed = true;
+      break;
+    case Intrinsic::cj_malloc_local_array:
+      // Local arrays must never take the NewArrayFast inline fast path: it
+      // allocates from the normal heap TLR and bypasses the local-object
+      // allocator (see the comment above replaceNewArray).
+      Lowering.replaceNewArray(CI, /*IsLocalArray=*/true);
+      CI->addRetAttr(Attribute::NoAlias);
+      Changed = true;
+      break;
+    case Intrinsic::cj_malloc_local_array_generic:
+      Lowering.replaceWithRuntimeFunc(CI, false, true);
+      CI->addRetAttr(Attribute::NoAlias);
+      Changed = true;
+      break;
     case Intrinsic::cj_invoke_gc:
       Lowering.replaceWithRuntimeFunc(CI, false, false);
+      Changed = true;
+      break;
+    case Intrinsic::cj_maybe_local_write_ref:
+    case Intrinsic::cj_maybe_local_write_generic:
+    case Intrinsic::cj_demode_write_ref:
+      // GC leaf: the local-aware writes are exported as plain aliases without a
+      // callee-saved-register stub, so they cannot act as safepoints.
+      Lowering.replaceWithRuntimeFunc(CI, true, false);
       Changed = true;
       break;
     case Intrinsic::cj_division_check_sdiv:
@@ -1120,7 +1268,7 @@ PreservedAnalyses CJRuntimeLowering::run(Module &M,
       Changed = true;
     }
 
-    if (!CJLTOOpt) {
+    if (!CJLTOOpt && !F.isDeclaration()) {
       Changed |= runtimeLoweringFunc(F, CJLowering);
     }
   }
@@ -1159,7 +1307,7 @@ public:
         Changed = true;
       }
 
-      if (!CJLTOOpt) {
+      if (!CJLTOOpt && !F.isDeclaration()) {
         Changed |= runtimeLoweringFunc(F, CJLowering);
       }
     }

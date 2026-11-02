@@ -117,6 +117,7 @@ void llvm::initializeScalarOpts(PassRegistry &Registry) {
   initializeCJBarrierSplitLegacyPassPass(Registry);
   initializeCJLoopFloatOptLegacyPassPass(Registry);
   initializeCJRuntimeLoweringLegacyPassPass(Registry);
+  initializeCJInsertRemoveLocalFinalizerLegacyPassPass(Registry);
   initializeCangjieSpecificOptLegacyPassPass(Registry);
   initializeInsertCJTBAALegacyPassPass(Registry);
   initializeCJSimpleRangeAnalysisPass(Registry);

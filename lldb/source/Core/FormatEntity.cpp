@@ -1044,10 +1044,6 @@ static bool FormatThreadExtendedInfoRecurse(
   return false;
 }
 
-static inline bool IsToken(const char *var_name_begin, const char *var) {
-  return (::strncmp(var_name_begin, var, strlen(var)) == 0);
-}
-
 bool FormatEntity::FormatStringRef(const llvm::StringRef &format_str, Stream &s,
                                    const SymbolContext *sc,
                                    const ExecutionContext *exe_ctx,
@@ -1694,35 +1690,31 @@ bool FormatEntity::Format(const Entry &entry, Stream &s,
             variable_list_sp->AppendVariablesWithScope(
                 eValueTypeVariableArgument, args);
           if (args.GetSize() > 0) {
-            const char *open_paren = strchr(cstr, '(');
-            const char *close_paren = nullptr;
-            const char *generic = strchr(cstr, '<');
-            // if before the arguments list begins there is a template sign
-            // then scan to the end of the generic args before you try to find
-            // the arguments list
-            if (generic && open_paren && generic < open_paren) {
-              int generic_depth = 1;
-              ++generic;
-              for (; *generic && generic_depth > 0; generic++) {
-                if (*generic == '<')
-                  generic_depth++;
-                if (*generic == '>')
-                  generic_depth--;
+            // The runtime argument values belong to the innermost function, whose
+            // parameter list is the LAST parenthesized group of the demangled name.
+            // Locate it by scanning backwards from the last ')' to its matching '(';
+            // the balanced scan keeps parentheses that belong to argument types (e.g.
+            // a function type like "(Int64) -> Int64") on the correct side of the
+            // split, and text after the group is preserved.
+            llvm::StringRef demangled_name(cstr);
+            const size_t close_pos = demangled_name.rfind(')');
+            size_t open_pos = llvm::StringRef::npos;
+            if (close_pos != llvm::StringRef::npos) {
+              unsigned depth = 1;
+              for (size_t pos = close_pos; pos > 0;) {
+                const char ch = demangled_name[--pos];
+                if (ch == ')')
+                  ++depth;
+                else if (ch == '(' && --depth == 0) {
+                  open_pos = pos;
+                  break;
+                }
               }
-              if (*generic)
-                open_paren = strchr(generic, '(');
-              else
-                open_paren = nullptr;
             }
-            if (open_paren) {
-              if (IsToken(open_paren, "(anonymous namespace)")) {
-                open_paren =
-                    strchr(open_paren + strlen("(anonymous namespace)"), '(');
-                if (open_paren)
-                  close_paren = strchr(open_paren, ')');
-              } else
-                close_paren = strchr(open_paren, ')');
-            }
+            auto open_paren = open_pos == llvm::StringRef::npos
+                                  ? nullptr
+                                  : cstr + open_pos;
+            auto close_paren = open_paren ? cstr + close_pos : nullptr;
 
             if (open_paren)
               s.Write(cstr, open_paren - cstr + 1);
