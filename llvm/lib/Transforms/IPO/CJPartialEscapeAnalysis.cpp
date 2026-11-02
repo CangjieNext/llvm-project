@@ -2284,6 +2284,7 @@ private:
         return true;
       case Intrinsic::cj_gcwrite_static_struct:
       case Intrinsic::cj_assign_generic:
+      case Intrinsic::cj_assign_local_generic:
       case Intrinsic::cj_copy_struct_field:
         handleGCWriteAgg(II, true);
         return true;

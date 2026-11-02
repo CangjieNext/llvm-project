@@ -615,6 +615,13 @@ FunctionPass *createCJGenericIntrinsicOptLegacyPass();
 
 //===----------------------------------------------------------------------===//
 //
+// CJInsertRemoveLocalFinalizer - Pair every CJ_MCC_AddLocalFinalizer with a
+// CJ_MCC_RemoveLocalFinalizer at the end of the object's live range.
+//
+FunctionPass *createCJInsertRemoveLocalFinalizerLegacyPass();
+
+//===----------------------------------------------------------------------===//
+//
 // InsertCJTBAA - insert Cangjie TBAA Metadata
 //
 FunctionPass *createInsertCJTBAALegacyPass();

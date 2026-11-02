@@ -85,6 +85,7 @@ Value *getDest(const CallBase *CI) {
   case Intrinsic::cj_gcread_generic:
     return CI->getArgOperand(GCReadGeneric::DstPtr);
   case Intrinsic::cj_assign_generic:
+  case Intrinsic::cj_assign_local_generic:
     return CI->getArgOperand(AssignGeneric::DstPtr);
   case Intrinsic::cj_array_copy_ref:
   case Intrinsic::cj_array_copy_struct:
@@ -111,6 +112,7 @@ Value *getSource(const CallBase *CI) {
   case Intrinsic::cj_gcread_generic:
     return CI->getArgOperand(GCReadGeneric::SrcPtr);
   case Intrinsic::cj_assign_generic:
+  case Intrinsic::cj_assign_local_generic:
     return CI->getArgOperand(AssignGeneric::SrcPtr);
   case Intrinsic::cj_array_copy_ref:
   case Intrinsic::cj_array_copy_struct:
