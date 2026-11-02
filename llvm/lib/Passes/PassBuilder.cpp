@@ -165,12 +165,8 @@
 #include "llvm/Transforms/Scalar/CJGenericIntrinsicOpt.h"
 #include "llvm/Transforms/Scalar/CJLoopFloatOpt.h"
 #include "llvm/Transforms/Scalar/CJRSSCE.h"
-<<<<<<< HEAD
 #include "llvm/Transforms/Scalar/CJExceptionTailOutline.h"
-||||||| constructed merge base
-=======
 #include "llvm/Transforms/Scalar/CJInsertRemoveLocalFinalizer.h"
->>>>>>> feat: local mode
 #include "llvm/Transforms/Scalar/CJRuntimeLowering.h"
 #include "llvm/Transforms/Scalar/CJRewriteStatepoint.h"
 #include "llvm/Transforms/Scalar/CJSimpleRangeAnalysis.h"
@@ -1290,15 +1286,11 @@ Error PassBuilder::parseModulePass(ModulePassManager &MPM,
       }
       if (CJPipeline && !CangjieLTOPreOpt) {
         MPM.addPass(CJSpecificOpt(L.getSpeedupLevel()));
-<<<<<<< HEAD
         MPM.addPass(CJAnnotationOutline());
-||||||| constructed merge base
-=======
         // Must precede CJRewriteStatepoint: the Remove call is a potential
         // safepoint, so the object pointer it takes has to be relocated.
         MPM.addPass(
             createModuleToFunctionPassAdaptor(CJInsertRemoveLocalFinalizer()));
->>>>>>> feat: local mode
         MPM.addPass(PlaceSafepoints());
         MPM.addPass(CJBarrierOpt());
         MPM.addPass(CJRewriteStatepoint(L.getSpeedupLevel()));

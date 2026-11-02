@@ -1311,7 +1311,6 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
       (TT.isAArch64() || TT.isX86()) &&
       !needToDisableTailCall(I, DAG.getTargetLoweringInfo(),
                              I.isMustTailCall()) &&
-<<<<<<< HEAD
       isInTailCallPosition(I, DAG.getTarget()) &&
       // C2N/N2C stubs create a full runtime frame, and the runtime
       // unwinder/GC/EH still rely on the managed caller frame being present.
@@ -1320,26 +1319,6 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
        !CalleeFunc->isCangjieNativeStub(*I.getFunction()));
 
   SI.ActualCalledFunction = CalleeFunc;
-||||||| constructed merge base
-      isInTailCallPosition(I, DAG.getTarget());
-
-  SI.ActualCalledFunction = I.getActualCalledFunction();
-=======
-      isInTailCallPosition(I, DAG.getTarget()) &&
-      // STATEPOINT_TAIL_CALL lowers an indirect call target to a register
-      // jump. If that target must live in a callee-saved register across an
-      // intervening call, the epilogue's callee-saved restore clobbers it
-      // before the tail jump. Direct (symbol) targets use pc-relative tail
-      // jumps and are unaffected, so only allow tail statepoints for direct
-      // callees until indirect targets are lowered to a caller-saved
-      // register after the epilogue.
-      CalleeFunc != nullptr &&
-      // C2N/N2C stubs create a full runtime frame, and the runtime
-      // unwinder/GC/EH still rely on the managed caller frame being present.
-      !CalleeFunc->isCangjieNativeStub(*I.getFunction());
-
-  SI.ActualCalledFunction = CalleeFunc;
->>>>>>> feat: local mode
 
   SDValue ReturnValue = LowerAsSTATEPOINT(SI);
   if (CJPipeline) {
