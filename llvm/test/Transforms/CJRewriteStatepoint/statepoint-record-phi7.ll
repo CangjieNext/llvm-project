@@ -26,7 +26,8 @@ bb2:
   %2 = getelementptr inbounds %struct_all, %struct_all* %r, i64 0, i32 0
   br label %bbend
 
-; CHECK:  %token3 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%struct_1 addrspace(1)*)* @test, i32 1, i32 0, %struct_1 addrspace(1)* %3)
+; CHECK:  [[GC:%.*]] = addrspacecast %struct_1* %sink to %struct_1 addrspace(1)*
+; CHECK:  %token3 = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, void (%struct_1 addrspace(1)*)* @test, i32 1, i32 0, %struct_1 addrspace(1)* [[GC]])
 ;
 bbend:
   %sink = phi %struct_1* [%1, %bb1], [%2, %bb2]

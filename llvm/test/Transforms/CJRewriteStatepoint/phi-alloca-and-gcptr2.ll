@@ -14,8 +14,8 @@ declare i8 addrspace(1)* @CJ_MCC_NewObjectStub(i8*, i32)
 declare void @llvm.memset.p0i8.i64(i8* nocapture writeonly, i8, i64, i1 immarg)
 
 ; CHECK-LABEL: bb6:
-; CHECK-NEXT:    %phi.val.base = phi i8 addrspace(1)* [ null, %entry ], [ %6, %bb5 ], !is_base_value !1
-; CHECK-NEXT:    %phi.val = phi i8 addrspace(1)* [ %5, %entry ], [ %6, %bb5 ]
+; CHECK-NEXT:    %phi.val.base = phi i8 addrspace(1)* [ null, %entry ], [ [[HEAP:%[0-9]+]], %bb5 ], !is_base_value !1
+; CHECK-NEXT:    %phi.val = phi i8 addrspace(1)* [ [[STACK:%[0-9]+]], %entry ], [ [[HEAP]], %bb5 ]
 ; CHECK-NEXT:    [[TMP0:%.*]] = call token (...) @llvm.cj.gc.statepoint(i64 0, i32 0, i8 addrspace(1)* (i8 addrspace(1)*)* @CJ_MCC_GetObjClass, i32 1, i32 0, i8 addrspace(1)* %phi.val) [ "gc-live"(i8 addrspace(1)* %phi.val.base, i8 addrspace(1)* %phi.val), "struct-live"({ %ArrayBase, [16 x i8 addrspace(1)*] }* %0) ]
 
 define i8 addrspace(1)* @foo(i64 %w) #0 gc "cangjie" {

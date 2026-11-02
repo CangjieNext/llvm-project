@@ -729,22 +729,29 @@ void StructLiveAnalysis::insertMemsetForPhiStruct() {
     }
   }
 
-  // Filter out the alloca that has been initialized in the entry.
+  // A header store or short memory write leaves the remaining GC fields
+  // uninitialized. PHI/select liveness can expose those fields at safepoints
+  // before their later definitions, so only a complete write replaces zeroing.
+  auto CoversAlloca = [&](Value *V, uint64_t Size) {
+    auto *AI = dyn_cast_or_null<AllocaInst>(V);
+    return AI && Size >= DL.getTypeAllocSize(AI->getAllocatedType());
+  };
   for (auto &I : F.getEntryBlock()) {
+    Value *Ptr = nullptr;
+    uint64_t Size = 0;
     if (auto *SI = dyn_cast<StoreInst>(&I)) {
-      Value *Ptr = SI->getPointerOperand()->stripPointerCasts();
-      if (AllocaStructs.contains(Ptr)) {
-        AllocaStructs.remove(Ptr);
-      } else if (AllocaGCPtrs.contains(Ptr)) {
-        AllocaGCPtrs.remove(Ptr);
-      }
+      Ptr = SI->getPointerOperand()->stripPointerCasts();
+      Size = DL.getTypeStoreSize(SI->getValueOperand()->getType());
     } else if (auto *II = dyn_cast<MemIntrinsic>(&I)) {
-      Value *Ptr = II->getArgOperand(0)->stripPointerCasts();
-      if (AllocaStructs.contains(Ptr)) {
-        AllocaStructs.remove(Ptr);
-      } else if (AllocaGCPtrs.contains(Ptr)) {
-        AllocaGCPtrs.remove(Ptr);
-      }
+      auto *Length = dyn_cast<ConstantInt>(II->getLength());
+      if (!Length)
+        continue;
+      Ptr = II->getArgOperand(0)->stripPointerCasts();
+      Size = Length->getLimitedValue();
+    }
+    if (CoversAlloca(Ptr, Size)) {
+      AllocaStructs.remove(Ptr);
+      AllocaGCPtrs.remove(Ptr);
     }
   }
 
