@@ -624,6 +624,9 @@ void PassManagerBuilder::populateModulePassManager(
   auto addCangjiePasses = [&]() {
     if (CJPipeline) {
       MPM.add(createCangjieSpecificOptLegacyPass(OptLevel));
+      // Must precede CJRewriteStatepoint: the Remove call is a potential
+      // safepoint, so the object pointer it takes has to be relocated.
+      MPM.add(createCJInsertRemoveLocalFinalizerLegacyPass());
       MPM.add(createPlaceSafepointsLegacyPass());
       MPM.add(createCJRewriteStatepointLegacyPass(OptLevel));
     }

@@ -94,6 +94,7 @@ void initializeCJBarrierOptLegacyPassPass(PassRegistry &);
 void initializeCJBarrierSplitLegacyPassPass(PassRegistry &);
 void initializeCJRuntimeLoweringLegacyPassPass(PassRegistry &);
 void initializeCJGenericIntrinsicOptLegacyPassPass(PassRegistry &);
+void initializeCJInsertRemoveLocalFinalizerLegacyPassPass(PassRegistry &);
 void initializeCJIRVerifierLegacyPassPass(PassRegistry &);
 void initializeCJLoopFloatOptLegacyPassPass(PassRegistry &);
 void initializeCFGOnlyPrinterLegacyPassPass(PassRegistry&);

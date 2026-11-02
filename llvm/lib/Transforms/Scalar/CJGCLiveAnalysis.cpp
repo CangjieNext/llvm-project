@@ -805,7 +805,7 @@ void StructLiveAnalysis::computeFieldKillSet(BasicBlock *BB,
     SetVector<FieldInfo *> MemDefSet;
     SetVector<FieldInfo *> MemUseSet;
 
-    MemoryAccess Status = hasMemoryDefineOrUseValue(&I, MemDefSet, MemUseSet);
+    MemoryAccessKind Status = hasMemoryDefineOrUseValue(&I, MemDefSet, MemUseSet);
     if (Status & DefineMemory) {
       KillSet.set_union(MemDefSet);
     }
@@ -1281,7 +1281,7 @@ void StructLiveAnalysis::visitMemorySelect(SelectInst *SI,
 
 // If it is an instruction that contains the memory parameter, then handles
 // use and define values according to the instruction type.
-MemoryAccess StructLiveAnalysis::hasMemoryDefineOrUseValue(
+MemoryAccessKind StructLiveAnalysis::hasMemoryDefineOrUseValue(
     Instruction *I, SetVector<FieldInfo *> &AllocaDefs,
     SetVector<FieldInfo *> &AllocaUses) {
   // For each memory instruction, identifies and processes use and define,
@@ -1312,7 +1312,7 @@ MemoryAccess StructLiveAnalysis::hasMemoryDefineOrUseValue(
     Status |= static_cast<int>(DefineMemory);
   if (!AllocaUses.empty())
     Status |= static_cast<int>(UseMemory);
-  return static_cast<MemoryAccess>(Status);
+  return static_cast<MemoryAccessKind>(Status);
 }
 
 void StructLiveAnalysis::combineStructGCField(StructLiveSetTy &FieldInfos,

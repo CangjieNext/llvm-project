@@ -240,7 +240,7 @@ static bool markTails(Function &F, OptimizationRemarkEmitter *ORE) {
         Escaped = ESCAPED;
 
       CallInst *CI = dyn_cast<CallInst>(&I);
-      if (CI && CJPipeline) {
+      if (CI && CJPipeline && !CI->isNoTailCall()) {
         CI->setTailCall(false);
       }
       // A PseudoProbeInst has the IntrInaccessibleMemOnly tag hence it is

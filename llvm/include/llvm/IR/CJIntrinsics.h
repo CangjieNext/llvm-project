@@ -66,6 +66,10 @@ struct AssignGeneric {
   enum { DstPtr, SrcPtr, TypeInfo };
 };
 
+struct AssignLocalGeneric {
+  enum { DstPtr, SrcPtr, TypeInfo };
+};
+
 struct ArrayCopy {
   enum { DstObj, DstPtr, SrcObj, SrcPtr, Size };
 };

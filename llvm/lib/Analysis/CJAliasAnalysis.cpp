@@ -192,6 +192,7 @@ getLocInfoForCJIntrinsics(const IntrinsicInst *II,
     Base = MemoryLocation::getAfter(getBaseObj(II));
     break;
   case Intrinsic::cj_assign_generic:
+  case Intrinsic::cj_assign_local_generic:
     Src = MemoryLocation::getAfter(getSource(II));
     Dst = MemoryLocation::getAfter(getDest(II));
     break;
@@ -258,7 +259,8 @@ ModRefInfo CJAAResult::getModRefInfo(const CallBase *Call,
   case Intrinsic::cj_gcwrite_struct:
   case Intrinsic::cj_gcwrite_generic:
   case Intrinsic::cj_gcread_generic:
-  case Intrinsic::cj_assign_generic: {
+  case Intrinsic::cj_assign_generic:
+  case Intrinsic::cj_assign_local_generic: {
     auto [LocS, LocD, LocB] =
         getLocInfoForCJIntrinsics(cast<IntrinsicInst>(Call), TLI);
     if (!LocS || !LocD)
