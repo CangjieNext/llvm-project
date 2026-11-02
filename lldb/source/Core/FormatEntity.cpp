@@ -1044,10 +1044,6 @@ static bool FormatThreadExtendedInfoRecurse(
   return false;
 }
 
-static inline bool IsToken(const char *var_name_begin, const char *var) {
-  return (::strncmp(var_name_begin, var, strlen(var)) == 0);
-}
-
 bool FormatEntity::FormatStringRef(const llvm::StringRef &format_str, Stream &s,
                                    const SymbolContext *sc,
                                    const ExecutionContext *exe_ctx,
@@ -1694,34 +1690,29 @@ bool FormatEntity::Format(const Entry &entry, Stream &s,
             variable_list_sp->AppendVariablesWithScope(
                 eValueTypeVariableArgument, args);
           if (args.GetSize() > 0) {
-            const char *open_paren = strchr(cstr, '(');
-            const char *close_paren = nullptr;
-            const char *generic = strchr(cstr, '<');
-            // if before the arguments list begins there is a template sign
-            // then scan to the end of the generic args before you try to find
-            // the arguments list
-            if (generic && open_paren && generic < open_paren) {
-              int generic_depth = 1;
-              ++generic;
-              for (; *generic && generic_depth > 0; generic++) {
-                if (*generic == '<')
-                  generic_depth++;
-                if (*generic == '>')
-                  generic_depth--;
+            // The runtime argument values belong to the innermost function, whose
+            // parameter list is the LAST parenthesized group of the demangled name.
+            // Locate it by scanning backwards from the last ')' to its matching '(';
+            // the balanced scan keeps parentheses that belong to argument types (e.g.
+            // a function type like "(Int64) -> Int64") on the correct side of the
+            // split, and text after the group is preserved.
+            const char *open_paren = nullptr;
+            const char *close_paren = strrchr(cstr, ')');
+            if (close_paren) {
+              int depth = 0;
+              const char *p = close_paren;
+              for (; p >= cstr; --p) {
+                if (*p == ')')
+                  ++depth;
+                else if (*p == '(') {
+                  if (--depth == 0)
+                    break;
+                }
               }
-              if (*generic)
-                open_paren = strchr(generic, '(');
+              if (depth == 0 && p >= cstr && p < close_paren)
+                open_paren = p;
               else
-                open_paren = nullptr;
-            }
-            if (open_paren) {
-              if (IsToken(open_paren, "(anonymous namespace)")) {
-                open_paren =
-                    strchr(open_paren + strlen("(anonymous namespace)"), '(');
-                if (open_paren)
-                  close_paren = strchr(open_paren, ')');
-              } else
-                close_paren = strchr(open_paren, ')');
+                close_paren = nullptr;
             }
 
             if (open_paren)

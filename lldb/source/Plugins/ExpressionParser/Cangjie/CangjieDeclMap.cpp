@@ -1904,7 +1904,7 @@ void CangjieDeclMap::AddFieldToRecordType(CompilerType& instancedType, Ptr<AST::
       // Case generic type.
       auto index = GetSubGenericTyIndex(decl, subTy->name);
       std::string subTypeName = instantiatedNames[index];
-      subTy = ty->typeArgs[index];
+      subTy = ty->TyArg(index);
       auto tempGenericType = this->GetGenericTypeByPartName(subTy->name);
       field_type = GetDynamicTypeFromTy(subTy, subTypeName, tempGenericType);
     } else if (compilerTypeName.find(GENERIC_TYPE_PREFIX_NAME) != std::string::npos) {
@@ -1942,10 +1942,10 @@ Ptr<AST::Ty> CangjieDeclMap::GetMemberDeclTyByName(Ptr<AST::Ty> ty, std::string&
       continue;
     }
     if (memberDecls[i]->identifier.Val() == memberName) {
-      return memberDecls[i]->GetTy();
+      return memberDecls[i]->DataTy();
     }
   }
-  return decl->GetTy();
+  return decl->DataTy();
 }
 
 CompilerType CangjieDeclMap::GetEnumType(Ptr<AST::Ty> ty, std::string enum_name, CompilerType& genericType) {
@@ -1994,14 +1994,14 @@ void CangjieDeclMap::CreateAndAddInheritTypeToRecordType(Ptr<AST::Ty> ty, Compil
     std::string member_name;
     std::vector<std::string> instantiatedNames = builder.SplitCollectionName(enum_name);
     for (size_t j = 0; j < paramSize; j++) {
-      auto subTy = ctorDecl->funcBody->paramLists[0]->params[j].get()->GetTy();
+      auto subTy = ctorDecl->funcBody->paramLists[0]->params[j].get()->DataTy();
       CompilerType ctor_para_type = ctorFuncType.GetFieldAtIndex(j + 1, member_name, nullptr, nullptr, nullptr);
       auto tempGenericType = ctor_para_type;
       if (subTy->IsGeneric()) {
         // case generic type.
         auto index = GetSubGenericTyIndex(decl, subTy->name);
         std::string subTypeName = instantiatedNames[index];
-        subTy = ty->typeArgs[index];
+        subTy = ty->TyArg(index);
         // Find generic type by name.
         ctor_para_type = GetDynamicTypeFromTy(subTy, subTypeName, tempGenericType);
       }
@@ -2046,7 +2046,7 @@ CompilerType CangjieDeclMap::GetDynamicEnumType(Ptr<AST::Ty> ty, std::string typ
   if (enumKind == EnumLayout::E2OptionLike) {
     ast->AddFieldToRecordType(dynamic_type, "constructor", enum_type, lldb::eAccessPublic, 0);
     auto args = builder.GetInstantiatedParamDeclName(typeName);
-    auto valType = GetDynamicTypeFromTy(ty->typeArgs[0], args[0], genericType);
+    auto valType = GetDynamicTypeFromTy(ty->TyArg(0), args[0], genericType);
     ast->AddFieldToRecordType(dynamic_type, "val", valType, lldb::eAccessPublic, 0);
   } else {
       // add typeinfo*.
@@ -2143,7 +2143,7 @@ CompilerType CangjieDeclMap::GetDynamicTupleType(Ptr<AST::Ty> ty, std::string ty
   std::vector<std::string> instantiatedNames = builder.SplitTupleName(typeName);
   CJC_ASSERT(instantiatedNames.size() == tupleTy->typeArgs.size());
   for (size_t i = 0; i < tupleTy->typeArgs.size(); i++) {
-    auto field_type = GetDynamicTypeFromTy(tupleTy->typeArgs[i], instantiatedNames[i], genericType);
+    auto field_type = GetDynamicTypeFromTy(tupleTy->TyArg(i), instantiatedNames[i], genericType);
     std::string field_name = "_" + std::to_string(i);
     this->GetTypeSystem()->AddFieldToRecordType(instancedType, field_name.c_str(), field_type, lldb::eAccessPublic, 0);
   }
@@ -2208,7 +2208,8 @@ CompilerType CangjieDeclMap::GetDynamicArrayType(Ptr<AST::Ty> ty, std::string ty
   // }
   // Add elements to array member.
   std::vector<std::string> instantiatedNames = builder.SplitCollectionName(typeName);
-  auto field_type = GetDynamicRawArrayType(arrayTy->typeArgs[0], instantiatedNames[0], genericType).GetPointerType();
+  auto field_type = GetDynamicRawArrayType(
+    arrayTy->TyArg(0), instantiatedNames[0], genericType).GetPointerType();
   this->GetTypeSystem()->AddFieldToRecordType(type, "rawptr", field_type, lldb::eAccessPublic, 0);
 
   CompilerType basic_type = this->GetTypeSystem()->GetBasicType(lldb::eBasicTypeLongLong).CreateTypedef(
@@ -2247,7 +2248,8 @@ CompilerType CangjieDeclMap::CreateOptionReturnType(Ptr<Cangjie::AST::Ty> ty, st
 
   if (!valType.IsValid()) {
     if (m_generic_types.find(ConstString(valTypeName[0])) != m_generic_types.end()) {
-      valType = GetDynamicTypeFromTy(ty->typeArgs[0], valTypeName[0], m_generic_types[ConstString(valTypeName[0])]);
+      valType = GetDynamicTypeFromTy(
+        ty->TyArg(0), valTypeName[0], m_generic_types[ConstString(valTypeName[0])]);
     }
   }
 

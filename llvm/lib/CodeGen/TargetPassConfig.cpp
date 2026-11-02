@@ -1130,6 +1130,9 @@ bool TargetPassConfig::addISelPasses() {
       addPass(createCJFillMetadataLegacyPass());
       addPass(createCJRuntimeLoweringLegacyPass());
       addPass(createCangjieSpecificOptLegacyPass(0));
+      // Must precede CJRewriteStatepoint: the Remove call is a potential
+      // safepoint, so the object pointer it takes has to be relocated.
+      addPass(createCJInsertRemoveLocalFinalizerLegacyPass());
       addPass(createPlaceSafepointsLegacyPass());
       addPass(createCJRewriteStatepointLegacyPass(0));
     }

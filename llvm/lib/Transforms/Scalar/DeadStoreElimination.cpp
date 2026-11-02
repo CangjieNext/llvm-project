@@ -1018,7 +1018,8 @@ struct DSEState {
       if (ID == Intrinsic::cj_gcwrite_ref)
         return MemoryLocation::get(II);
       if (ID == Intrinsic::cj_gcread_generic ||
-          ID == Intrinsic::cj_assign_generic)
+          ID == Intrinsic::cj_assign_generic ||
+          ID == Intrinsic::cj_assign_local_generic)
         return MemoryLocation::getAfter(II->getArgOperand(0));
       if (ID == Intrinsic::cj_gcwrite_generic)
         return MemoryLocation::getAfter(II->getArgOperand(1));

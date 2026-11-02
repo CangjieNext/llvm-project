@@ -43,14 +43,14 @@ private:
 
   void AddImportNodeFromFakePkg(OwnedPtr<Cangjie::AST::File>& file, OwnedPtr<AST::Package>& fPkg);
   void AddImportSpecToLLDBExprPackage();
-  Ptr<AST::Ty> AddObjectToFunctionTy(Ptr<AST::Ty> fTy, Ptr<AST::Ty> objectTy);
+  DataTy AddObjectToFunctionTy(DataTy fTy, ModalTy objectTy);
   void AddCapturedvarsToCallExprOfLocalFunc();
   std::vector<OwnedPtr<FuncArg>> CreateFuncArgsFromCapturedVars(std::string ident);
   void AddCapturedVarsToTryExpr(std::vector<OwnedPtr<Decl>>& localDecls, AST::TryExpr& tryExpr);
   void AddLocalsToExprResult(std::vector<OwnedPtr<Decl>>& localDecls);
   void AddTyOfRefType(AST::RefType& rt);
   void CheckTypeAndAddTy(OwnedPtr<AST::Type>& type);
-  Ptr<AST::Ty> GetInstantiatedTy(AST::ClassTy& cTy, Ptr<AST::Ty> paramTy);
+  DataTy GetInstantiatedTy(AST::ClassTy& cTy, DataTy paramTy);
   OwnedPtr<AST::CallExpr> CreateSuperCall(AST::ClassDecl& cd);
   void CreateInitFunc(AST::Decl& decl);
   void CreateDefaultCtor(AST::Decl& decl);
@@ -60,14 +60,14 @@ private:
   void CreateTyAndDefaultCtor(AST::Decl& decl, const std::vector<Ptr<AST::Ty>>& typeArgs);
 
   Ptr<AST::FuncDecl> GetInitFuncFromClassOrStruct(
-    std::vector<OwnedPtr<Decl>>& decls, std::vector<Ptr<Cangjie::AST::Ty>>& params);
-  OwnedPtr<Cangjie::AST::Expr> CreatePrimitiveInitializer(Ptr<Cangjie::AST::Ty> ty);
-  OwnedPtr<Cangjie::AST::Expr> CreateFunctionInitializer(Ptr<Cangjie::AST::Ty> ty);
-  OwnedPtr<Cangjie::AST::Expr> CreateStructInitializer(Ptr<Cangjie::AST::Ty> ty);
-  OwnedPtr<Cangjie::AST::Expr> CreateClassInitializer(Ptr<Cangjie::AST::Ty> ty);
-  OwnedPtr<Cangjie::AST::Expr> CreateEnumInitializer(Ptr<Cangjie::AST::Ty> ty);
-  OwnedPtr<Cangjie::AST::Expr> CreateRangeInitializer(Ptr<Cangjie::AST::Ty> ty);
-  OwnedPtr<Cangjie::AST::Expr> CreateInitializer(Ptr<Cangjie::AST::Ty> ty);
+    std::vector<OwnedPtr<Decl>>& decls, std::vector<ModalTy>& params);
+  OwnedPtr<Cangjie::AST::Expr> CreatePrimitiveInitializer(ModalTy ty);
+  OwnedPtr<Cangjie::AST::Expr> CreateFunctionInitializer(ModalTy ty);
+  OwnedPtr<Cangjie::AST::Expr> CreateStructInitializer(ModalTy ty);
+  OwnedPtr<Cangjie::AST::Expr> CreateClassInitializer(ModalTy ty);
+  OwnedPtr<Cangjie::AST::Expr> CreateEnumInitializer(ModalTy ty);
+  OwnedPtr<Cangjie::AST::Expr> CreateRangeInitializer(ModalTy ty);
+  OwnedPtr<Cangjie::AST::Expr> CreateInitializer(ModalTy ty);
 };
 
 } // namespace CangjieExpr

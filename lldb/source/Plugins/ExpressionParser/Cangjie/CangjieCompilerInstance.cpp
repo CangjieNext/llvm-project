@@ -63,10 +63,10 @@ void CangjieCompilerInstance::AddTyOfRefType(AST::RefType& rt)
       decl = importManager->GetImportedDecl(COLLECTION_PACKAGE_NAME, rt.ref.identifier);
     }
   }
-  std::vector<Ptr<Ty>> typeArgs;
+  std::vector<DataTy> typeArgs;
   for (auto& arg : rt.typeArguments) {
     CheckTypeAndAddTy(arg);
-    typeArgs.push_back(arg->GetTy());
+    typeArgs.push_back(arg->DataTy());
   }
   if (!decl) {
     decl = rt.ref.target;
@@ -93,20 +93,21 @@ void CangjieCompilerInstance::CheckTypeAndAddTy(OwnedPtr<AST::Type>& type)
   if (AST::Ty::IsTyCorrect(type->GetTy()) && !isGenericType) {
     return;
   }
+  auto mode = type->modal.ToModalInfo();
   if (type->astKind == AST::ASTKind::PRIMITIVE_TYPE) {
     auto pt = RawStaticCast<AST::PrimitiveType *>(type.get());
-    pt->SetTy(typeManager->GetPrimitiveTy(pt->kind));
+    pt->SetTy({typeManager->GetPrimitiveTy(pt->kind), mode});
   } else if (type->astKind == AST::ASTKind::REF_TYPE) {
     auto rt = RawStaticCast<AST::RefType *>(type.get());
     AddTyOfRefType(*rt);
   } else if (type->astKind == AST::ASTKind::TUPLE_TYPE) {
     auto tt = RawStaticCast<AST::TupleType *>(type.get());
-    std::vector<Ptr<Ty>> subTys;
+    std::vector<DataTy> subTys;
     for (auto& subType : tt->fieldTypes) {
       CheckTypeAndAddTy(subType);
-      subTys.push_back(subType->GetTy());
+      subTys.push_back(subType->DataTy());
     }
-    tt->SetTy(typeManager->GetTupleTy(subTys));
+    tt->SetTy({typeManager->GetTupleTy(subTys), mode});
   } else if (type->astKind == AST::ASTKind::VARRAY_TYPE) {
     auto vaType = RawStaticCast<AST::VArrayType *>(type.get());
     auto constType = RawStaticCast<AST::ConstantType *>(vaType->constantType.get());
@@ -118,23 +119,23 @@ void CangjieCompilerInstance::CheckTypeAndAddTy(OwnedPtr<AST::Type>& type)
     }
     CheckTypeAndAddTy(vaType->typeArgument);
     if (vaType->typeArgument) {
-      vaType->SetTy(typeManager->GetVArrayTy(*vaType->typeArgument->GetTy(), vaSize));
+      vaType->SetTy({typeManager->GetVArrayTy(*vaType->typeArgument->GetTy(), vaSize), mode});
     }
   } else if (type->astKind == AST::ASTKind::FUNC_TYPE) {
     auto func_type = RawStaticCast<AST::FuncType *>(type.get());
-    std::vector<Ptr<Cangjie::AST::Ty>> params;
+    std::vector<ModalTy> params;
     for (auto &param : func_type->paramTypes) {
       CheckTypeAndAddTy(param);
       params.emplace_back(param->GetTy());
     }
     CheckTypeAndAddTy(func_type->retType);
     if (func_type->retType) {
-      type->SetTy(typeManager->GetFunctionTy(params, func_type->retType->GetTy()));
+      type->SetTy({typeManager->GetFunctionTy(params, func_type->retType->GetTy()), mode});
     }
   }
 }
 
-Ptr<AST::Ty> CangjieCompilerInstance::GetInstantiatedTy(AST::ClassTy& cTy, Ptr<AST::Ty> paramTy) {
+DataTy CangjieCompilerInstance::GetInstantiatedTy(AST::ClassTy& cTy, DataTy paramTy) {
   if (!paramTy->IsGeneric()) {
     return paramTy;
   }
@@ -142,7 +143,7 @@ Ptr<AST::Ty> CangjieCompilerInstance::GetInstantiatedTy(AST::ClassTy& cTy, Ptr<A
   CJC_ASSERT(typeParams.size() == cTy.typeArgs.size());
   for (size_t i = 0; i < typeParams.size(); i++) {
     if (typeParams[i]->identifier.Val() == paramTy->name) {
-      return cTy.typeArgs[i];
+      return cTy.TyArg(i);
     }
   }
   return paramTy;
@@ -157,7 +158,7 @@ OwnedPtr<AST::CallExpr> CangjieCompilerInstance::CreateSuperCall(AST::ClassDecl&
   if (!superType) {
     return nullptr;
   }
-  auto cTy = StaticCast<AST::ClassTy *>(superType->GetTy());
+  auto cTy = StaticCast<AST::ClassTy *>(superType->DataTy());
   auto superExpr = CreateRefExpr("super");
   superExpr->isSuper = true;
   std::vector<OwnedPtr<FuncArg>> args;
@@ -166,11 +167,11 @@ OwnedPtr<AST::CallExpr> CangjieCompilerInstance::CreateSuperCall(AST::ClassDecl&
       superExpr->ref.target = fd;
       superExpr->SetTy(fd->GetTy());
       for (auto& param : fd->funcBody->paramLists[0]->params) {
-        if (!param || !param->GetTy() || param->GetTy()->IsInvalid()) {
+        if (!param || !param->DataTy() || param->GetTy()->IsInvalid()) {
           continue;
         }
         // Parent's init func may have generic param.
-        auto argTy = GetInstantiatedTy(*cTy, param->GetTy());
+        auto argTy = GetInstantiatedTy(*cTy, param->DataTy());
         auto initializer = CreateInitializer(argTy);
         if (!initializer) {
           return nullptr;
@@ -198,10 +199,10 @@ void CangjieCompilerInstance::CreateInitFunc(AST::Decl& decl)
   auto funcParamList = MakeOwned<Cangjie::AST::FuncParamList>();
   funcBody->paramLists.push_back(std::move(funcParamList));
   funcBody->body = MakeOwned<Cangjie::AST::Block>();
-  funcBody->SetTy(funcTy);
+  funcBody->SetTy({funcTy});
 
   auto initFunc = MakeOwned<Cangjie::AST::FuncDecl>();
-  initFunc->SetTy(funcTy);
+  initFunc->SetTy({funcTy});
   initFunc->funcBody = std::move(funcBody);
   initFunc->funcBody->funcDecl = initFunc.get();
   initFunc->identifier = "init";
@@ -256,7 +257,7 @@ void CangjieCompilerInstance::UpdateDeclTyByGeneric(Ptr<AST::Decl> decl) {
   for (auto& it : generic->typeParameters) {
     auto gpd = RawStaticCast<AST::GenericParamDecl *>(it.get());
     CreateTyAndDefaultCtor(*gpd, {});
-    typeArgs.push_back(gpd->GetTy());
+    typeArgs.push_back(gpd->DataTy());
   }
   for (auto& it : generic->genericConstraints) {
     auto gc = RawStaticCast<AST::GenericConstraint *>(it.get());
@@ -312,7 +313,7 @@ Ptr<Ty> CangjieCompilerInstance::GetTyFromASTType(Decl& decl, const std::vector<
       return typeManager->GetGenericsTy(*gpd);
     }
     default:
-      return decl.GetTy();
+      return decl.DataTy();
   }
 }
 
@@ -374,7 +375,7 @@ void CangjieCompilerInstance::CreateFuncdeclTy(AST::FuncDecl& fd)
     return;
   }
   auto retTy = fd.funcBody->retType->GetTy();
-  std::vector<Ptr<Cangjie::AST::Ty>> params;
+  std::vector<ModalTy> params;
   for (auto& param : fd.funcBody->paramLists[0]->params) {
     if (!param->type) {
       continue;
@@ -384,7 +385,7 @@ void CangjieCompilerInstance::CreateFuncdeclTy(AST::FuncDecl& fd)
     params.emplace_back(param->GetTy());
   }
   UpdateDeclTyByGeneric(&fd);
-  fd.SetTy(typeManager->GetFunctionTy(params, retTy));
+  fd.SetTy({typeManager->GetFunctionTy(params, retTy)});
   fd.funcBody->SetTy(fd.GetTy());
 }
 
@@ -403,14 +404,14 @@ void CangjieCompilerInstance::CreateTyAndDefaultCtor(
           CreateTyAndDefaultCtor(*rt->ref.target, {});
         }
       }
-      decl.SetTy(typeManager->GetClassTy(*cd, typeArgs));
+      decl.SetTy({typeManager->GetClassTy(*cd, typeArgs)});
       UpdateDeclTyByGeneric(&decl);
       CreateDefaultCtor(decl);
       break;
     }
     case ASTKind::INTERFACE_DECL: {
       auto id = As<ASTKind::INTERFACE_DECL>(&decl);
-      decl.SetTy(typeManager->GetInterfaceTy(*id, typeArgs));
+      decl.SetTy({typeManager->GetInterfaceTy(*id, typeArgs)});
       UpdateDeclTyByGeneric(&decl);
       break;
     }
@@ -425,14 +426,14 @@ void CangjieCompilerInstance::CreateTyAndDefaultCtor(
           CreateTyAndDefaultCtor(*rt->ref.target, {});
         }
       }
-      decl.SetTy(typeManager->GetStructTy(*sd, typeArgs));
+      decl.SetTy({typeManager->GetStructTy(*sd, typeArgs)});
       UpdateDeclTyByGeneric(&decl);
       CreateDefaultCtor(decl);
       break;
     }
     case ASTKind::ENUM_DECL: {
       auto ed = As<ASTKind::ENUM_DECL>(&decl);
-      decl.SetTy(typeManager->GetEnumTy(*ed, typeArgs));
+      decl.SetTy({typeManager->GetEnumTy(*ed, typeArgs)});
       UpdateDeclTyByGeneric(&decl);
       for (size_t i = 0; i < ed->constructors.size(); i++) {
         auto tempDecl = RawStaticCast<AST::Decl *>(ed->constructors[i].get());
@@ -442,12 +443,12 @@ void CangjieCompilerInstance::CreateTyAndDefaultCtor(
     }
     case ASTKind::TYPE_ALIAS_DECL: {
       auto tad = As<ASTKind::TYPE_ALIAS_DECL>(&decl);
-      decl.SetTy(typeManager->GetTypeAliasTy(*tad, typeArgs));
+      decl.SetTy({typeManager->GetTypeAliasTy(*tad, typeArgs)});
       break;
     }
     case ASTKind::GENERIC_PARAM_DECL: {
       auto gpd = As<ASTKind::GENERIC_PARAM_DECL>(&decl);
-      decl.SetTy(typeManager->GetGenericsTy(*gpd));
+      decl.SetTy({typeManager->GetGenericsTy(*gpd)});
       break;
     }
     case ASTKind::FUNC_DECL: {
@@ -943,7 +944,7 @@ void CangjieCompilerInstance::AddImportSpecToLLDBExprPackage() {
   }
 }
 
-OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreatePrimitiveInitializer(Ptr<Cangjie::AST::Ty> ty)
+OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreatePrimitiveInitializer(ModalTy ty)
 {
   switch (ty->kind) {
     case Cangjie::AST::TypeKind::TYPE_INT8:
@@ -972,9 +973,9 @@ OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreatePrimitiveInitializer
   }
 }
 
-OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateEnumInitializer(Ptr<AST::Ty> ty)
+OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateEnumInitializer(ModalTy ty)
 {
-  auto enumTy = RawStaticCast<AST::EnumTy *>(ty);
+  auto enumTy = RawStaticCast<AST::EnumTy *>(ty.Ty());
   if (!enumTy) {
     return nullptr;
   }
@@ -1005,7 +1006,7 @@ OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateEnumInitializer(Ptr<
 }
 
 Ptr<AST::FuncDecl> CangjieCompilerInstance::GetInitFuncFromClassOrStruct(
-    std::vector<OwnedPtr<Decl>>& decls, std::vector<Ptr<Cangjie::AST::Ty>>& params)
+    std::vector<OwnedPtr<Decl>>& decls, std::vector<ModalTy>& params)
 {
   for (auto& decl : decls) {
     if (decl->TestAttr(Attribute::CONSTRUCTOR)) {
@@ -1024,14 +1025,14 @@ Ptr<AST::FuncDecl> CangjieCompilerInstance::GetInitFuncFromClassOrStruct(
   return nullptr;
 }
 
-OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateClassInitializer(Ptr<AST::Ty> ty)
+OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateClassInitializer(ModalTy ty)
 {
-  auto classTy = RawStaticCast<AST::ClassTy *>(ty);
+  auto classTy = RawStaticCast<AST::ClassTy *>(ty.Ty());
   if (!classTy || !classTy->decl) {
     return nullptr;
   }
   auto cd = classTy->decl;
-  std::vector<Ptr<Cangjie::AST::Ty>> params;
+  std::vector<ModalTy> params;
   auto initFunc = GetInitFuncFromClassOrStruct(cd->body->decls, params);
   if (!initFunc) {
     return nullptr;
@@ -1042,20 +1043,20 @@ OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateClassInitializer(Ptr
   }
   auto refExpr = CreateRefExpr(*initFunc);
   refExpr->ref.identifier = cd->identifier;
-  refExpr->SetTy(typeManager->GetFunctionTy(params, classTy));
-  auto call = AST::CreateCallExpr(std::move(refExpr), std::move(args), initFunc, classTy);
+  refExpr->SetTy({typeManager->GetFunctionTy(params, ty)});
+  auto call = AST::CreateCallExpr(std::move(refExpr), std::move(args), initFunc, ty);
   call->callKind = CallKind::CALL_OBJECT_CREATION;
   return call;
 }
 
-OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateStructInitializer(Ptr<AST::Ty> ty)
+OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateStructInitializer(ModalTy ty)
 {
-  auto structTy = RawStaticCast<AST::StructTy *>(ty);
+  auto structTy = RawStaticCast<AST::StructTy *>(ty.Ty());
   if (!structTy || !structTy->decl) {
     return nullptr;
   }
   auto sd = structTy->decl;
-  std::vector<Ptr<Cangjie::AST::Ty>> sparams;
+  std::vector<ModalTy> sparams;
   auto initFunc = GetInitFuncFromClassOrStruct(sd->body->decls, sparams);
   if (!initFunc) {
     return nullptr;
@@ -1066,16 +1067,16 @@ OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateStructInitializer(Pt
   }
   auto refExpr = CreateRefExpr(*initFunc);
   refExpr->ref.identifier = sd->identifier;
-  refExpr->SetTy(typeManager->GetFunctionTy(sparams, structTy));
-  auto call = AST::CreateCallExpr(std::move(refExpr), std::move(args), initFunc, structTy);
+  refExpr->SetTy({typeManager->GetFunctionTy(sparams, ty)});
+  auto call = AST::CreateCallExpr(std::move(refExpr), std::move(args), initFunc, ty);
   call->callKind = CallKind::CALL_STRUCT_CREATION;
   return call;
 }
 
-OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateFunctionInitializer(Ptr<AST::Ty> ty)
+OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateFunctionInitializer(ModalTy ty)
 {
   // var result: (Int8) -> Int8 = {a: Int8 => 0 }
-  auto functy = RawStaticCast<AST::FuncTy*>(ty);
+  auto functy = RawStaticCast<AST::FuncTy*>(ty.Ty());
   if (!functy) {
     return nullptr;
   }
@@ -1096,7 +1097,7 @@ OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateFunctionInitializer(
   return AST::CreateLambdaExpr(std::move(funcBody));
 }
 
-OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateRangeInitializer(Ptr<AST::Ty> ty)
+OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateRangeInitializer(ModalTy ty)
 {
   if (ty->typeArgs.empty()) {
     return nullptr;
@@ -1105,13 +1106,13 @@ OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateRangeInitializer(Ptr
   rangeExpr->startExpr = CreateInitializer(ty->typeArgs[0]);
   rangeExpr->stopExpr = CreateInitializer(ty->typeArgs[0]);
   auto int64ty = typeManager->GetPrimitiveTy(AST::TypeKind::TYPE_INT64);
-  rangeExpr->stepExpr = AST::CreateLitConstExpr(Cangjie::AST::LitConstKind::INTEGER, "1", int64ty);
+  rangeExpr->stepExpr = AST::CreateLitConstExpr(Cangjie::AST::LitConstKind::INTEGER, "1", {int64ty});
   rangeExpr->SetTy(ty);
   rangeExpr->decl = importManager->GetCoreDecl<Cangjie::AST::StructDecl>(RANGE_NAME);
   return rangeExpr;
 }
 
-OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateInitializer(Ptr<Cangjie::AST::Ty> ty)
+OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateInitializer(ModalTy ty)
 {
   if (!ty) {
     return nullptr;
@@ -1145,7 +1146,7 @@ OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateInitializer(Ptr<Cang
   }
   if (ty->kind == Cangjie::AST::TypeKind::TYPE_VARRAY) {
     auto ret = MakeOwned<ArrayLit>();
-    auto varrayTy = RawStaticCast<Cangjie::AST::VArrayTy *>(ty);
+    auto varrayTy = RawStaticCast<Cangjie::AST::VArrayTy *>(ty.Ty());
     // Max size of varray: 65536
     int64_t safe_size = (varrayTy->size > 0 && varrayTy->size <= 65536) ? varrayTy->size : 0;
     for (int64_t i = 0; i < safe_size; i++) {
@@ -1163,10 +1164,10 @@ OwnedPtr<Cangjie::AST::Expr> CangjieCompilerInstance::CreateInitializer(Ptr<Cang
   return nullptr;
 }
 
-Ptr<AST::Ty> CangjieCompilerInstance::AddObjectToFunctionTy(Ptr<AST::Ty> fTy, Ptr<AST::Ty> objectTy)
+DataTy CangjieCompilerInstance::AddObjectToFunctionTy(DataTy fTy, ModalTy objectTy)
 {
-    auto funcTy = RawStaticCast<FuncTy*>(fTy);
-    std::vector<Ptr<Cangjie::AST::Ty>> ptys{objectTy};
+    auto funcTy = StaticCast<FuncTy>(fTy);
+    std::vector<ModalTy> ptys{objectTy};
     for (auto &pty : funcTy->paramTys) {
       ptys.emplace_back(pty);
     }
@@ -1200,8 +1201,8 @@ void CangjieCompilerInstance::AddCapturedvarsToCallExprOfLocalFunc()
             refExpr->ref.target = vd;
             refExpr->SetTy(vd->GetTy());
             param->SetTy(vd->GetTy());
-            fd->SetTy(AddObjectToFunctionTy(fd->GetTy(), vd->GetTy()));
-            re->SetTy(AddObjectToFunctionTy(re->GetTy(), vd->GetTy()));
+            fd->SetTy({AddObjectToFunctionTy(fd->DataTy(), vd->GetTy())});
+            re->SetTy({AddObjectToFunctionTy(re->DataTy(), vd->GetTy()), re->TyMode()});
             break;
           }
         }

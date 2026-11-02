@@ -130,7 +130,7 @@ struct AllocaAnalysisData {
   }
 };
 
-enum MemoryAccess {
+enum MemoryAccessKind {
   MemoryNone = 0,
   DefineMemory = 0b01,
   UseMemory = 0b10,
@@ -281,7 +281,7 @@ public:
   void visitMemorySelect(SelectInst *SI, SetVector<FieldInfo *> &AllocaDefs,
                          SetVector<FieldInfo *> &AllocaUses);
 
-  MemoryAccess hasMemoryDefineOrUseValue(Instruction *I,
+  MemoryAccessKind hasMemoryDefineOrUseValue(Instruction *I,
                                          SetVector<FieldInfo *> &AllocaDefs,
                                          SetVector<FieldInfo *> &AllocaUses);
 

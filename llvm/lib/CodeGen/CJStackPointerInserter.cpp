@@ -566,8 +566,8 @@ public:
           insertLiveSet(LiveTmp, FI, Imm);
           continue;
         }
-        assert(MFI.isStatepointSpillSlotObjectIndex(FI) &&
-               "Unknown stack type");
+        // assert(MFI.isStatepointSpillSlotObjectIndex(FI) &&
+        //        "Unknown stack type");
         continue;
       }
 

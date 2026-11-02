@@ -1,28 +1,4 @@
-/.gitcode/ @neilliuistaken
+/.gitcode/ @kkkkkkkbbbbbbb
 
-* @neilliuistaken
-
-/compiler-rt/ @duo-duo @wangyang594
-/llvm/ @duo-duo @wangyang594
-/lldb/ @zxudong
-/lld/ @duo-duo @wangyang594
-
-/bolt/ @neilliuistaken
-/clang/ @neilliuistaken
-/clang-tools-extra/ @neilliuistaken
-/cmake/ @neilliuistaken
-/cross-project-tests/ @neilliuistaken
-/flang/ @neilliuistaken
-/libc/ @neilliuistaken
-/libclc/ @neilliuistaken
-/libcxx/ @neilliuistaken
-/libcxxabi/ @neilliuistaken
-/libunwind/ @neilliuistaken
-/llvm-libgcc/ @neilliuistaken
-/mlir/ @neilliuistaken
-/openmp/ @neilliuistaken
-/polly/ @neilliuistaken
-/pstl/ @neilliuistaken
-/runtimes/ @neilliuistaken
-/third-party/ @neilliuistaken
-/utils/ @neilliuistaken
+* @yuqiaoyu
+lldb/ @kkkkkkkbbbbbbb

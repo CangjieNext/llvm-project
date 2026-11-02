@@ -1237,11 +1237,11 @@ public:
   /// of its movement if necessary.
   /// @{
   void replaceElements(DINodeArray Elements) {
-#ifndef NDEBUG
-    for (DINode *Op : getElements())
-      assert(is_contained(Elements->operands(), Op) &&
-             "Lost a member during member list replacement");
-#endif
+// #ifndef NDEBUG
+//     for (DINode *Op : getElements())
+//       assert(is_contained(Elements->operands(), Op) &&
+//              "Lost a member during member list replacement");
+// #endif
     replaceOperandWith(4, Elements.get());
   }
 

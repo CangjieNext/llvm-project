@@ -2817,6 +2817,7 @@ static bool isAllocSiteRemovable(Instruction *AI,
             Users.emplace_back(I);
             continue;
           case Intrinsic::cj_assign_generic:
+          case Intrinsic::cj_assign_local_generic:
             if (II->getArgOperand(1) == PI)
               return false;
             Users.emplace_back(I);
