@@ -408,7 +408,6 @@ public:
     if (AddFunc == nullptr) {
       FunctionType *FT = FunctionType::get(Bdr.getVoidTy(), {Bdr.getInt8PtrTy(1)}, false);
       AddFunc = M.declareCJRuntimeFunc("CJ_MCC_AddLocalFinalizer", FT, false);
-      AddFunc->addFnAttr(Attribute::get(CI->getContext(), "gc-leaf-function"));
     }
     if (auto *II = dyn_cast<InvokeInst>(CI)) {
       // For an InvokeInst the result is only valid on the normal path, so

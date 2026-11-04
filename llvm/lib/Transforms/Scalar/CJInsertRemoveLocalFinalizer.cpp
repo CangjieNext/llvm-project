@@ -454,7 +454,6 @@ bool LocalFinalizerRemover::run() {
     FunctionType *FT =
         FunctionType::get(Decl.getVoidTy(), {Decl.getInt8PtrTy(1)}, false);
     RemoveFunc = M.declareCJRuntimeFunc(RemoveLocalFinalizerName, FT, false);
-    RemoveFunc->addFnAttr(Attribute::get(F.getContext(), "gc-leaf-function"));
   }
 
   for (Instruction *Obj : Objs)
