@@ -538,64 +538,70 @@ public:
     }
   }
 
+  // Apply the transfer function of a single instruction when walking a basic
+  // block backwards: `LiveTmp` holds the stack pointers that are live after
+  // `MI`, and is updated to the stack pointers that are live before it.
+  void computeStackLiveStep(MachineInstr &MI, SetVector<SlotInfo> &LiveTmp) {
+    int FI;
+    unsigned MemBytes;
+
+    if (TII->isLoadFromStackSlot(MI, FI, MemBytes) && MemBytes == 8) {
+      int Imm = getLoadStackOffset(MI);
+      const AllocaInst *AI = MFI.getObjectAllocation(FI);
+      if (AI != nullptr) {
+        assert(MFI.isAliasedObjectIndex(FI));
+        if (isPointerByLocalStack(AI, Imm)) {
+          insertLiveSet(LiveTmp, FI, Imm);
+        }
+        return;
+      }
+      if (MFI.isFixedObjectIndex(FI)) {
+        if (isPointerByFixedObject(FI)) {
+          insertLiveSet(LiveTmp, FI, Imm);
+        }
+        return;
+      }
+      if (MFI.isSpillSlotObjectIndex(FI)) {
+        // The reload is a use point of the stack pointer.
+        insertLiveSet(LiveTmp, FI, Imm);
+        return;
+      }
+      assert(MFI.isStatepointSpillSlotObjectIndex(FI) &&
+             "Unknown stack type");
+      return;
+    }
+
+    if (TII->isStoreToStackSlot(MI, FI, MemBytes) && MemBytes == 8) {
+      int Imm = getStoreStackOffset(MI);
+      const AllocaInst *AI = MFI.getObjectAllocation(FI);
+      if (AI != nullptr) {
+        assert(MFI.isAliasedObjectIndex(FI));
+        if (isPointerByLocalStack(AI, Imm)) {
+          insertLiveSet(LiveTmp, FI, Imm);
+        }
+        return;
+      }
+      if (MFI.isFixedObjectIndex(FI)) {
+        if (isPointerByFixedObject(FI)) {
+          insertLiveSet(LiveTmp, FI, Imm);
+        }
+        return;
+      }
+      if (MFI.isSpillSlotObjectIndex(FI)) {
+        // The spill is a define point of the stack pointer.
+        removeLiveSet(LiveTmp, FI, Imm);
+        return;
+      }
+      assert(MFI.isStatepointSpillSlotObjectIndex(FI) &&
+             "Unknown stack type");
+    }
+  }
+
   void computeStackLiveIn(MachineBasicBlock::reverse_iterator Begin,
                           MachineBasicBlock::reverse_iterator End,
                           SetVector<SlotInfo> &LiveTmp) {
-    for (auto &MI : make_range(Begin, End)) {
-      int FI;
-      unsigned MemBytes;
-
-      if (TII->isLoadFromStackSlot(MI, FI, MemBytes) && MemBytes == 8) {
-        int Imm = getLoadStackOffset(MI);
-        const AllocaInst *AI = MFI.getObjectAllocation(FI);
-        if (AI != nullptr) {
-          assert(MFI.isAliasedObjectIndex(FI));
-          if (isPointerByLocalStack(AI, Imm)) {
-            insertLiveSet(LiveTmp, FI, Imm);
-          }
-          continue;
-        }
-        if (MFI.isFixedObjectIndex(FI)) {
-          if (isPointerByFixedObject(FI)) {
-            insertLiveSet(LiveTmp, FI, Imm);
-          }
-          continue;
-        }
-        if (MFI.isSpillSlotObjectIndex(FI)) {
-          // The reload is a use point of the stack pointer.
-          insertLiveSet(LiveTmp, FI, Imm);
-          continue;
-        }
-        assert(MFI.isStatepointSpillSlotObjectIndex(FI) &&
-               "Unknown stack type");
-        continue;
-      }
-
-      if (TII->isStoreToStackSlot(MI, FI, MemBytes) && MemBytes == 8) {
-        int Imm = getStoreStackOffset(MI);
-        const AllocaInst *AI = MFI.getObjectAllocation(FI);
-        if (AI != nullptr) {
-          assert(MFI.isAliasedObjectIndex(FI));
-          if (isPointerByLocalStack(AI, Imm)) {
-            insertLiveSet(LiveTmp, FI, Imm);
-          }
-          continue;
-        }
-        if (MFI.isFixedObjectIndex(FI)) {
-          if (isPointerByFixedObject(FI)) {
-            insertLiveSet(LiveTmp, FI, Imm);
-          }
-          continue;
-        }
-        if (MFI.isSpillSlotObjectIndex(FI)) {
-          // The spill is a define point of the stack pointer.
-          removeLiveSet(LiveTmp, FI, Imm);
-          continue;
-        }
-        assert(MFI.isStatepointSpillSlotObjectIndex(FI) &&
-               "Unknown stack type");
-      }
-    }
+    for (auto &MI : make_range(Begin, End))
+      computeStackLiveStep(MI, LiveTmp);
   }
 
   void computeStackLiveness() {
@@ -654,18 +660,40 @@ public:
     }
   }
 
-  void analyzeStatepointLiveness(MachineInstr *MI, CJStackLives &Lives) {
-    MachineBasicBlock *MBB = MI->getParent();
+  /// Compute the live stack pointer set of every statepoint of the function.
+  ///
+  /// Every basic block is walked backwards only once: the running live set is
+  /// snapshotted into each statepoint met during the walk. Restarting the walk
+  /// from the end of the block for every single statepoint made this analysis
+  /// quadratic in the block length, which dominated the compile time of huge
+  /// array literals (thousands of statepoints inside a single basic block).
+  void analyzeAllStatepointLiveness(
+      const SetVector<MachineInstr *> &Statepoints, StatepointLives &LiveData) {
+    for (MachineBasicBlock &MBB : MF) {
+      assert(LiveOut.count(&MBB));
 
-    // Note: The copy is intentional and required
-    assert(LiveOut.count(MBB));
-    SetVector<SlotInfo> LiveTmp = LiveOut[MBB];
+      size_t Remaining = 0;
+      for (MachineInstr &MI : MBB) {
+        if (Statepoints.count(&MI))
+          ++Remaining;
+      }
+      if (Remaining == 0)
+        continue;
 
-    computeStackLiveIn(MBB->rbegin(), ++MI->getIterator().getReverse(),
-                       LiveTmp);
-
-    // Records the alive stack pointer.
-    Lives.Slots.remove_if([&](SlotInfo V) { return !LiveTmp.contains(V); });
+      SetVector<SlotInfo> LiveTmp = LiveOut[&MBB];
+      for (auto It = MBB.rbegin(), End = MBB.rend(); It != End; ++It) {
+        MachineInstr &MI = *It;
+        if (Statepoints.count(&MI)) {
+          // `LiveTmp` is the live set of `MI` itself, so record it before the
+          // transfer function of `MI` is applied.
+          LiveData[&MI].Slots.remove_if(
+              [&](SlotInfo V) { return !LiveTmp.contains(V); });
+          if (--Remaining == 0)
+            break;
+        }
+        computeStackLiveStep(MI, LiveTmp);
+      }
+    }
   }
 
 private:
@@ -945,8 +973,11 @@ bool CJStackPointerInserter::runOnMachineFunction(MachineFunction &MF) {
 
   StackLives Live(MF, ArgPtrs);
   Live.computeStackLiveness();
+  // The liveness of all the statepoints is computed up front, in a single
+  // backwards walk per basic block, so that the rewrites below cannot affect
+  // the analysis of the statepoints that are still to be rewritten.
+  Live.analyzeAllStatepointLiveness(Statepoints, LiveData);
   for (auto *MI : Statepoints) {
-    Live.analyzeStatepointLiveness(MI, LiveData[MI]);
     if (rewriteStatepoint(MF, *MI, LiveData[MI], ArgPtrs)) {
       RemoveMI.push_back(MI);
     }
