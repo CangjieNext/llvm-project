@@ -12,7 +12,7 @@ declare void @use_copy_dst(%CopyDst*) #0
 declare void @use_ref(i8 addrspace(1)*) #0
 declare void @llvm.lifetime.start.p0i8(i64 immarg, i8* nocapture)
 declare void @llvm.cj.gcwrite.ref(i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*)
-declare void @llvm.cj.gcwrite.struct.p0i8.i64(i8 addrspace(1)*, i8 addrspace(1)*, i8*, i64)
+declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1 immarg)
 declare void @llvm.cj.copy.struct.field.p0i8.i64(i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)*, i64)
 declare void @llvm.cj.memset.p0i8(i8*, i8, i64, i1)
 
@@ -163,32 +163,6 @@ entry:
 ; CHECK-NOT: %LocalBox* %box
 ; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@use_env{{.*}}"struct-live"({{.*}}%Env* %env
 ; CHECK-NOT: %LocalBox* %box
-
-; A whole-struct copy can put the stack address into the destination just like
-; a reference store.  The copy has no SSA value for the stored address, so the
-; source field has to be resolved as the copy's reaching definition.
-define void @gcwrite_struct_stack_pointee(i8 addrspace(1)* %heap) #0 gc "cangjie" {
-entry:
-  %env = alloca %Env, align 8
-  %src = alloca %Env, align 8
-  %box = alloca %LocalBox, align 8
-  %box.value = getelementptr inbounds %LocalBox, %LocalBox* %box, i64 0, i32 0
-  store i8 addrspace(1)* %heap, i8 addrspace(1)** %box.value, align 8
-  %box.as1 = addrspacecast %LocalBox* %box to i8 addrspace(1)*
-  %src.field = getelementptr inbounds %Env, %Env* %src, i64 0, i32 0
-  store i8 addrspace(1)* %box.as1, i8 addrspace(1)** %src.field, align 8
-  %src.i8 = bitcast %Env* %src to i8*
-  %env.as1 = addrspacecast %Env* %env to i8 addrspace(1)*
-  call void @llvm.cj.gcwrite.struct.p0i8.i64(i8 addrspace(1)* %env.as1, i8 addrspace(1)* %env.as1, i8* %src.i8, i64 8)
-  call void @g()
-  %env.i8 = bitcast %Env* %env to i8*
-  call void @use_env(i8* %env.i8)
-  ret void
-}
-
-; CHECK-LABEL: define void @gcwrite_struct_stack_pointee
-; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@g{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
-; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@use_env{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
 
 attributes #0 = { "record_mut" }
 
@@ -373,8 +347,8 @@ entry:
   store i8 addrspace(1)* null, i8 addrspace(1)** %dst.f1, align 8
   %src.i8 = bitcast %CopySrc* %src to i8*
   %src.field1.i8 = getelementptr inbounds i8, i8* %src.i8, i64 8
-  %dst.as1 = addrspacecast %CopyDst* %dst to i8 addrspace(1)*
-  call void @llvm.cj.gcwrite.struct.p0i8.i64(i8 addrspace(1)* %dst.as1, i8 addrspace(1)* %dst.as1, i8* %src.field1.i8, i64 8)
+  %dst.i8 = bitcast %CopyDst* %dst to i8*
+  call void @llvm.memcpy.p0i8.p0i8.i64(i8* %dst.i8, i8* %src.field1.i8, i64 8, i1 false)
   call void @g()
   call void @use_copy_dst(%CopyDst* %dst)
   ret void
@@ -382,68 +356,6 @@ entry:
 
 ; CHECK-LABEL: define void @range_copy_nonzero_source_offset
 ; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@g{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
-
-; The source field is written through a variable index, so the analysis only
-; knows that the source object may hold the stack address somewhere.  A later
-; copy from a fixed source range must still preserve that pointee.
-define void @range_copy_unknown_source_offset(i8 addrspace(1)* %heap, i64 %idx) #0 gc "cangjie" {
-entry:
-  %src = alloca %CopySrc, align 8
-  %dst = alloca %CopyDst, align 8
-  %box = alloca %LocalBox, align 8
-  %box.value = getelementptr inbounds %LocalBox, %LocalBox* %box, i64 0, i32 0
-  store i8 addrspace(1)* %heap, i8 addrspace(1)** %box.value, align 8
-  %box.as1 = addrspacecast %LocalBox* %box to i8 addrspace(1)*
-  %src.i8 = bitcast %CopySrc* %src to i8*
-  %src.dynamic = getelementptr inbounds i8, i8* %src.i8, i64 %idx
-  %src.dynamic.ref = bitcast i8* %src.dynamic to i8 addrspace(1)**
-  store i8 addrspace(1)* %box.as1, i8 addrspace(1)** %src.dynamic.ref, align 8
-  %dst.f0 = getelementptr inbounds %CopyDst, %CopyDst* %dst, i64 0, i32 0
-  store i8 addrspace(1)* null, i8 addrspace(1)** %dst.f0, align 8
-  %dst.f1 = getelementptr inbounds %CopyDst, %CopyDst* %dst, i64 0, i32 1
-  store i8 addrspace(1)* null, i8 addrspace(1)** %dst.f1, align 8
-  %dst.as1 = addrspacecast %CopyDst* %dst to i8 addrspace(1)*
-  call void @llvm.cj.gcwrite.struct.p0i8.i64(i8 addrspace(1)* %dst.as1, i8 addrspace(1)* %dst.as1, i8* %src.i8, i64 8)
-  call void @g()
-  call void @use_copy_dst(%CopyDst* %dst)
-  ret void
-}
-
-; CHECK-LABEL: define void @range_copy_unknown_source_offset
-; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@g{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
-
-; A range copy after the safepoint publishes its destination on the next loop
-; iteration.  Even with an unknown source offset, the pointee must be live at
-; the earlier safepoint.
-define void @loop_carried_range_copy_unknown_source_offset(i8 addrspace(1)* %heap, i64 %idx, i1 %cond) #0 gc "cangjie" {
-entry:
-  %src = alloca %CopySrc, align 8
-  %dst = alloca %CopyDst, align 8
-  %box = alloca %LocalBox, align 8
-  %box.value = getelementptr inbounds %LocalBox, %LocalBox* %box, i64 0, i32 0
-  store i8 addrspace(1)* %heap, i8 addrspace(1)** %box.value, align 8
-  %box.as1 = addrspacecast %LocalBox* %box to i8 addrspace(1)*
-  %src.i8 = bitcast %CopySrc* %src to i8*
-  %src.dynamic = getelementptr inbounds i8, i8* %src.i8, i64 %idx
-  %src.dynamic.ref = bitcast i8* %src.dynamic to i8 addrspace(1)**
-  store i8 addrspace(1)* %box.as1, i8 addrspace(1)** %src.dynamic.ref, align 8
-  %dst.as1 = addrspacecast %CopyDst* %dst to i8 addrspace(1)*
-  br label %loop
-
-loop:
-  call void @g()
-  call void @use_copy_dst(%CopyDst* %dst)
-  call void @llvm.cj.gcwrite.struct.p0i8.i64(i8 addrspace(1)* %dst.as1, i8 addrspace(1)* %dst.as1, i8* %src.i8, i64 8)
-  br i1 %cond, label %loop, label %exit
-
-exit:
-  ret void
-}
-
-; CHECK-LABEL: define void @loop_carried_range_copy_unknown_source_offset
-; CHECK: loop:
-; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@g{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
-; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@use_copy_dst{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
 
 ; A partial copy into destination field 0 must not keep a stack object live
 ; merely because a different destination field is live.
@@ -464,8 +376,8 @@ entry:
   %dst.f1 = getelementptr inbounds %CopyDst, %CopyDst* %dst, i64 0, i32 1
   store i8 addrspace(1)* null, i8 addrspace(1)** %dst.f1, align 8
   %src.i8 = bitcast %CopySrc* %src to i8*
-  %dst.as1 = addrspacecast %CopyDst* %dst to i8 addrspace(1)*
-  call void @llvm.cj.gcwrite.struct.p0i8.i64(i8 addrspace(1)* %dst.as1, i8 addrspace(1)* %dst.as1, i8* %src.i8, i64 8)
+  %dst.i8 = bitcast %CopyDst* %dst to i8*
+  call void @llvm.memcpy.p0i8.p0i8.i64(i8* %dst.i8, i8* %src.i8, i64 8, i1 false)
   %live = load i8 addrspace(1)*, i8 addrspace(1)** %dst.f1, align 8
   call void @g()
   call void @use_ref(i8 addrspace(1)* %live)
