@@ -330,8 +330,7 @@ public:
   void addPointeeFields(Instruction *I, FieldInfo *Field,
                         SetVector<FieldInfo *> &Set);
 
-  void addStoredPointeeFields(Instruction *I, Value *V,
-                              SetVector<FieldInfo *> &Uses);
+  void addStoredPointeeFields(Value *V, SetVector<FieldInfo *> &Uses);
 
   void addSourcePointeeFields(Instruction *I, Value *V, uint64_t Size,
                               SetVector<FieldInfo *> &Uses);
