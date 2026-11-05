@@ -170,7 +170,7 @@ Function *getFinalizerMethod(GlobalVariable *Klass, Module *M) {
 
 static bool hasExceptionPath(BasicBlock *CreateBB) {
   SmallSet<BasicBlock *, 16> VisitedBB;
-  SmallVector<BasicBlock *, 8> Stack;
+  SmallVector<BasicBlock *> Stack;
   Stack.push_back(CreateBB);
   while (!Stack.empty()) {
     BasicBlock *BB = Stack.pop_back_val();
@@ -201,7 +201,7 @@ collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
   BasicBlock *Latch = L->getLoopLatch();
   if (!Latch)
     return false;
-  SmallVector<BasicBlock *, 4> ExitingBlocks;
+  SmallVector<BasicBlock *> ExitingBlocks;
   L->getExitingBlocks(ExitingBlocks);
   if (ExitingBlocks.size() != 1)
     return false;
@@ -218,7 +218,7 @@ collectLoopFinalizerInsertPoint(Instruction *NewFinalizer, BasicBlock *CreateBB,
   if (CreateBB != Latch)
     return false;
 
-  SmallVector<Value *, 16> Worklist;
+  SmallVector<Value *> Worklist;
   SmallPtrSet<Value *, 16> VisitedValues;
   Worklist.push_back(NewFinalizer);
   while (!Worklist.empty()) {
@@ -292,7 +292,7 @@ static void collectFinalizerInsertPointsImpl(
   }
 
   SmallSet<BasicBlock *, 16> VisitedBB;
-  SmallVector<BasicBlock *, 8> Stack;
+  SmallVector<BasicBlock *> Stack;
   Stack.push_back(CreateBB);
   bool HasUndominatedExit = false;
   while (!Stack.empty()) {
@@ -321,7 +321,7 @@ static void collectFinalizerInsertPointsImpl(
 static bool hasFinalizerInsertPoints(Instruction *NewFinalizer,
                                      BasicBlock *CreateBB, LoopInfo *LI,
                                      DominatorTree *DT) {
-  SmallVector<Instruction *, 4> Points;
+  SmallVector<Instruction *> Points;
   collectFinalizerInsertPointsImpl(NewFinalizer, CreateBB, LI, DT, Points);
   return !Points.empty();
 }
@@ -386,7 +386,7 @@ public:
     FinalizerMethod = nullptr;
     FinalizerInsertBB = nullptr;
     FinalizerKlass = nullptr;
-    SmallVector<Instruction *, 4> InsertPoints;
+    SmallVector<Instruction *> InsertPoints;
     if (!prepareFinalizer(InsertPoints)) {
       return false;
     }
@@ -411,7 +411,7 @@ public:
     for (Instruction *InsertPoint : InsertPoints) {
       IRBuilder<> Builder(InsertPoint);
       Value *ObjPtr = Builder.CreateAddrSpaceCast(NewInst, PI8AS1Ty);
-      SmallVector<Value *, 4> Args;
+      SmallVector<Value *> Args;
       Args.push_back(ObjPtr);
       if (FinalizerMethod->getFunctionType()->getNumParams() > 1) {
         Value *OuterTI = Builder.CreateBitCast(
@@ -715,7 +715,7 @@ private:
     Value *BI = IRB.CreateAddrSpaceCast(NewInst, PI8AS1Ty);
     OldInst->replaceAllUsesWith(BI);
     if (auto II = dyn_cast<InvokeInst>(OldInst)) {
-      IRBuilder BrIRB(OldInst);
+      IRBuilder<> BrIRB(OldInst);
       BrIRB.CreateBr(II->getNormalDest());
       BasicBlock *UnwindBB = II->getUnwindDest();
       UnwindBB->removePredecessor(OldInst->getParent());

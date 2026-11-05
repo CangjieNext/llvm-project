@@ -491,7 +491,7 @@ public:
   // IsLocalArray must be true for cj_malloc_local_array: the "fast_new_array"
   // marker makes the backend inline the NewArrayFast path, which bumps the
   // *normal* heap AllocBuffer (the one shared with CJ_MCC_NewObjectFast).
-  // A local-mode array allocated there lives in GC-heap memory that the
+  // A local-modal array allocated there lives in GC-heap memory that the
   // collector recycles and reuses on the normal schedule, while the
   // local-object root registries keep referencing it across GCs; concurrent
   // marking then dereferences the overwritten memory and crashes. Local
