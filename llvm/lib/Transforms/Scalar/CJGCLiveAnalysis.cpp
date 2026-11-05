@@ -1482,16 +1482,6 @@ void StructLiveAnalysis::addConditionalPublishUses(
   case Intrinsic::cj_gcwrite_ref:
     AddForField(getPointerArg(II), getValueArg(II), 0);
     return;
-  case Intrinsic::cj_gcwrite_struct: {
-    uint64_t Size = 0;
-    if (auto *C = dyn_cast<ConstantInt>(getSize(II)))
-      Size = C->getZExtValue();
-    FieldInfo *Dst = getStackFieldInfo(getDest(II));
-    if (!Dst || !isFieldLive(Dst, LiveAfter))
-      return;
-    addSourcePointeeFields(I, getSource(II), Size, Uses);
-    return;
-  }
   case Intrinsic::cj_gcread_struct: {
     uint64_t Size = 0;
     if (auto *C = dyn_cast<ConstantInt>(getSize(II)))
@@ -1654,13 +1644,6 @@ void StructLiveAnalysis::applyStackPointeeTransfer(Instruction *I,
   case Intrinsic::cj_gcread_static_ref:
   case Intrinsic::cj_gcread_static_struct:
     return;
-  case Intrinsic::cj_gcwrite_struct: {
-    uint64_t Size = 0;
-    if (auto *C = dyn_cast<ConstantInt>(getSize(II)))
-      Size = C->getZExtValue();
-    copyStackPointees(State, getDest(II), getSource(II), Size);
-    return;
-  }
   case Intrinsic::cj_gcread_struct: {
     uint64_t Size = 0;
     if (auto *C = dyn_cast<ConstantInt>(getSize(II)))
@@ -1908,15 +1891,6 @@ void StructLiveAnalysis::visitMemoryIntrinsic(
     }
     addGCFieldsByMemory(II->getArgOperand(1), AllocaDefs, MemSize);
     addGCFieldsByMemory(II->getArgOperand(3), AllocaUses, MemSize);
-    break;
-  }
-  // cj.gcwrite.struct(AS(1) *basePtr, AS(1) *dstPtr, anyAS *srcPtr, size)
-  case Intrinsic::cj_gcwrite_struct: {
-    uint64_t MemSize = 0;
-    if (auto Size = dyn_cast<ConstantInt>(getSize(II))) {
-      MemSize = Size->getZExtValue();
-    }
-    addGCFieldsByMemory(getSource(II), AllocaUses, MemSize);
     break;
   }
   // cj.gcread.static.struct(AS(0) *dstPtr, AS(0) *srcPtr, size)
