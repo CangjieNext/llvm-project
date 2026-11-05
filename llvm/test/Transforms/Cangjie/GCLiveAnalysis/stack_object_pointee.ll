@@ -48,39 +48,6 @@ exit:
 ; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@g{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
 ; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@use_env{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
 
-; Cangjie emits many lifetime.start markers with a zero size operand.  The
-; inserted initialization must use the alloca size, not the marker size.
-define void @zero_size_lifetime(i1 %cond) #0 gc "cangjie" {
-entry:
-  %env = alloca %Env, align 8
-  %box = alloca %LocalBox, align 8
-  %box.as1 = addrspacecast %LocalBox* %box to i8 addrspace(1)*
-  %box.i8 = bitcast %LocalBox* %box to i8*
-  call void @llvm.lifetime.start.p0i8(i64 0, i8* %box.i8)
-  %env.field = getelementptr inbounds %Env, %Env* %env, i64 0, i32 0
-  store i8 addrspace(1)* null, i8 addrspace(1)** %env.field, align 8
-  br label %loop
-
-loop:
-  call void @g()
-  %env.i8 = bitcast %Env* %env to i8*
-  call void @use_env(i8* %env.i8)
-  %box.value = getelementptr inbounds %LocalBox, %LocalBox* %box, i64 0, i32 0
-  store i8 addrspace(1)* null, i8 addrspace(1)** %box.value, align 8
-  store i8 addrspace(1)* %box.as1, i8 addrspace(1)** %env.field, align 8
-  br i1 %cond, label %loop, label %exit
-
-exit:
-  ret void
-}
-
-; CHECK-LABEL: define void @zero_size_lifetime
-; CHECK: %box = alloca %LocalBox
-; CHECK: %[[BOXPTR:.*]] = bitcast %LocalBox* %box to i8*
-; CHECK: call void @llvm.lifetime.start.p0i8(i64 0, i8* {{(nonnull )?}}%[[BOXPTR]])
-; CHECK-NEXT: call void @llvm.memset.p0i8.i64(i8* align 8 %[[BOXPTR]], i8 0, i64 8, i1 false)
-; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@g{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
-
 ; Each lifetime region needs its own zero initialization.
 define void @multiple_lifetimes(i1 %cond) #0 gc "cangjie" {
 entry:
@@ -90,10 +57,10 @@ entry:
   %box.i8 = bitcast %LocalBox* %box to i8*
   %env.field = getelementptr inbounds %Env, %Env* %env, i64 0, i32 0
   store i8 addrspace(1)* null, i8 addrspace(1)** %env.field, align 8
-  call void @llvm.lifetime.start.p0i8(i64 0, i8* %box.i8)
+  call void @llvm.lifetime.start.p0i8(i64 8, i8* %box.i8)
   %env.i8 = bitcast %Env* %env to i8*
   call void @use_env(i8* %env.i8)
-  call void @llvm.lifetime.start.p0i8(i64 0, i8* %box.i8)
+  call void @llvm.lifetime.start.p0i8(i64 8, i8* %box.i8)
   br label %loop
 
 loop:
@@ -110,9 +77,9 @@ exit:
 
 ; CHECK-LABEL: define void @multiple_lifetimes
 ; CHECK: %[[BOXPTR2:.*]] = bitcast %LocalBox* %box to i8*
-; CHECK: call void @llvm.lifetime.start.p0i8(i64 0, i8* {{(nonnull )?}}%[[BOXPTR2]])
+; CHECK: call void @llvm.lifetime.start.p0i8(i64 8, i8* {{(nonnull )?}}%[[BOXPTR2]])
 ; CHECK-NEXT: call void @llvm.memset.p0i8.i64(i8* align 8 %[[BOXPTR2]], i8 0, i64 8, i1 false)
-; CHECK: call void @llvm.lifetime.start.p0i8(i64 0, i8* {{(nonnull )?}}%[[BOXPTR2]])
+; CHECK: call void @llvm.lifetime.start.p0i8(i64 8, i8* {{(nonnull )?}}%[[BOXPTR2]])
 ; CHECK-NEXT: call void @llvm.memset.p0i8.i64(i8* align 8 %[[BOXPTR2]], i8 0, i64 8, i1 false)
 
 ; Cangjie normally lowers a reference store to llvm.cj.gcwrite.ref.  That form

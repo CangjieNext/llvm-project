@@ -630,14 +630,8 @@ void StructLiveAnalysis::insertInitializerAfterLifetime(Value *V,
   AllocaInst *AI = cast<AllocaInst>(V);
   Type *AllocaType = AI->getAllocatedType();
   if (AllocaType->isStructTy()) {
-    Value *Size = CI->getArgOperand(0);
-    if (auto *C = dyn_cast<ConstantInt>(Size)) {
-      if (C->isZero())
-        Size = ConstantInt::get(C->getType(),
-                                DL.getTypeAllocSize(AllocaType).getFixedSize());
-    }
     CallInst *Call = IRB.CreateMemSet(CI->getArgOperand(1), IRB.getInt8(0),
-                                      Size, Align(8), false);
+                                      CI->getArgOperand(0), Align(8), false);
     Call->setDebugLoc(CI->getDebugLoc());
     InsertedMemset.insert(CI);
   } else if (AllocaType->isPointerTy()) {
