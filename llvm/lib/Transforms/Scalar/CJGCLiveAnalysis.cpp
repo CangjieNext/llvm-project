@@ -1454,18 +1454,16 @@ bool StructLiveAnalysis::isFieldLive(FieldInfo *Field,
 void StructLiveAnalysis::addConditionalPublishUses(
     Instruction *I, const StructLiveSetTy &LiveAfter,
     SetVector<FieldInfo *> &Uses) {
-  auto AddForField = [&](Value *Ptr, Value *Published, uint64_t Size) {
+  auto AddForField = [&](Value *Ptr, Value *Published) {
     FieldInfo *Field = getBarrierFieldInfo(Ptr);
     if (!Field || !isFieldLive(Field, LiveAfter))
       return;
     if (Published->getType()->isPointerTy())
-      addStoredPointeeFields(I, Published, Uses);
-    if (Size > 0)
-      addSourcePointeeFields(I, Published, Size, Uses);
+      addStoredPointeeFields(Published, Uses);
   };
 
   if (auto *SI = dyn_cast<StoreInst>(I)) {
-    AddForField(SI->getPointerOperand(), SI->getValueOperand(), 0);
+    AddForField(SI->getPointerOperand(), SI->getValueOperand());
     return;
   }
 
@@ -1480,18 +1478,8 @@ void StructLiveAnalysis::addConditionalPublishUses(
   default:
     return;
   case Intrinsic::cj_gcwrite_ref:
-    AddForField(getPointerArg(II), getValueArg(II), 0);
+    AddForField(getPointerArg(II), getValueArg(II));
     return;
-  case Intrinsic::cj_gcread_struct: {
-    uint64_t Size = 0;
-    if (auto *C = dyn_cast<ConstantInt>(getSize(II)))
-      Size = C->getZExtValue();
-    FieldInfo *Dst = getStackFieldInfo(getDest(II));
-    if (!Dst || !isFieldLive(Dst, LiveAfter))
-      return;
-    addSourcePointeeFields(I, getSource(II), Size, Uses);
-    return;
-  }
   case Intrinsic::memcpy:
   case Intrinsic::memmove: {
     uint64_t Size = 0;
@@ -1503,40 +1491,6 @@ void StructLiveAnalysis::addConditionalPublishUses(
     addSourcePointeeFields(I, II->getArgOperand(1), Size, Uses);
     return;
   }
-  case Intrinsic::cj_array_copy_ref:
-  case Intrinsic::cj_array_copy_struct:
-  case Intrinsic::cj_array_copy_generic: {
-    uint64_t Size = 0;
-    if (auto *C = dyn_cast<ConstantInt>(getSize(II)))
-      Size = C->getZExtValue();
-    FieldInfo *Dst = getStackFieldInfo(getDest(II));
-    if (!Dst || !isFieldLive(Dst, LiveAfter))
-      return;
-    addSourcePointeeFields(I, getSource(II), Size, Uses);
-    return;
-  }
-  case Intrinsic::cj_copy_struct_field: {
-    uint64_t Size = 0;
-    if (auto *C = dyn_cast<ConstantInt>(II->getArgOperand(4)))
-      Size = C->getZExtValue();
-    FieldInfo *Dst = getStackFieldInfo(II->getArgOperand(1));
-    if (!Dst || !isFieldLive(Dst, LiveAfter))
-      return;
-    addSourcePointeeFields(I, II->getArgOperand(3), Size, Uses);
-    return;
-  }
-  case Intrinsic::cj_atomic_store:
-    AddForField(II->getArgOperand(AtomicStore::Field),
-                II->getArgOperand(AtomicStore::Ref), 0);
-    return;
-  case Intrinsic::cj_atomic_swap:
-    AddForField(II->getArgOperand(AtomicSwap::Field),
-                II->getArgOperand(AtomicSwap::Ref), 0);
-    return;
-  case Intrinsic::cj_atomic_compare_swap:
-    AddForField(II->getArgOperand(AtomicCompareSwap::Field),
-                II->getArgOperand(AtomicCompareSwap::NewRef), 0);
-    return;
   }
 }
 
@@ -1572,9 +1526,8 @@ void StructLiveAnalysis::addPointeeFields(Instruction *I, FieldInfo *Field,
   }
 }
 
-void StructLiveAnalysis::addStoredPointeeFields(Instruction *I, Value *V,
+void StructLiveAnalysis::addStoredPointeeFields(Value *V,
                                                 SetVector<FieldInfo *> &Uses) {
-  (void)I;
   SetVector<Value *> Pointees;
   collectStackObjectPointees(V, Pointees);
   for (Value *Pointee : Pointees)
@@ -1639,18 +1592,6 @@ void StructLiveAnalysis::applyStackPointeeTransfer(Instruction *I,
     setStackPointees(State, Field, Pointees);
     return;
   }
-  case Intrinsic::cj_gcwrite_static_ref:
-  case Intrinsic::cj_gcwrite_static_struct:
-  case Intrinsic::cj_gcread_static_ref:
-  case Intrinsic::cj_gcread_static_struct:
-    return;
-  case Intrinsic::cj_gcread_struct: {
-    uint64_t Size = 0;
-    if (auto *C = dyn_cast<ConstantInt>(getSize(II)))
-      Size = C->getZExtValue();
-    copyStackPointees(State, getDest(II), getSource(II), Size);
-    return;
-  }
   case Intrinsic::memcpy:
   case Intrinsic::memmove: {
     uint64_t Size = 0;
@@ -1667,64 +1608,8 @@ void StructLiveAnalysis::applyStackPointeeTransfer(Instruction *I,
     clearStackPointees(State, II->getArgOperand(0), Size);
     return;
   }
-  case Intrinsic::cj_array_copy_ref:
-  case Intrinsic::cj_array_copy_struct:
-  case Intrinsic::cj_array_copy_generic: {
-    uint64_t Size = 0;
-    if (auto *C = dyn_cast<ConstantInt>(getSize(II)))
-      Size = C->getZExtValue();
-    copyStackPointees(State, getDest(II), getSource(II), Size);
-    return;
-  }
-  case Intrinsic::cj_copy_struct_field: {
-    uint64_t Size = 0;
-    if (auto *C = dyn_cast<ConstantInt>(II->getArgOperand(4)))
-      Size = C->getZExtValue();
-    copyStackPointees(State, II->getArgOperand(1), II->getArgOperand(3), Size);
-    return;
-  }
-  case Intrinsic::cj_atomic_store: {
-    Value *Ptr = II->getArgOperand(AtomicStore::Field);
-    FieldInfo *Field = getBarrierFieldInfo(Ptr);
-    if (!Field)
-      return;
-    State.erase(Field);
-    SetVector<Value *> Pointees;
-    collectStackObjectPointees(II->getArgOperand(AtomicStore::Ref), Pointees);
-    setStackPointees(State, Field, Pointees);
-    return;
-  }
-  case Intrinsic::cj_atomic_swap: {
-    Value *Ptr = II->getArgOperand(AtomicSwap::Field);
-    FieldInfo *Field = getBarrierFieldInfo(Ptr);
-    if (!Field)
-      return;
-    State.erase(Field);
-    SetVector<Value *> Pointees;
-    collectStackObjectPointees(II->getArgOperand(AtomicSwap::Ref), Pointees);
-    setStackPointees(State, Field, Pointees);
-    return;
-  }
-  case Intrinsic::cj_atomic_compare_swap: {
-    Value *Ptr = II->getArgOperand(AtomicCompareSwap::Field);
-    FieldInfo *Field = getBarrierFieldInfo(Ptr);
-    if (!Field)
-      return;
-    SetVector<Value *> Pointees;
-    auto It = State.find(Field);
-    if (It != State.end())
-      Pointees = It->second;
-    SetVector<Value *> NewPointees;
-    collectStackObjectPointees(II->getArgOperand(AtomicCompareSwap::NewRef),
-                               NewPointees);
-    Pointees.set_union(NewPointees);
-    setStackPointees(State, Field, Pointees);
-    return;
-  }
   case Intrinsic::lifetime_start:
     clearStackPointees(State, II->getArgOperand(1), 0);
-    return;
-  case Intrinsic::lifetime_end:
     return;
   }
 }
@@ -1769,7 +1654,7 @@ void StructLiveAnalysis::computeStackPointeeStates() {
   for (BasicBlock &BB : F) {
     StackPointeeState State = StackPointeeIn[&BB];
     for (Instruction &I : BB) {
-      if (isa<CallBase>(I) || isa<StoreInst>(I) || isa<SelectInst>(I))
+      if (isa<CallBase>(I))
         StackPointeeBefore[&I] = State;
       applyStackPointeeTransfer(&I, State);
     }
@@ -1784,7 +1669,7 @@ void StructLiveAnalysis::computeStackPointeeStates() {
 
 void StructLiveAnalysis::expandStackPointees(CallBase *Call,
                                              StructLiveSetTy &FieldInfos) {
-  if (StackPointeeBefore.empty() || FieldInfos.empty())
+  if (FieldInfos.empty())
     return;
   auto StateIt = StackPointeeBefore.find(Call);
   if (StateIt == StackPointeeBefore.end() || StateIt->second.empty())
@@ -1846,7 +1731,7 @@ void StructLiveAnalysis::visitMemoryStore(StoreInst *SI,
     if (isa<AllocaInst>(Base) || isa<Argument>(Base))
       AllocaDefs.insert(Field);
     if (ValType->isPointerTy())
-      addStoredPointeeFields(SI, SI->getValueOperand(), AllocaUses);
+      addStoredPointeeFields(SI->getValueOperand(), AllocaUses);
   } else {
     Value *BasePtr = findMemoryBasePointer(Ptr);
     // Only if the PointerType and ValueType of Store Inst are equal,
@@ -1864,17 +1749,6 @@ void StructLiveAnalysis::visitMemoryIntrinsic(
   default:
     // fall through to general call handling
     break;
-  case Intrinsic::cj_gcwrite_ref: {
-    Value *Ptr = getPointerArg(II);
-    FieldInfo *Field = getBarrierFieldInfo(Ptr);
-    if (Field && (isa<AllocaInst>(Field->V) || isa<Argument>(Field->V)))
-      AllocaDefs.insert(Field);
-    Value *Base = getBaseObj(II);
-    if (Base)
-      addGCFieldsByMemory(Base, AllocaUses, 0);
-    addStoredPointeeFields(II, getValueArg(II), AllocaUses);
-    break;
-  }
   // cj.gcwrite.static.struct(AS(0) *dstPtr, AS(0) *srcPtr, size)
   case Intrinsic::cj_gcwrite_static_struct: {
     uint64_t MemSize = 0;
@@ -1882,15 +1756,6 @@ void StructLiveAnalysis::visitMemoryIntrinsic(
       MemSize = Size->getZExtValue();
     }
     addGCFieldsByMemory(getSource(II), AllocaUses, MemSize);
-    break;
-  }
-  case Intrinsic::cj_copy_struct_field: {
-    uint64_t MemSize = 0;
-    if (auto Size = dyn_cast<ConstantInt>(II->getArgOperand(4))) {
-      MemSize = Size->getZExtValue();
-    }
-    addGCFieldsByMemory(II->getArgOperand(1), AllocaDefs, MemSize);
-    addGCFieldsByMemory(II->getArgOperand(3), AllocaUses, MemSize);
     break;
   }
   // cj.gcread.static.struct(AS(0) *dstPtr, AS(0) *srcPtr, size)

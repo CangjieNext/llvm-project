@@ -13,7 +13,6 @@ declare void @use_ref(i8 addrspace(1)*) #0
 declare void @llvm.lifetime.start.p0i8(i64 immarg, i8* nocapture)
 declare void @llvm.cj.gcwrite.ref(i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*)
 declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1 immarg)
-declare void @llvm.cj.copy.struct.field.p0i8.i64(i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)*, i64)
 declare void @llvm.cj.memset.p0i8(i8*, i8, i64, i1)
 
 %CopySrc = type { i8 addrspace(1)*, i8 addrspace(1)* }
@@ -411,98 +410,4 @@ entry:
 }
 
 ; CHECK-LABEL: define void @whole_object_liveness_direct_store
-; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@g{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
-
-; An atomic reference write is another way to publish a stack object address.
-; The runtime cannot follow that stack address, so the pointee must be live.
-%AtomicEnv = type { i8 addrspace(1)* }
-declare void @use_atomic_env(%AtomicEnv*) #0
-declare void @llvm.cj.atomic.store(i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*, i32)
-declare i8 addrspace(1)* @llvm.cj.atomic.swap(i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*, i32)
-declare i1 @llvm.cj.atomic.compare.swap(i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)*, i8 addrspace(1)* addrspace(1)*, i32, i32)
-
-define void @atomic_store_stack_pointee(i8 addrspace(1)* %heap) #0 gc "cangjie" {
-entry:
-  %env = alloca %AtomicEnv, align 8
-  %box = alloca %LocalBox, align 8
-  %box.value = getelementptr inbounds %LocalBox, %LocalBox* %box, i64 0, i32 0
-  store i8 addrspace(1)* %heap, i8 addrspace(1)** %box.value, align 8
-  %box.as1 = addrspacecast %LocalBox* %box to i8 addrspace(1)*
-  %env.as1 = addrspacecast %AtomicEnv* %env to i8 addrspace(1)*
-  %env.f0.as1 = getelementptr inbounds %AtomicEnv, %AtomicEnv* %env, i64 0, i32 0
-  %env.f0.as11 = addrspacecast i8 addrspace(1)** %env.f0.as1 to i8 addrspace(1)* addrspace(1)*
-  call void @llvm.cj.atomic.store(i8 addrspace(1)* %box.as1, i8 addrspace(1)* %env.as1, i8 addrspace(1)* addrspace(1)* %env.f0.as11, i32 5)
-  call void @g()
-  call void @use_atomic_env(%AtomicEnv* %env)
-  ret void
-}
-
-; CHECK-LABEL: define void @atomic_store_stack_pointee
-; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@g{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
-
-define void @atomic_swap_stack_pointee(i8 addrspace(1)* %heap) #0 gc "cangjie" {
-entry:
-  %env = alloca %AtomicEnv, align 8
-  %box = alloca %LocalBox, align 8
-  %box.value = getelementptr inbounds %LocalBox, %LocalBox* %box, i64 0, i32 0
-  store i8 addrspace(1)* %heap, i8 addrspace(1)** %box.value, align 8
-  %box.as1 = addrspacecast %LocalBox* %box to i8 addrspace(1)*
-  %env.as1 = addrspacecast %AtomicEnv* %env to i8 addrspace(1)*
-  %env.f0.as1 = getelementptr inbounds %AtomicEnv, %AtomicEnv* %env, i64 0, i32 0
-  %env.f0.as11 = addrspacecast i8 addrspace(1)** %env.f0.as1 to i8 addrspace(1)* addrspace(1)*
-  %old = call i8 addrspace(1)* @llvm.cj.atomic.swap(i8 addrspace(1)* %box.as1, i8 addrspace(1)* %env.as1, i8 addrspace(1)* addrspace(1)* %env.f0.as11, i32 5)
-  call void @g()
-  call void @use_atomic_env(%AtomicEnv* %env)
-  ret void
-}
-
-; CHECK-LABEL: define void @atomic_swap_stack_pointee
-; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@g{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
-
-define void @atomic_compare_swap_stack_pointee(i8 addrspace(1)* %heap) #0 gc "cangjie" {
-entry:
-  %env = alloca %AtomicEnv, align 8
-  %box = alloca %LocalBox, align 8
-  %box.value = getelementptr inbounds %LocalBox, %LocalBox* %box, i64 0, i32 0
-  store i8 addrspace(1)* %heap, i8 addrspace(1)** %box.value, align 8
-  %box.as1 = addrspacecast %LocalBox* %box to i8 addrspace(1)*
-  %env.as1 = addrspacecast %AtomicEnv* %env to i8 addrspace(1)*
-  %env.f0.as1 = getelementptr inbounds %AtomicEnv, %AtomicEnv* %env, i64 0, i32 0
-  %env.f0.as11 = addrspacecast i8 addrspace(1)** %env.f0.as1 to i8 addrspace(1)* addrspace(1)*
-  %ok = call i1 @llvm.cj.atomic.compare.swap(i8 addrspace(1)* null, i8 addrspace(1)* %box.as1, i8 addrspace(1)* %env.as1, i8 addrspace(1)* addrspace(1)* %env.f0.as11, i32 5, i32 5)
-  call void @g()
-  call void @use_atomic_env(%AtomicEnv* %env)
-  ret void
-}
-
-; CHECK-LABEL: define void @atomic_compare_swap_stack_pointee
-; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@g{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
-
-; cj.copy.struct.field copies a field range just like array_copy.  Its source
-; field can contain a stack object address, which the runtime cannot follow.
-define void @copy_struct_field_stack_pointee(i8 addrspace(1)* %heap) #0 gc "cangjie" {
-entry:
-  %src = alloca %CopySrc, align 8
-  %dst = alloca %CopyDst, align 8
-  %box = alloca %LocalBox, align 8
-  %box.value = getelementptr inbounds %LocalBox, %LocalBox* %box, i64 0, i32 0
-  store i8 addrspace(1)* %heap, i8 addrspace(1)** %box.value, align 8
-  %box.as1 = addrspacecast %LocalBox* %box to i8 addrspace(1)*
-  %src.f0 = getelementptr inbounds %CopySrc, %CopySrc* %src, i64 0, i32 0
-  store i8 addrspace(1)* %box.as1, i8 addrspace(1)** %src.f0, align 8
-  %src.f1 = getelementptr inbounds %CopySrc, %CopySrc* %src, i64 0, i32 1
-  store i8 addrspace(1)* null, i8 addrspace(1)** %src.f1, align 8
-  %dst.f0 = getelementptr inbounds %CopyDst, %CopyDst* %dst, i64 0, i32 0
-  store i8 addrspace(1)* null, i8 addrspace(1)** %dst.f0, align 8
-  %dst.f1 = getelementptr inbounds %CopyDst, %CopyDst* %dst, i64 0, i32 1
-  store i8 addrspace(1)* null, i8 addrspace(1)** %dst.f1, align 8
-  %src.as1 = addrspacecast %CopySrc* %src to i8 addrspace(1)*
-  %dst.as1 = addrspacecast %CopyDst* %dst to i8 addrspace(1)*
-  call void @llvm.cj.copy.struct.field.p0i8.i64(i8 addrspace(1)* %dst.as1, i8 addrspace(1)* %dst.as1, i8 addrspace(1)* %src.as1, i8 addrspace(1)* %src.as1, i64 8)
-  call void @g()
-  call void @use_copy_dst(%CopyDst* %dst)
-  ret void
-}
-
-; CHECK-LABEL: define void @copy_struct_field_stack_pointee
 ; CHECK: call token (...) @llvm.cj.gc.statepoint({{.*}}@g{{.*}}"struct-live"({{.*}}%LocalBox* %box{{.*}})
